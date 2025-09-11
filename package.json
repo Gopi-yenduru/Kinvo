@@ -1,0 +1,66 @@
+{
+  "name": "medical-intake-voice-agent",
+  "version": "1.0.0",
+  "description": "Revolutionary AI-powered medical intake system with real-time voice processing and professional medical-grade UI",
+  "main": "index.js",
+  "scripts": {
+    "setup": "chmod +x setup.sh && ./setup.sh",
+    "install:all": "npm run install:backend && npm run install:frontend",
+    "install:backend": "cd backend && npm install",
+    "install:frontend": "cd frontend && npm install",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "npm run build:backend && npm run build:frontend",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "start": "concurrently \"npm run start:backend\" \"npm run start:frontend\"",
+    "start:backend": "cd backend && npm start",
+    "start:frontend": "cd frontend && npm run preview",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "cd backend && npm test",
+    "test:frontend": "cd frontend && npm test",
+    "clean": "npm run clean:backend && npm run clean:frontend",
+    "clean:backend": "cd backend && rm -rf node_modules dist",
+    "clean:frontend": "cd frontend && rm -rf node_modules dist",
+    "lint": "npm run lint:backend && npm run lint:frontend",
+    "lint:backend": "cd backend && npm run lint",
+    "lint:frontend": "cd frontend && npm run lint",
+    "type-check": "npm run type-check:backend && npm run type-check:frontend",
+    "type-check:backend": "cd backend && npm run type-check",
+    "type-check:frontend": "cd frontend && npm run type-check"
+  },
+  "keywords": [
+    "medical",
+    "ai",
+    "voice",
+    "intake",
+    "healthcare",
+    "openai",
+    "realtime",
+    "typescript",
+    "react",
+    "node.js"
+  ],
+  "author": "Medical Intake Voice Agent Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-username/medical-intake-voice-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/medical-intake-voice-agent/issues"
+  },
+  "homepage": "https://github.com/your-username/medical-intake-voice-agent#readme",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ]
+}
