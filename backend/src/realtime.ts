@@ -203,254 +203,6 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 
   // Handle responses from OpenAI Realtime API
-  /* private handleRealtimeResponse(sessionId: string, data: Buffer) {
-    try {
-      const event = JSON.parse(data.toString());
-      console.log(`Realtime event for ${sessionId}:`, event.type);
-
-      const frontendWs = this.frontendSockets.get(sessionId);
-      if (!frontendWs) {
-        console.warn(`No frontend WebSocket found for session ${sessionId}`);
-        return;
-      }
-
-      switch (event.type) {
-        case 'session.created':
-          console.log(`Session created for ${sessionId}`);
-          frontendWs.send(JSON.stringify({
-            type: 'session_ready',
-            sessionId: sessionId
-          }));
-          break;
-
-        case 'input_audio_buffer.speech_started':
-          console.log(`Speech started for ${sessionId}`);
-          break;
-
-        case 'input_audio_buffer.speech_stopped':
-          console.log(`Speech stopped for ${sessionId}`);
-          break;
-
-        case 'response.created':
-          // Clear previous agent response buffers for new response
-          this.agentTextBuffers.set(sessionId, '');
-          this.agentFrontendBuffers.set(sessionId, '');
-          console.log(`New agent response starting for ${sessionId}`);
-          break;
-
-        case 'conversation.item.created':
-          // Handle conversation items (may contain agent responses)
-          if (event.item && event.item.role === 'assistant') {
-            const messageText = event.item.content?.[0]?.text || event.item.content?.[0]?.['text'] || '';
-            if (messageText && !this.isDuplicateAgentResponse(sessionId, messageText)) {
-              console.log(`📝 Agent response via conversation item: "${messageText}"`);
-              db.saveConversationLog(sessionId, 'agent', messageText, { type: 'conversation_item', source: 'conversation.item.created' }, new Date().toISOString());
-              db.logAuditEvent('agent_response_via_conversation', { text: messageText }, sessionId);
-            }
-          }
-          break;
-
-        case 'response.text.delta':
-          // Accumulate agent text response
-          const currentBuffer = this.agentTextBuffers.get(sessionId) || '';
-          const newBuffer = currentBuffer + event.delta;
-          this.agentTextBuffers.set(sessionId, newBuffer);
-
-          console.log(`📝 Agent text delta: "${event.delta}" (buffer length: ${newBuffer.length})`);
-
-          // Forward agent text response to frontend
-          frontendWs.send(JSON.stringify({
-            type: 'agent_speech',
-            text: event.delta,
-            timestamp: new Date().toISOString()
-          }));
-
-          // Backup: accumulate agent speech sent to frontend
-          const currentFrontendBuffer = this.agentFrontendBuffers.get(sessionId) || '';
-          const newFrontendBuffer = currentFrontendBuffer + event.delta;
-          this.agentFrontendBuffers.set(sessionId, newFrontendBuffer);
-          break;
-
-        case 'response.audio.delta':
-          // Forward agent audio chunk response to frontend (incremental accumulation)
-          if (event.delta) {
-            frontendWs.send(JSON.stringify({
-              type: 'agent_audio_chunk',
-              audio: event.delta,
-              timestamp: new Date().toISOString()
-            }));
-            console.log(`✅ Forwarded audio chunk (${event.delta.length} chars) to frontend for ${sessionId}`);
-          }
-          break;
-
-        case 'response.audio_transcript.delta':
-          // Accumulate agent audio transcript (this contains the actual text of agent responses)
-          if (event.delta) {
-            const currentBuffer = this.agentTextBuffers.get(sessionId) || '';
-            const newBuffer = currentBuffer + event.delta;
-            this.agentTextBuffers.set(sessionId, newBuffer);
-
-            console.log(`🎵 Agent audio transcript delta: "${event.delta}" (buffer length: ${newBuffer.length})`);
-
-            // Forward agent transcript to frontend
-            console.log(`🔊 Sending agent_transcript_delta to frontend: "${event.delta}"`);
-            frontendWs.send(JSON.stringify({
-              type: 'agent_transcript_delta',
-              text: event.delta,
-              timestamp: new Date().toISOString()
-            }));
-          }
-          break;
-
-        case 'response.audio_transcript.done':
-          // Save complete agent transcript to database (with deduplication)
-          if (event.transcript && !this.isDuplicateAgentResponse(sessionId, event.transcript)) {
-            console.log(`🎵 Agent audio transcript complete: "${event.transcript}"`);
-            db.saveConversationLog(sessionId, 'agent', event.transcript, {
-              type: 'audio_transcript_complete',
-              source: 'response.audio_transcript.done'
-            }, new Date().toISOString());
-            db.logAuditEvent('agent_audio_transcript', { text: event.transcript }, sessionId);
-
-            // Forward complete transcript to frontend
-            frontendWs.send(JSON.stringify({
-              type: 'agent_transcript_complete',
-              transcript: event.transcript,
-              timestamp: new Date().toISOString()
-            }));
-          }
-          break;
-
-        case 'response.audio.done':
-          console.log(`Agent audio completed for ${sessionId}`);
-
-          // Save accumulated agent response to database - use main buffer or frontend buffer as fallback
-          let fullAgentResponse = this.agentTextBuffers.get(sessionId) || '';
-          let bufferUsed = 'main_buffer';
-
-          if (!fullAgentResponse.trim()) {
-            // Fallback to frontend buffer if main buffer is empty
-            fullAgentResponse = this.agentFrontendBuffers.get(sessionId) || '';
-            bufferUsed = 'frontend_buffer';
-          }
-
-          if (fullAgentResponse.trim() && !this.isDuplicateAgentResponse(sessionId, fullAgentResponse)) {
-            console.log(`📝 Saving agent response to conversation log (using ${bufferUsed}): "${fullAgentResponse}"`);
-            db.saveConversationLog(sessionId, 'agent', fullAgentResponse, { type: 'complete_response', bufferSource: bufferUsed }, new Date().toISOString());
-            db.logAuditEvent('agent_response', { text: fullAgentResponse, bufferSource: bufferUsed }, sessionId);
-          } else {
-            console.warn(`⚠️ No agent text accumulated in either buffer for session ${sessionId}`);
-          }
-
-          // Signal that all audio chunks are sent - frontend should play accumulated audio
-          console.log(`🎯 Sending agent_response_complete to frontend for session ${sessionId}`);
-          frontendWs.send(JSON.stringify({
-            type: 'agent_response_complete',
-            timestamp: new Date().toISOString()
-          }));
-          console.log(`✅ Sent response complete signal to frontend for ${sessionId}`);
-          break;
-
-        case 'conversation.item.input_audio_transcription.delta':
-          // Accumulate patient transcription deltas but don't forward real-time
-          // We'll use the complete transcript when finished
-          break;
-
-        case 'conversation.item.input_audio_transcription.completed':
-          // Forward complete patient speech transcript
-          if (event.transcript) {
-            frontendWs.send(JSON.stringify({
-              type: 'patient_transcript',
-              transcript: event.transcript,
-              timestamp: new Date().toISOString()
-            }));
-
-            // Save patient speech to database
-            console.log(`📝 Saving patient transcript: ${sessionId} - "${event.transcript}"`);
-            db.saveConversationLog(sessionId, 'patient', event.transcript, { type: 'speech_transcript' }, new Date().toISOString());
-            db.logAuditEvent('patient_speech', { transcript: event.transcript }, sessionId);
-          }
-          break;
-
-        case 'response.function_call_arguments.done':
-          // Handle function calls from the AI
-          if (event.arguments) {
-            this.handleRealtimeFunctionCall(sessionId, event.function_call, event.arguments);
-          }
-          break;
-
-        case 'error':
-          console.error(`Realtime API error for ${sessionId}:`, event.error);
-          frontendWs.send(JSON.stringify({
-            type: 'error',
-            message: `AI processing error: ${event.error.message}`
-          }));
-          break;
-
-        default:
-          // Comprehensive catch-all for agent text in any event
-          console.log(`🔍 DEBUG: Event ${event.type} -`, JSON.stringify(event, null, 2));
-
-          // Check ALL possible locations for agent text
-          let agentText = null;
-
-          if (event.content && Array.isArray(event.content)) {
-            // Check content[0].text
-            if (event.content[0]?.text) {
-              agentText = event.content[0].text;
-            }
-            // Check content[0].content.text (nested structure)
-            else if (event.content[0]?.content?.text) {
-              agentText = event.content[0].content.text;
-            }
-            // Check content[0].content[0].text (double nested)
-            else if (event.content[0]?.content && Array.isArray(event.content[0].content) && event.content[0].content[0]?.text) {
-              agentText = event.content[0].content[0].text;
-            }
-          }
-
-          // Check event.text directly
-          if (!agentText && event.text) {
-            agentText = event.text;
-          }
-
-          // Check event.delta (streaming text)
-          if (!agentText && event.delta) {
-            agentText = event.delta;
-          }
-
-          // Check for assistant role
-          const isAssistant = (event.role === 'assistant') ||
-                            event.item?.role === 'assistant' ||
-                            event.type?.includes('assistant');
-
-          if (agentText && agentText.trim() && isAssistant && !this.isDuplicateAgentResponse(sessionId, agentText.trim())) {
-            console.log(`🎯 CATCH-ALL: Found agent text in ${event.type}: "${agentText.substring(0, 200)}${agentText.length > 200 ? '...' : ''}"`);
-            db.saveConversationLog(sessionId, 'agent', agentText.trim(), {
-              type: 'catch_all_logging',
-              source: event.type,
-              original_event: JSON.stringify(event)
-            });
-          }
-
-          // Log any unknown events with readable content for debugging
-          if (event.type && !event.type.startsWith('input_') && !event.type.startsWith('rate_limits')) {
-            console.log(`🔍 Unhandled event (${event.type}) summary:`,
-              Object.keys(event).reduce((acc: any, key) => {
-                if (typeof event[key] !== 'object' && key !== 'content') {
-                  acc[key] = event[key];
-                }
-                return acc;
-              }, {})
-            );
-          }
-          break;
-      }
-    } catch (error) {
-      console.error(`Error parsing Realtime response for ${sessionId}:`, error);
-    }
-  } */
-
     private handleRealtimeResponse(sessionId: string, data: Buffer) {
       try {
         const event = JSON.parse(data.toString());
@@ -607,7 +359,9 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               type: 'agent_response_complete',
               timestamp: new Date().toISOString()
             }));
-    
+
+
+
             // backup fallback using buffered text if transcript didn't arrive; we will still check pending queue later
             try {
               const fullAgentResponse = this.agentTextBuffers.get(sessionId) || '';
@@ -654,6 +408,18 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
                   transcript: agentTranscript,
                   timestamp: agentTs
                 }));
+                // End session if agent response contains "Your provider will review"
+                if (agentTranscript.includes("Your provider will review")) {
+                  console.log(`🏁 Ending session ${sessionId} due to provider review response`);
+                  frontendWs.send(JSON.stringify({
+                    type: 'request_session_end',
+                    timestamp: agentTs
+                  }));
+                  // Delay to allow audio playback to complete
+                  setTimeout(() => {
+                    this.endSession(sessionId);
+                  }, 3000);
+                }
               } else {
                 // No recent patient activity — safe to save immediately
                 this.saveAgentTranscriptImmediate(sessionId, agentTranscript, agentTs);
@@ -662,6 +428,18 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
                   transcript: agentTranscript,
                   timestamp: agentTs
                 }));
+                // End session if agent response contains "Your provider will review"
+                if (agentTranscript.includes("Your provider will review") || agentTranscript.includes("critical alert")) {
+                  console.log(`🏁 Ending session ${sessionId} due to provider review response`);
+                  frontendWs.send(JSON.stringify({
+                    type: 'request_session_end',
+                    timestamp: agentTs
+                  }));
+                  // Delay to allow audio playback to complete
+                  setTimeout(() => {
+                    this.endSession(sessionId);
+                  }, 10000);
+                }
               }
             }
             break;
@@ -672,6 +450,17 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             if (event.arguments && event.name) {
               console.log('Calling handleRealtimeFunctionCall');
               this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
+            }
+
+            const realtimeWs = this.connections.get(sessionId);
+            if (realtimeWs) {
+              console.log('▶️ Triggering model response after triggering red flag');
+              realtimeWs.send(JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio","text"] // return speech + text
+                }
+              }));
             }
             break;
 

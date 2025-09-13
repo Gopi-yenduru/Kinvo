@@ -574,10 +574,11 @@ wss.on('connection', (ws: any, req: any) => {
 
         case 'end_session':
           if (currentSessionId) {
-            await realtimeManager.endSession(currentSessionId);
             ws.send(JSON.stringify({
               type: 'session_ended'
             }));
+            console.log(`Ending the session ${currentSessionId} as requested by client`);
+            await realtimeManager.endSession(currentSessionId);
           }
           break;
       }

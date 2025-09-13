@@ -272,7 +272,11 @@ const Session: React.FC = () => {
             // Finalize any pending sentences before ending session
             finalizePendingSentences();
             addToConversationLog('System', 'Session completed successfully', 'system');
-            setSessionStatus('completed');
+            break;
+          case 'request_session_end':
+            // Finalize any pending sentences before ending session
+            console.log('Received request_session_end from backend, ending session');
+            endSession();
             break;
           case 'error':
             setErrorMessage(message.message || 'An error occurred');
@@ -489,17 +493,32 @@ const Session: React.FC = () => {
   };
 
   const endSession = async () => {
+    console.log('endSession called');
     if (isRecording) {
+      console.log('Stopping recording');
       setIsRecording(false);
       isRecordingRef.current = false;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
     }
+    // Delay closing audio context to allow any ongoing audio playback to complete
+    setTimeout(() => {
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        try {
+          audioContextRef.current.close();
+          audioContextRef.current = null;
+          gainNodeRef.current = null;
+        } catch (error) {
+          console.error('Error closing audio context:', error);
+        }
+      }
+    }, 20000);
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ type: 'end_session' }));
     }
     setSessionStatus('completed');
+    setIsRecording(false);
   };
 
   const handleIncomingAudioChunk = (audioChunk: string) => {

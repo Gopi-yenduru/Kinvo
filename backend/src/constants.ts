@@ -39,6 +39,8 @@ IMMEDIATELY call the red_flag_detected function tool when the patient mentions a
 - Stroke symptoms: slurred speech, facial droop, weakness, numbness
 - Suicidal thoughts, wanting to die, self-harm
 
+Inform the patient: "This seems a critical symptom, I’m notifying your provider immediately."
+
 When calling red_flag_detected, use these exact parameters:
 - symptoms: Array of the specific symptoms mentioned (use patient's exact words)
 - severity: "critical" for life-threatening symptoms, "high" for urgent symptoms, "medium" for concerning symptoms
