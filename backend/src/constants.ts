@@ -1,9 +1,9 @@
 // Realtime API Configuration
 export const REALTIME_CONFIG = {
   voice: 'alloy', // Professional female voice for medical context
-  temperature: 0.6, // Minimal variation in responses
+  temperature: 0.1, // Very low temperature for consistent function calling
   max_response_length: 200, // Concise responses to save costs
-  model: 'gpt-4o-realtime-preview',
+  model: 'gpt-4o-realtime-preview', // Keep current model but try optimizing
 };
 
 // Strict Medical Boundaries Instructions
@@ -31,7 +31,23 @@ Never provide advice, reassurance, diagnosis, or medical explanations, even if a
 - "Your provider will discuss this with you."
 - "I’m here only to collect information for your provider."
 
-If the patient mentions: chest pain, trouble breathing, severe bleeding, loss of consciousness, slurred speech/weakness/facial droop, or suicidal thoughts—immediately call red_flag_detected with their exact words.
+IMMEDIATELY call the red_flag_detected function tool when the patient mentions any of these critical symptoms:
+- Chest pain, heart attack, cardiac arrest
+- Can't breathe, difficulty breathing, shortness of breath
+- Severe bleeding, heavy bleeding
+- Loss of consciousness, passed out, fainting
+- Stroke symptoms: slurred speech, facial droop, weakness, numbness
+- Suicidal thoughts, wanting to die, self-harm
+
+When calling red_flag_detected, use these exact parameters:
+- symptoms: Array of the specific symptoms mentioned (use patient's exact words)
+- severity: "critical" for life-threatening symptoms, "high" for urgent symptoms, "medium" for concerning symptoms
+
+Example function call:
+red_flag_detected({
+  "symptoms": ["chest pain", "short of breath"],
+  "severity": "critical"
+})
 
 Keep responses short, conversational, emotive, and friendly—respectful but quick—limiting each utterance to a single step or question.
 
@@ -82,21 +98,69 @@ Keep responses short, conversational, emotive, and friendly—respectful but qui
 - End with the required closing statement.
 - Be vigilant for red flag symptoms and trigger alerts immediately when detected.`;
 
-// Red Flag Detection Patterns
+// Red Flag Detection Patterns - Critical symptoms requiring immediate clinician attention
 export const RED_FLAG_PATTERNS = [
-  'chest pain',
-  'can\'t breathe',
-  'difficulty breathing',
-  'severe bleeding',
-  'passed out',
-  'unconscious',
-  'stroke',
-  'want to die',
-  'suicidal thoughts',
-  'severe pain',
-  'emergency',
-  'urgent'
+  // Cardiovascular
+  'chest pain', 'heart attack', 'cardiac arrest', 'heart racing', 'heart pounding',
+  // Respiratory
+  'can\'t breathe', 'difficulty breathing', 'short of breath', 'breathing hard', 'wheezing',
+  // Neurological
+  'stroke', 'slurred speech', 'facial droop', 'weakness', 'numbness', 'confusion',
+  // Consciousness
+  'passed out', 'unconscious', 'fainted', 'seizure', 'convulsion',
+  // Mental Health
+  'suicidal thoughts', 'want to die', 'kill myself', 'end my life',
+  // Severe Bleeding
+  'severe bleeding', 'heavy bleeding', 'bleeding won\'t stop', 'blood everywhere',
+  // Severe Pain
+  'severe pain', 'worst pain ever', 'unbearable pain',
+  // General Emergency
+  'emergency', 'urgent', 'medical emergency', 'call ambulance'
 ];
+
+// Red Flag Severity Levels
+export const RED_FLAG_SEVERITY = {
+  LOW: 'low',
+  MEDIUM: 'medium',
+  HIGH: 'high',
+  CRITICAL: 'critical'
+};
+
+// Map patterns to severity levels
+export const RED_FLAG_SEVERITY_MAP: { [key: string]: string } = {
+  'chest pain': 'critical',
+  'heart attack': 'critical',
+  'cardiac arrest': 'critical',
+  'can\'t breathe': 'critical',
+  'difficulty breathing': 'critical',
+  'stroke': 'critical',
+  'slurred speech': 'critical',
+  'facial droop': 'critical',
+  'passed out': 'critical',
+  'unconscious': 'critical',
+  'suicidal thoughts': 'critical',
+  'want to die': 'critical',
+  'kill myself': 'critical',
+  'severe bleeding': 'critical',
+  'heavy bleeding': 'critical',
+  'seizure': 'critical',
+  'convulsion': 'critical',
+  'short of breath': 'high',
+  'breathing hard': 'high',
+  'wheezing': 'high',
+  'heart racing': 'high',
+  'heart pounding': 'high',
+  'weakness': 'high',
+  'numbness': 'high',
+  'confusion': 'high',
+  'fainted': 'high',
+  'severe pain': 'high',
+  'worst pain ever': 'high',
+  'unbearable pain': 'high',
+  'emergency': 'high',
+  'urgent': 'high',
+  'medical emergency': 'high'
+};
 
 // Session States
 export const SESSION_STATES = {

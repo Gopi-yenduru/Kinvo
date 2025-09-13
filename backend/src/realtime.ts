@@ -1,6 +1,6 @@
-const { WebSocket } = require('ws');
-const dbModule = require('./database');
-const db = dbModule.default;
+import WebSocket from 'ws';
+import db from './database.js';
+import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY } from './constants.js';
 
 interface RealtimeConfig {
   sessionId: string;
@@ -13,7 +13,7 @@ interface RealtimeConfig {
 }
 
 class RealtimeSessionManager {
-  private connections: Map<string, any> = new Map();
+  public connections: Map<string, any> = new Map();
   private frontendSockets: Map<string, any> = new Map(); // Track frontend WebSocket for each session
   private agentTextBuffers: Map<string, string> = new Map(); // Accumulate full agent responses
   private agentFrontendBuffers: Map<string, string> = new Map(); // Backup - accumulate agent text sent to frontend
@@ -154,12 +154,20 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
       {
         type: 'function',
         name: 'red_flag_detected',
-        description: 'Alert clinical team immediately for red flag symptoms',
+        description: 'ALERT IMMEDIATE CLINICAL ATTENTION REQUIRED: Patient reported critical symptoms that need immediate medical review',
         parameters: {
           type: 'object',
           properties: {
-            symptoms: { type: 'array', items: { type: 'string' } },
-            severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }
+            symptoms: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'List of critical symptoms mentioned by patient'
+            },
+            severity: {
+              type: 'string',
+              enum: ['critical', 'high', 'medium', 'low'],
+              description: 'Severity level based on medical urgency'
+            }
           },
           required: ['symptoms', 'severity']
         }
@@ -533,7 +541,10 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               const transcript = event.transcript || event.text;
               const ts = new Date().toISOString();
               console.log(`👤 Patient said (final): "${transcript}"`);
-    
+
+              // 🔍 BACKUP RED FLAG DETECTION - Check for red flags in patient transcript
+              //this.detectRedFlagsFromTranscript(sessionId, transcript, frontendWs);
+
               // send to frontend
               frontendWs.send(JSON.stringify({
                 type: 'patient_transcript',
@@ -541,7 +552,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
                 timestamp: ts
               }));
 
-              // 🔑 Now request the model’s response manually
+              // 🔑 Now request the model's response manually
               const realtimeWs = this.connections.get(sessionId);
               if (realtimeWs) {
                 console.log('▶️ Triggering model response after patient transcript');
@@ -549,10 +560,10 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
                   type: "response.create",
                   response: {
                     modalities: ["audio","text"] // return speech + text
-                  } 
+                  }
                 }));
               }
-    
+
               // Save to DB
               try {
                 db.saveConversationLog(sessionId, 'patient', transcript, { type: 'speech_transcript' }, ts);
@@ -560,10 +571,10 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               } catch (dbErr) {
                 console.error(`Failed to save patient transcript for ${sessionId}:`, dbErr);
               }
-    
+
               // mark activity (so agent deferral can be cleared)
               this.recentPatientActivity.set(sessionId, nowMs);
-    
+
               // flush any pending agent saves immediately (patient is now saved)
               flushPendingAgents(sessionId);
           }
@@ -628,11 +639,11 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             if (event.transcript && !this.isDuplicateAgentResponse(sessionId, event.transcript)) {
               const agentTranscript = event.transcript;
               const agentTs = new Date().toISOString();
-    
+
               // determine if recent patient activity suggests patient transcript might be coming shortly
               const lastPatientActivity = this.recentPatientActivity.get(sessionId) || 0;
               const ageSincePatientMs = nowMs - lastPatientActivity;
-    
+
               if (lastPatientActivity && ageSincePatientMs < this.RECENT_PATIENT_WINDOW_MS) {
                 // Defer saving the agent for a short time to wait for patient transcription.
                 console.log(`⚖️ Deferring agent save for ${sessionId} (recent patient activity ${ageSincePatientMs}ms ago)`);
@@ -654,7 +665,54 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               }
             }
             break;
-    
+
+          case 'response.function_call_arguments.done':
+            // Handle function calls from the AI
+            console.log(`🔧 Function call received for ${sessionId}:`, event);
+            if (event.arguments && event.name) {
+              console.log('Calling handleRealtimeFunctionCall');
+              this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
+            }
+            break;
+
+          case 'function_call':
+            // Alternative function call event format
+            console.log(`🔧 Alternative function call for ${sessionId}:`, event);
+            if (event.arguments && event.name) {
+              this.handleRealtimeFunctionCall(sessionId, { name: event.name }, event.arguments);
+            }
+            break;
+
+          case 'conversation.item.function_call':
+            // Function call within conversation items
+            console.log(`🔧 Conversation function call for ${sessionId}:`, event);
+            if (event.item && event.item.function_call) {
+              const functionCall = event.item.function_call;
+              if (functionCall.arguments && functionCall.name) {
+                this.handleRealtimeFunctionCall(sessionId, { name: functionCall.name }, functionCall.arguments);
+              }
+            }
+            break;
+
+          case 'tool_call':
+            // Tool call event (newer format)
+            console.log(`🔧 Tool call for ${sessionId}:`, event);
+            if (event.tool_call && event.tool_call.function) {
+              const toolFunction = event.tool_call.function;
+              if (toolFunction.arguments && toolFunction.name) {
+                this.handleRealtimeFunctionCall(sessionId, { name: toolFunction.name }, toolFunction.arguments);
+              }
+            }
+            break;
+
+          case 'function_call_response':
+            // Fallback for different function call response formats
+            console.log(`🔧 Function call response for ${sessionId}:`, event);
+            if (event.name && event.arguments) {
+              this.handleRealtimeFunctionCall(sessionId, { name: event.name }, event.arguments);
+            }
+            break;
+
           default:
             console.log(`Unhandled realtime event ${event.type} for ${sessionId}`, event);
             break;
@@ -670,12 +728,18 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     
   
   // Handle function calls from OpenAI Realtime API
-  private handleRealtimeFunctionCall(sessionId: string, functionCall: any, argumentsJson: string) {
+  private handleRealtimeFunctionCall(sessionId: string, name: string, argumentsJson: string) {
     try {
-      const args = JSON.parse(argumentsJson);
-      const functionName = functionCall.name;
+      console.log(`🔧 RAW FUNCTION CALL DATA:`, {
+        sessionId,
+        name,
+        argumentsJson
+      });
 
-      console.log(`Function call received: ${functionName} for session ${sessionId}`);
+      const args = JSON.parse(argumentsJson);
+      const functionName = name;
+
+      console.log(`✅ Function call received: ${functionName} for session ${sessionId}`, args);
 
       const frontendWs = this.frontendSockets.get(sessionId);
 
@@ -797,6 +861,52 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     }
   }
 
+  // Backup red flag detection from patient transcripts (in case AI doesn't trigger function call)
+  private detectRedFlagsFromTranscript(sessionId: string, transcript: string, frontendWs: any) {
+    try {
+      const lowerTranscript = transcript.toLowerCase();
+      const detectedFlags: string[] = [];
+      let maxSeverity = RED_FLAG_SEVERITY.LOW;
+
+      // Check each red flag pattern
+      for (const pattern of RED_FLAG_PATTERNS) {
+        if (lowerTranscript.includes(pattern.toLowerCase())) {
+          detectedFlags.push(pattern);
+          const severity = RED_FLAG_SEVERITY_MAP[pattern] || RED_FLAG_SEVERITY.MEDIUM;
+          if (severity === RED_FLAG_SEVERITY.CRITICAL) {
+            maxSeverity = RED_FLAG_SEVERITY.CRITICAL;
+          } else if (severity === RED_FLAG_SEVERITY.HIGH && maxSeverity !== RED_FLAG_SEVERITY.CRITICAL) {
+            maxSeverity = RED_FLAG_SEVERITY.HIGH;
+          }
+        }
+      }
+
+      // If red flags detected, save them and notify frontend
+      if (detectedFlags.length > 0) {
+        console.log(`🚨 BACKUP RED FLAG DETECTION: Found ${detectedFlags.length} red flags in session ${sessionId}:`, detectedFlags);
+
+        // Save to database
+        db.saveRedFlagEvent(sessionId, detectedFlags, maxSeverity);
+        db.logAuditEvent('red_flag_detected_backup', { symptoms: detectedFlags, severity: maxSeverity, transcript }, sessionId);
+
+        // Notify frontend
+        if (frontendWs) {
+          frontendWs.send(JSON.stringify({
+            type: 'red_flag_detected',
+            symptoms: detectedFlags,
+            severity: maxSeverity,
+            timestamp: new Date().toISOString(),
+            source: 'backup_detection'
+          }));
+        }
+
+        console.log(`🚨 BACKUP: CLINICIAN ESCALATION REQUIRED: Session ${sessionId} has red flags: ${detectedFlags.join(', ')} (severity: ${maxSeverity})`);
+      }
+    } catch (error) {
+      console.error('Error in backup red flag detection:', error);
+    }
+  }
+
   private handleSaveResponse(args: any) {
     console.log(`💾 Saving response for session ${args.sessionId || 'unknown'}:`, args);
 
@@ -884,4 +994,4 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 }
 
-module.exports = new RealtimeSessionManager();
+export default new RealtimeSessionManager();

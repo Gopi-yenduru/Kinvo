@@ -1,25 +1,30 @@
-const express = require('express');
-const cors = require('cors');
-const WebSocket = require('ws');
-const http = require('http');
-const { v4: uuidv4 } = require('uuid');
+import express from 'express';
+import cors from 'cors';
+import { WebSocketServer } from 'ws';
+import * as http from 'http';
+import { v4 as uuidv4 } from 'uuid';
 
-require('dotenv').config();
+import 'dotenv/config';
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocketServer({ server });
 
-// Import our modules - making them require-style for CommonJS
-const realtimeManager = require('./realtime');
-const { MEDICAL_INTAKE_INSTRUCTIONS, REALTIME_CONFIG } = require('./constants');
-const dbModule = require('./database');
-const db = dbModule.default;
+// Import our modules
+import realtimeManager from './realtime.js';
+import { MEDICAL_INTAKE_INSTRUCTIONS, REALTIME_CONFIG } from './constants.js';
+import db from './database.js';
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Debug middleware to log all requests
+app.use((req: any, res: any, next: any) => {
+  console.log(`📡 ${req.method} ${req.path} - ${new Date().toISOString()}`);
+  next();
+});
 
 // Basic health check route
 app.get('/health', (req: any, res: any) => {
@@ -49,6 +54,89 @@ app.post('/api/test-agent-response', (req: any, res: any) => {
   } catch (error: any) {
     console.error('Test agent response save failed:', error);
     res.status(500).json({ error: 'Failed to save test response' });
+  }
+});
+
+// Debug endpoint to check red flag events table directly
+app.get('/api/debug/red-flags', (req: any, res: any) => {
+  try {
+    console.log('🔍 DEBUG: Checking red_flag_events table directly');
+    const stmt = db.db.prepare('SELECT * FROM red_flag_events ORDER BY timestamp DESC');
+    const redFlags = stmt.all();
+    console.log(`🔍 DEBUG: Found ${redFlags?.length || 0} red flag events in database`);
+
+    res.json({
+      success: true,
+      redFlags,
+      count: redFlags?.length || 0
+    });
+  } catch (error: any) {
+    console.error('Failed to query red_flag_events table:', error);
+    res.status(500).json({ error: 'Failed to query red flag events', details: error.message });
+  }
+});
+
+// Test red flag detection
+app.post('/api/test-red-flag-detection', async (req: any, res: any) => {
+  try {
+    const { sessionId, transcript } = req.body;
+
+    if (!sessionId || !transcript) {
+      return res.status(400).json({
+        error: 'sessionId and transcript are required'
+      });
+    }
+
+    console.log(`🧪 TEST: Testing red flag detection for session ${sessionId} with transcript: "${transcript}"`);
+
+    // Import constants
+    const { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY } = await import('./constants.js');
+
+    const lowerTranscript = transcript.toLowerCase();
+    const detectedFlags: string[] = [];
+    let maxSeverity = RED_FLAG_SEVERITY.LOW;
+
+    // Check each red flag pattern
+    for (const pattern of RED_FLAG_PATTERNS) {
+      if (lowerTranscript.includes(pattern.toLowerCase())) {
+        detectedFlags.push(pattern);
+        const severity = RED_FLAG_SEVERITY_MAP[pattern] || RED_FLAG_SEVERITY.MEDIUM;
+        if (severity === RED_FLAG_SEVERITY.CRITICAL) {
+          maxSeverity = RED_FLAG_SEVERITY.CRITICAL;
+        } else if (severity === RED_FLAG_SEVERITY.HIGH && maxSeverity !== RED_FLAG_SEVERITY.CRITICAL) {
+          maxSeverity = RED_FLAG_SEVERITY.HIGH;
+        }
+      }
+    }
+
+    const result: any = {
+      transcript: transcript,
+      detectedFlags: detectedFlags,
+      severity: maxSeverity,
+      redFlagDetected: detectedFlags.length > 0
+    };
+
+    // If red flags detected, try to save them (only if session exists)
+    if (detectedFlags.length > 0) {
+      try {
+        db.saveRedFlagEvent(sessionId, detectedFlags, maxSeverity);
+        db.logAuditEvent('red_flag_detected_test', result, sessionId);
+        console.log(`🚨 TEST: Red flags saved to database for session ${sessionId}`);
+      } catch (saveError: any) {
+        console.log(`🚨 TEST: Could not save to database (session may not exist): ${saveError.message}`);
+        result.databaseSaveError = saveError.message;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Red flag detection test completed',
+      result: result
+    });
+
+  } catch (error: any) {
+    console.error('Test red flag detection failed:', error);
+    res.status(500).json({ error: 'Failed to test red flag detection', details: error.message });
   }
 });
 
@@ -141,6 +229,53 @@ app.post('/api/sessions/start', (req: any, res: any) => {
   }
 });
 
+// Get red flag events for all sessions (for clinician dashboard) - MUST be defined BEFORE :sessionId routes
+app.get('/api/sessions/red-flags', (req: any, res: any) => {
+  console.log('📡 REQUEST DETAILS:', {
+    method: req.method,
+    url: req.url,
+    path: req.path,
+    headers: req.headers
+  });
+  try {
+    console.log('🔍 DEBUG: Fetching red flags for all sessions');
+    const redFlags: any[] = [];
+
+    // Get all sessions to include completed ones that may have red flags
+    const stmt = db.db.prepare(`
+      SELECT * FROM sessions
+      ORDER BY start_time DESC
+    `);
+    const sessions = stmt.all();
+    console.log(`🔍 DEBUG: Found ${sessions?.length || 0} sessions`);
+
+    if (sessions && sessions.length > 0) {
+      sessions.forEach((session: any) => {
+        console.log(`🔍 DEBUG: Checking session ${session.id} for red flags`);
+        try {
+          const sessionRedFlags = db.getRedFlagEvents(session.id);
+          console.log(`🔍 DEBUG: Session ${session.id} has ${sessionRedFlags?.length || 0} red flags`);
+          if (sessionRedFlags && sessionRedFlags.length > 0) {
+            redFlags.push(...sessionRedFlags);
+          }
+        } catch (sessionError: any) {
+          console.error(`🔍 DEBUG: Error getting red flags for session ${session.id}:`, sessionError.message);
+        }
+      });
+    }
+
+    // Sort by timestamp (most recent first)
+    redFlags.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    console.log(`🔍 DEBUG: Returning ${redFlags.length} total red flags`);
+
+    res.json({ redFlags });
+  } catch (error: any) {
+    console.error('Failed to get red flag events:', error);
+    res.status(500).json({ error: 'Failed to retrieve red flag events', details: error.message });
+  }
+});
+
+
 // Get session status
 app.get('/api/sessions/:sessionId', (req: any, res: any) => {
   const { sessionId } = req.params;
@@ -167,8 +302,11 @@ app.post('/api/sessions/:sessionId/end', (req: any, res: any) => {
     });
 });
 
+
+
 // Get all active sessions
 app.get('/api/sessions', (req: any, res: any) => {
+  console.log('🔍 DEBUG: Getting all sessions');
   try {
     const stmt = db.db.prepare(`
       SELECT * FROM sessions
@@ -193,7 +331,7 @@ app.get('/api/sessions/:sessionId/report', (req: any, res: any) => {
     }
 
     // Log audit event for report access
-    db.logAuditEvent('report_accessed', {}, sessionId, null, req.ip);
+    db.logAuditEvent('report_accessed', {}, sessionId, undefined, req.ip);
 
     res.json({ report });
   } catch (error: any) {
@@ -232,7 +370,7 @@ app.get('/api/sessions/:sessionId/transcript', (req: any, res: any) => {
     }));
 
     // Log audit event
-    db.logAuditEvent('transcript_accessed', { lines: transcript.length }, sessionId, null, req.ip);
+    db.logAuditEvent('transcript_accessed', { lines: transcript.length }, sessionId, undefined, req.ip);
 
     res.json({
       sessionId,
@@ -282,32 +420,6 @@ app.get('/api/sessions/:sessionId/logs', (req: any, res: any) => {
   }
 });
 
-// Get red flag events for all sessions (for clinician dashboard)
-app.get('/api/sessions/red-flags', (req: any, res: any) => {
-  try {
-    const redFlags: any[] = [];
-
-    // This should be optimized for production - this is a simple POC implementation
-    const sessions = db.getActiveSessions();
-
-    if (sessions && sessions.length > 0) {
-      sessions.forEach((session: any) => {
-        const sessionRedFlags = db.getRedFlagEvents(session.id);
-        if (sessionRedFlags && sessionRedFlags.length > 0) {
-          redFlags.push(...sessionRedFlags);
-        }
-      });
-    }
-
-    // Sort by timestamp (most recent first)
-    redFlags.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-    res.json({ redFlags });
-  } catch (error: any) {
-    console.error('Failed to get red flag events:', error);
-    res.status(500).json({ error: 'Failed to retrieve red flag events' });
-  }
-});
 
 // Clinician dashboard summary
 app.get('/api/dashboard/summary', (req: any, res: any) => {
@@ -332,7 +444,6 @@ app.get('/api/dashboard/summary', (req: any, res: any) => {
 app.get('/api/settings/config', (req: any, res: any) => {
   try {
     const settings = db.getSettings();
-    const { MEDICAL_INTAKE_INSTRUCTIONS } = require('./constants');
 
     if (settings) {
       res.json({
@@ -415,10 +526,10 @@ wss.on('connection', (ws: any, req: any) => {
           ws.sessionId = currentSessionId; // Store on WebSocket object
 
           // Get the Realtime API connection for this session
-          const realtimeConnection = realtimeManager.getSession(currentSessionId);
+          const realtimeConnection = realtimeManager.getSession(currentSessionId!);
           if (realtimeConnection) {
             // Link frontend WebSocket to realtime session
-            realtimeManager.linkFrontendSocket(currentSessionId, ws);
+            realtimeManager.linkFrontendSocket(currentSessionId!, ws);
 
             ws.send(JSON.stringify({
               type: 'session_joined',

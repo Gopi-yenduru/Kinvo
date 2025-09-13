@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 
 interface TranscriptEntry {
   timestamp: string;
@@ -23,18 +23,46 @@ interface TranscriptData {
 const Transcript: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const { sessionId } = useParams<{ sessionId: string }>();
   const [transcriptData, setTranscriptData] = useState<TranscriptData | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Get data from navigation state
-    const data = location.state?.transcriptData;
-    if (data) {
-      setTranscriptData(data);
-    } else {
-      // If no data in state, go back to sessions page
-      navigate('/sessions');
-    }
-  }, [location.state, navigate]);
+    const fetchTranscriptData = async () => {
+      try {
+        // First try to get data from navigation state (for backward compatibility)
+        const stateData = location.state?.transcriptData;
+        if (stateData) {
+          setTranscriptData(stateData);
+          setLoading(false);
+          return;
+        }
+
+        // If no state data, try to get sessionId from URL and fetch from API
+        if (sessionId) {
+          const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/transcript`);
+          const data = await response.json();
+
+          if (data.transcript) {
+            setTranscriptData(data);
+          } else {
+            console.error('No transcript data found');
+            navigate('/sessions');
+          }
+        } else {
+          // No sessionId in URL and no data in state
+          navigate('/sessions');
+        }
+      } catch (error) {
+        console.error('Failed to fetch transcript data:', error);
+        navigate('/sessions');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchTranscriptData();
+  }, [location.state, navigate, sessionId]);
 
   const formatTimestamp = (timestamp: string) => {
     const date = new Date(timestamp);
@@ -58,11 +86,20 @@ const Transcript: React.FC = () => {
     }
   };
 
-  if (!transcriptData) {
+  if (loading) {
     return (
       <div className="loading-container">
         <div className="loading-spinner"></div>
         <p>Loading transcript...</p>
+      </div>
+    );
+  }
+
+  if (!transcriptData) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Transcript not found...</p>
       </div>
     );
   }

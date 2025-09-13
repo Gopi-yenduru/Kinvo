@@ -6,7 +6,7 @@
     "outDir": "./dist",
 
     // Environment Settings
-    "module": "commonjs",
+    "module": "es2022",
     "target": "es2020",
     "types": ["node"],
     "lib": ["es2020"],
@@ -30,10 +30,10 @@
 
     // Recommended Options
     "strict": true,
+    "allowSyntheticDefaultImports": true,
     // "jsx": "react-jsx",
     // "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
   }
