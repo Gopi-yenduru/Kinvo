@@ -679,7 +679,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             // Alternative function call event format
             console.log(`🔧 Alternative function call for ${sessionId}:`, event);
             if (event.arguments && event.name) {
-              this.handleRealtimeFunctionCall(sessionId, { name: event.name }, event.arguments);
+              this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
             }
             break;
 
@@ -689,7 +689,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             if (event.item && event.item.function_call) {
               const functionCall = event.item.function_call;
               if (functionCall.arguments && functionCall.name) {
-                this.handleRealtimeFunctionCall(sessionId, { name: functionCall.name }, functionCall.arguments);
+                this.handleRealtimeFunctionCall(sessionId, functionCall.name, functionCall.arguments);
               }
             }
             break;
@@ -700,7 +700,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             if (event.tool_call && event.tool_call.function) {
               const toolFunction = event.tool_call.function;
               if (toolFunction.arguments && toolFunction.name) {
-                this.handleRealtimeFunctionCall(sessionId, { name: toolFunction.name }, toolFunction.arguments);
+                this.handleRealtimeFunctionCall(sessionId,  toolFunction.name, toolFunction.arguments);
               }
             }
             break;
@@ -709,7 +709,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             // Fallback for different function call response formats
             console.log(`🔧 Function call response for ${sessionId}:`, event);
             if (event.name && event.arguments) {
-              this.handleRealtimeFunctionCall(sessionId, { name: event.name }, event.arguments);
+              this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
             }
             break;
 
