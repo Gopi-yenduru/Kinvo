@@ -2335,14 +2335,15 @@ button:focus-visible,
 .section-description {
   font-size: 0.875rem;
   color: var(--gray-600);
-  margin: 0;
+  margin: var(--space-2) 0 0 0;
   line-height: 1.4;
+  display: block;
 }
 
 .settings-field {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-1);
 }
 
 .field-label {
@@ -2519,12 +2520,16 @@ button:focus-visible,
   box-shadow: 0 0 0 3px var(--primary-100);
 }
 
-.model-select {
+.model-select,
+.temperature-input,
+.voice-select {
   background: linear-gradient(135deg, var(--primary-50) 0%, var(--teal-50) 100%);
   border-color: var(--primary-200);
 }
 
-.model-select:focus {
+.model-select:focus,
+.temperature-input:focus,
+.voice-select:focus {
   background: white;
 }
 
@@ -2574,7 +2579,9 @@ select.model-select:focus-visible {
 
 /* Ensure the currently selected value in collapsed select has good contrast */
 .model-select[value="gpt-4o-realtime-preview"],
-.model-select[value="gpt-realtime"] {
+.model-select[value="gpt-realtime"],
+.temperature-input,
+.voice-select {
   color: var(--gray-800);
   font-weight: 500;
 }
@@ -2596,6 +2603,10 @@ select.model-select:focus-visible {
 .model-select,
 .model-select option {
   text-shadow: none;
+}
+
+.apikey-input {
+  color: var(--gray-900);
 }
 
 .apikey-input::placeholder {
@@ -2624,6 +2635,12 @@ select.model-select:focus-visible {
   margin-top: var(--space-3);
   padding-top: var(--space-3);
   border-top: 1px solid var(--gray-200);
+}
+
+.field-description {
+  font-size: 0.75rem;
+  color: var(--gray-500);
+  font-style: italic;
 }
 
 .character-count,

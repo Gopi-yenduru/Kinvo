@@ -157,6 +157,8 @@ app.post('/api/sessions/start', (req: any, res: any) => {
 
     // Get current settings from database
     const settings = db.getSettings();
+    console.log(`Temparature from settings: ${settings?.temperature}, max response length from settings: ${settings?.max_response_length}`);
+
     if (!settings || !settings.openai_api_key) {
       // Fallback to .env API key if database is not configured
       if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here') {
@@ -165,7 +167,6 @@ app.post('/api/sessions/start', (req: any, res: any) => {
           message: 'OpenAI API key not configured. Please check your .env file or Settings page.'
         });
       }
-
       console.log('⚠️ Using API key from .env file as fallback (database not configured)');
     }
 

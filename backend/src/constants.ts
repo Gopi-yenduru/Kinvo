@@ -1,8 +1,8 @@
 // Realtime API Configuration
 export const REALTIME_CONFIG = {
   voice: 'alloy', // Professional female voice for medical context
-  temperature: 0.1, // Very low temperature for consistent function calling
-  max_response_length: 200, // Concise responses to save costs
+  temperature: 0.5, // Very low temperature for consistent function calling
+  max_response_length: 500, // Concise responses to save costs
   model: 'gpt-4o-realtime-preview', // Keep current model but try optimizing
 };
 

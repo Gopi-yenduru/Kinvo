@@ -312,11 +312,11 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               //this.detectRedFlagsFromTranscript(sessionId, transcript, frontendWs);
 
               // send to frontend
-              frontendWs.send(JSON.stringify({
+              /* frontendWs.send(JSON.stringify({
                 type: 'patient_transcript',
                 transcript: transcript,
                 timestamp: ts
-              }));
+              })); */
 
               // 🔑 Now request the model's response manually
               const realtimeWs = this.connections.get(sessionId);

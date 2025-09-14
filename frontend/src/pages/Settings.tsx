@@ -4,6 +4,8 @@ interface SettingsConfig {
   model: string;
   openaiApiKey: string;
   medicalInstructions: string;
+  voice: string;
+  temperature: number;
   id?: number;
 }
 
@@ -11,7 +13,9 @@ const Settings: React.FC = () => {
   const [config, setConfig] = useState<SettingsConfig>({
     model: 'gpt-4o-realtime-preview',
     openaiApiKey: '',
-    medicalInstructions: ''
+    medicalInstructions: '',
+    voice: 'alloy',
+    temperature: 0.6
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
@@ -49,7 +53,9 @@ const Settings: React.FC = () => {
           id: data.id,
           model: data.model || 'gpt-4o-realtime-preview',
           openaiApiKey: data.openaiApiKey || '',
-          medicalInstructions: data.medicalInstructions || ''
+          medicalInstructions: data.medicalInstructions || '',
+          voice: data.voice || 'alloy',
+          temperature: data.temperature || 0.7
         });
 
         // Reset modification tracking - nothing has been modified yet
@@ -59,7 +65,9 @@ const Settings: React.FC = () => {
         setConfig({
           model: 'gpt-4o-realtime-preview',
           openaiApiKey: 'Please configure OpenAI API Key',
-          medicalInstructions: 'Unable to load default medical instructions. Please check your connection to the backend service.'
+          medicalInstructions: 'Unable to load default medical instructions. Please check your connection to the backend service.',
+          voice: 'alloy',
+          temperature: 0.6
         });
       }
     } catch (err) {
@@ -99,7 +107,7 @@ const Settings: React.FC = () => {
     }
   };
 
-  const handleInputChange = (field: keyof SettingsConfig, value: string) => {
+  const handleInputChange = (field: keyof SettingsConfig, value: string | number) => {
     // Track that this field has been modified by the user
     setModifiedFields(prev => new Set([...prev, field]));
 
@@ -124,6 +132,15 @@ const Settings: React.FC = () => {
   const modelOptions = [
     { value: 'gpt-4o-realtime-preview', label: 'GPT-4o Realtime Preview' },
     { value: 'gpt-realtime', label: 'GPT Realtime' }
+  ];
+
+  const voiceOptions = [
+    { value: 'verse', label: 'Verse' },
+    { value: 'alloy', label: 'Alloy' },
+    { value: 'sage', label: 'Sage' },
+    { value: 'nova', label: 'Nova' },
+    { value: 'aria', label: 'Aria' },
+    { value: 'lumen', label: 'Lumen' }
   ];
 
   if (loading) {
@@ -156,9 +173,6 @@ const Settings: React.FC = () => {
         <div className="settings-section">
           <div className="section-header">
             <h2>🤖 AI Model Configuration</h2>
-            <div className="section-description">
-              Select the AI model used for real-time voice processing and system prompts
-            </div>
           </div>
           <div className="settings-field">
             <label className="field-label">Model</label>
@@ -168,6 +182,37 @@ const Settings: React.FC = () => {
               onChange={(e) => handleInputChange('model', e.target.value)}
             >
               {modelOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Temperature Configuration */}
+          <div className="settings-field">
+            <label className="field-label">Temperature</label>
+            <input
+              type="number"
+              className="field-input temperature-input"
+              value={config.temperature}
+              onChange={(e) => handleInputChange('temperature', parseFloat(e.target.value) || 0)}
+              min="0"
+              max="1"
+              step="0.1"
+              placeholder="0.6"
+            />
+          </div>
+
+          {/* Voice Configuration */}
+          <div className="settings-field">
+            <label className="field-label">Voice</label>
+            <select
+              className="field-input voice-select"
+              value={config.voice}
+              onChange={(e) => handleInputChange('voice', e.target.value)}
+            >
+              {voiceOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
