@@ -3,6 +3,7 @@ import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import * as http from 'http';
 import { v4 as uuidv4 } from 'uuid';
+import { OpenAI } from 'openai';
 
 import 'dotenv/config';
 
@@ -390,6 +391,86 @@ app.get('/api/sessions/:sessionId/transcript', (req: any, res: any) => {
     console.error('Failed to generate transcript:', error);
     res.status(500).json({ error: 'Failed to generate conversation transcript' });
   }
+});
+
+// Generate report using OpenAI
+app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) => {
+ try {
+   const { sessionId } = req.params;
+
+   // Get settings for API key
+   const settings = db.getSettings();
+   const apiKey = settings?.openai_api_key || process.env.OPENAI_API_KEY;
+
+   if (!apiKey) {
+     return res.status(400).json({ error: 'OpenAI API key not configured' });
+   }
+
+   // Initialize OpenAI client
+   const openai = new OpenAI({ apiKey });
+
+   // Get conversation logs
+   const conversationLogs = db.getSessionConversationLogs(sessionId);
+   if (!conversationLogs || conversationLogs.length === 0) {
+     return res.status(404).json({ error: 'No conversation data found for this session' });
+   }
+
+   // Get session info and red flags
+   const sessionInfo = db.getSession(sessionId);
+   const redFlagEvents = db.getRedFlagEvents(sessionId);
+
+   // Format conversation for prompt
+   const conversationText = conversationLogs.map((log: any) =>
+     `${log.speaker.toUpperCase()}: ${log.message}`
+   ).join('\n\n');
+
+   const prompt = `Please generate a comprehensive medical intake report based on the following conversation transcript.
+
+Session Information:
+- Patient Name: ${sessionInfo?.patient_name || 'Not specified'}
+- Session Date: ${new Date(sessionInfo?.start_time).toLocaleDateString()}
+- Duration: ${sessionInfo?.end_time ? Math.round((new Date(sessionInfo.end_time).getTime() - new Date(sessionInfo.start_time).getTime()) / 1000 / 60) + ' minutes' : 'Ongoing'}
+- Red Flags Detected: ${redFlagEvents?.length || 0}
+
+Conversation Transcript:
+${conversationText}
+
+Please structure the report with the following sections:
+1. Patient Information
+2. Chief Complaint / Presenting Symptoms
+3. Medical History
+4. Current Medications/Allergies (if mentioned)
+5. Assessment/Recommendations
+6. Red Flags Identified (if any)
+
+Make the report professional, concise, and suitable for medical records.`;
+
+   // Call OpenAI API
+   const completion = await openai.chat.completions.create({
+     model: 'gpt-4',
+     messages: [
+       { role: 'system', content: 'You are a medical assistant generating intake reports from conversation transcripts.' },
+       { role: 'user', content: prompt }
+     ],
+     max_tokens: 2000,
+     temperature: 0.3,
+   });
+
+   const report = completion.choices[0]?.message?.content?.trim();
+
+   if (!report) {
+     return res.status(500).json({ error: 'Failed to generate report from OpenAI' });
+   }
+
+   // Log audit event
+   db.logAuditEvent('report_generated', { lines: conversationLogs.length }, sessionId, undefined, req.ip);
+
+   res.json({ report });
+
+ } catch (error: any) {
+   console.error('Failed to generate report:', error);
+   res.status(500).json({ error: 'Failed to generate report', details: error.message });
+ }
 });
 
 // Get conversation logs for a session

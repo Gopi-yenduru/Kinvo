@@ -109,10 +109,6 @@ const Settings: React.FC = () => {
     }));
   };
 
-  const maskApiKey = (key: string) => {
-    if (!key || key.length <= 10) return key;
-    return key.substring(0, 6) + '************************' + key.substring(key.length - 4);
-  };
 
   const handleResetToDefaults = () => {
     if (confirm('Are you sure you want to reset all settings to their default values? This will replace your custom configurations with the system defaults.')) {

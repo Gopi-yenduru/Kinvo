@@ -14,7 +14,10 @@ const Sessions: React.FC = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
-  const [selectedSession, setSelectedSession] = useState<string | null>(null);
+  const [generatingReport, setGeneratingReport] = useState<string | null>(null);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [reportContent, setReportContent] = useState<string>('');
+  const [reportSessionId, setReportSessionId] = useState<string>('');
   
   const navigate = useNavigate();
 
@@ -48,7 +51,7 @@ const Sessions: React.FC = () => {
     try {
       const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/transcript`);
       const data = await response.json();
-      
+
       if (data.transcript) {
         navigate(`/sessions/${sessionId}/transcript`, { state: { transcriptData: data } });
       } else {
@@ -58,6 +61,47 @@ const Sessions: React.FC = () => {
       console.error('Failed to fetch transcript:', err);
       setError('Unable to load transcript');
     }
+  };
+
+  const generateReport = async (sessionId: string) => {
+    try {
+      setGeneratingReport(sessionId);
+      const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/generate-report`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+
+      if (data.report) {
+        setReportContent(data.report);
+        setReportSessionId(sessionId);
+        setShowReportModal(true);
+      } else {
+        setError('Failed to generate report');
+      }
+    } catch (err) {
+      console.error('Failed to generate report:', err);
+      setError('Unable to generate report');
+    } finally {
+      setGeneratingReport(null);
+    }
+  };
+
+  const downloadReport = (sessionId: string, content: string) => {
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `session-${sessionId}-report.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const closeReportModal = () => {
+    setShowReportModal(false);
+    setReportContent('');
+    setReportSessionId('');
   };
 
   const filteredSessions = sessions;
@@ -196,12 +240,11 @@ const Sessions: React.FC = () => {
                         </button>
                         <button
                           className="action-btn-sm secondary"
-                          onClick={() => {
-                            // Add export functionality
-                          }}
+                          onClick={() => generateReport(session.id)}
+                          disabled={generatingReport === session.id}
                         >
-                          <span className="btn-icon-sm">📤</span>
-                          Export
+                          <span className="btn-icon-sm">📄</span>
+                          {generatingReport === session.id ? 'Generating...' : 'Generate Report'}
                         </button>
                       </div>
                     </td>
@@ -212,6 +255,46 @@ const Sessions: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Report Modal */}
+      {showReportModal && (
+        <div className="modal-overlay" onClick={closeReportModal}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">Medical Intake Report</h2>
+              <button className="modal-close" onClick={closeReportModal}>
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              <pre style={{
+                whiteSpace: 'pre-wrap',
+                fontFamily: 'var(--font-family)',
+                fontSize: '0.875rem',
+                lineHeight: '1.5',
+                color: 'var(--gray-800)',
+                margin: 0,
+                padding: 0,
+                maxHeight: '400px',
+                overflowY: 'auto'
+              }}>
+                {reportContent}
+              </pre>
+            </div>
+            <div className="modal-actions">
+              <button
+                className="btn btn-secondary"
+                onClick={() => downloadReport(reportSessionId, reportContent)}
+              >
+                📥 Download Report
+              </button>
+              <button className="btn btn-primary" onClick={closeReportModal}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

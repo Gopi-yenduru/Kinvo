@@ -32,7 +32,6 @@ const Session: React.FC = () => {
   const streamRef = useRef<MediaStream | null>(null);
   const isRecordingRef = useRef(false);
   const gainNodeRef = useRef<GainNode | null>(null);
-  const audioChunksRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
   const sessionStartTime = useRef<number | null>(null);
   const audioBufferRef = useRef<string>(''); // Buffer for incoming audio chunks

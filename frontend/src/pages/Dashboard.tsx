@@ -50,7 +50,6 @@ const Dashboard: React.FC = () => {
           new Date(s.start_time).toDateString() === today
         );
 
-        const completedSessions = sessions.filter((s: any) => s.status === 'completed');
         const totalRedFlagsCount = redFlagsData.redFlags ? redFlagsData.redFlags.length : 0;
 
         setStats({
@@ -73,7 +72,7 @@ const Dashboard: React.FC = () => {
       const data = await response.json();
 
       if (data.redFlags) {
-        const recentAlerts: Alert[] = data.redFlags.map((flag: any, index: number) => {
+        const recentAlerts: Alert[] = data.redFlags.map((flag: any) => {
           const symptoms = JSON.parse(flag.symptoms || '[]');
           const timeAgo = getTimeAgo(flag.timestamp);
 
@@ -150,26 +149,6 @@ const Dashboard: React.FC = () => {
     return `${diffDays} days ago`;
   };
 
-  const handleAlertReview = async (sessionId: string) => {
-    try {
-      // Fetch transcript data for the session
-      const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/transcript`);
-      const data = await response.json();
-
-      if (data.transcript) {
-        // Navigate to transcript page with data in state
-        navigate('/transcript', { state: { transcriptData: data } });
-      } else {
-        console.error('No transcript data found for session:', sessionId);
-        // Fallback to sessions page
-        navigate('/sessions');
-      }
-    } catch (error) {
-      console.error('Failed to fetch transcript data:', error);
-      // Fallback to sessions page
-      navigate('/sessions');
-    }
-  };
 
   if (loading) {
     return (

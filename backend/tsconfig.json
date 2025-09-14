@@ -6,8 +6,9 @@
     "outDir": "./dist",
 
     // Environment Settings
-    "module": "es2022",
+    "module": "nodenext",
     "target": "es2020",
+    "moduleResolution": "nodenext",
     "types": ["node"],
     "lib": ["es2020"],
 
