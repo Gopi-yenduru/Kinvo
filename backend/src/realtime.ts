@@ -265,6 +265,20 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
         switch (event.type) {
           case 'session.created':
             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
+
+            // Trigger agent to speak first when session starts
+            const initialRealtimeWs = this.connections.get(sessionId);
+            if (initialRealtimeWs) {
+              setTimeout(() => {
+                console.log('▶️ Triggering initial agent response at session start');
+                initialRealtimeWs.send(JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio","text"]
+                  }
+                }));
+              }, 500); // Small delay to ensure session is fully ready
+            }
             break;
     
           case 'input_audio_buffer.speech_started':
@@ -567,7 +581,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
     // Log system message for session join
     console.log(`📝 Saving system message: Session joined - ${sessionId}`);
-    db.saveConversationLog(sessionId, 'system', 'Voice agent session initialized and ready to begin intake', { type: 'session_join' });
+    db.saveConversationLog(sessionId, 'system', 'Voice agent session initialized and ready to begin intake', { type: 'session_join' }, new Date().toISOString());
     db.logAuditEvent('session_joined', { socketLinked: true }, sessionId);
 
     console.log(`✅ Frontend WebSocket linked for session ${sessionId}`);
@@ -710,10 +724,10 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
       // Log both question and answer as conversation
       if (args.question) {
-        db.saveConversationLog(sessionId, 'agent', args.question, null);
+        db.saveConversationLog(sessionId, 'agent', args.question, null, new Date().toISOString());
       }
       if (args.answer) {
-        db.saveConversationLog(sessionId, 'patient', args.answer, null);
+        db.saveConversationLog(sessionId, 'patient', args.answer, null, new Date().toISOString());
       }
     } catch (error) {
       console.error('Failed to save intake response:', error);
@@ -729,7 +743,8 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
         sessionId,
         args.speaker || 'unknown',
         args.message || args.details || '',
-        null
+        null,
+        new Date().toISOString()
       );
     } catch (error) {
       console.error('Failed to log conversation:', error);

@@ -24,31 +24,31 @@ class DatabaseManager {
     // Create tables for storing intake session data
 
     // Sessions table - core session information
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        patient_id TEXT,
-        patient_name TEXT,
-        status TEXT DEFAULT 'active',
-        start_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        end_time DATETIME,
-        red_flags_detected INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS sessions (
+         id TEXT PRIMARY KEY,
+         patient_id TEXT,
+         patient_name TEXT,
+         status TEXT DEFAULT 'active',
+         start_time DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+         end_time DATETIME,
+         red_flags_detected INTEGER DEFAULT 0,
+         created_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+       );
+     `);
 
     // Settings table - user-configurable system settings
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS settings (
-        id INTEGER PRIMARY KEY DEFAULT 1,
-        model TEXT DEFAULT 'gpt-4o-realtime-preview',
-        openai_api_key TEXT,
-        medical_instructions TEXT,
-        voice TEXT DEFAULT 'alloy',
-        temperature REAL DEFAULT 0.6,
-        max_response_length INTEGER DEFAULT 200,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS settings (
+         id INTEGER PRIMARY KEY DEFAULT 1,
+         model TEXT DEFAULT 'gpt-4o-realtime-preview',
+         openai_api_key TEXT,
+         medical_instructions TEXT,
+         voice TEXT DEFAULT 'alloy',
+         temperature REAL DEFAULT 0.6,
+         max_response_length INTEGER DEFAULT 200,
+         updated_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+       );
 
       -- Insert default settings if not exists
       INSERT OR IGNORE INTO settings (id, model, voice, temperature, max_response_length,
@@ -129,76 +129,76 @@ Keep responses short, conversational, emotive, and friendly—respectful but qui
 - Never go beyond the scope of information gathering—remain neutral, avoid personal opinions, and always defer clinical questions to the provider.
 - Always use patient words literally, never summarizing or rephrasing their symptoms in medical language.
 - End with the required closing statement.
-- Be vigilant for red flag symptoms and trigger alerts immediately when detected.', CURRENT_TIMESTAMP);
+- Be vigilant for red flag symptoms and trigger alerts immediately when detected.', datetime('now'));
     `);
 
     // Conversation logs - store all conversation exchanges
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS conversation_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        speaker TEXT NOT NULL, -- 'patient', 'agent', 'system', 'alert'
-        message TEXT NOT NULL,
-        audio_data TEXT, -- JSON string for audio metadata
-        FOREIGN KEY (session_id) REFERENCES sessions (id)
-      );
-    `);
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS conversation_logs (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         session_id TEXT NOT NULL,
+         timestamp DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+         speaker TEXT NOT NULL, -- 'patient', 'agent', 'system', 'alert'
+         message TEXT NOT NULL,
+         audio_data TEXT, -- JSON string for audio metadata
+         FOREIGN KEY (session_id) REFERENCES sessions (id)
+       );
+     `);
 
     // FHIR resources - store structured medical data
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS fhir_resources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        resource_type TEXT NOT NULL, -- 'Patient', 'Condition', 'Observation', etc.
-        resource_id TEXT, -- FHIR resource ID
-        resource_data TEXT NOT NULL, -- JSON string for FHIR resource
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (session_id) REFERENCES sessions (id)
-      );
-    `);
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS fhir_resources (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         session_id TEXT NOT NULL,
+         resource_type TEXT NOT NULL, -- 'Patient', 'Condition', 'Observation', etc.
+         resource_id TEXT, -- FHIR resource ID
+         resource_data TEXT NOT NULL, -- JSON string for FHIR resource
+         created_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+         FOREIGN KEY (session_id) REFERENCES sessions (id)
+       );
+     `);
 
     // Patient responses - structured intake data
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS intake_responses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        question TEXT NOT NULL,
-        answer TEXT NOT NULL,
-        category TEXT NOT NULL, -- 'symptoms', 'history', 'medications', etc.
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (session_id) REFERENCES sessions (id)
-      );
-    `);
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS intake_responses (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         session_id TEXT NOT NULL,
+         question TEXT NOT NULL,
+         answer TEXT NOT NULL,
+         category TEXT NOT NULL, -- 'symptoms', 'history', 'medications', etc.
+         timestamp DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+         FOREIGN KEY (session_id) REFERENCES sessions (id)
+       );
+     `);
 
     // Red flag events - critical alerts
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS red_flag_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        symptoms TEXT NOT NULL, -- JSON array
-        severity TEXT NOT NULL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        resolved BOOLEAN DEFAULT FALSE,
-        clinician_notified BOOLEAN DEFAULT FALSE,
-        FOREIGN KEY (session_id) REFERENCES sessions (id)
-      );
-    `);
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS red_flag_events (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         session_id TEXT NOT NULL,
+         symptoms TEXT NOT NULL, -- JSON array
+         severity TEXT NOT NULL,
+         timestamp DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+         resolved BOOLEAN DEFAULT FALSE,
+         clinician_notified BOOLEAN DEFAULT FALSE,
+         FOREIGN KEY (session_id) REFERENCES sessions (id)
+       );
+     `);
 
     // Audit log - for HIPAA compliance
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS audit_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT,
-        user_id TEXT,
-        action TEXT NOT NULL,
-        resource_type TEXT,
-        details TEXT,
-        ip_address TEXT,
-        user_agent TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS audit_logs (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         session_id TEXT,
+         user_id TEXT,
+         action TEXT NOT NULL,
+         resource_type TEXT,
+         details TEXT,
+         ip_address TEXT,
+         user_agent TEXT,
+         timestamp DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+       );
+     `);
 
     console.log('📊 Database tables initialized successfully');
   }
@@ -379,21 +379,21 @@ Keep responses short, conversational, emotive, and friendly—respectful but qui
   }
 
   saveSettings(settings: any) {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO settings (
-        id, model, openai_api_key, medical_instructions,
-        voice, temperature, max_response_length, updated_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    `);
-    return stmt.run(
-      settings.model,
-      settings.openaiApiKey,
-      settings.medicalInstructions,
-      settings.voice || 'alloy',
-      settings.temperature || 0.6,
-      settings.maxResponseLength || 200
-    );
-  }
+     const stmt = this.db.prepare(`
+       INSERT OR REPLACE INTO settings (
+         id, model, openai_api_key, medical_instructions,
+         voice, temperature, max_response_length, updated_at
+       ) VALUES (1, ?, ?, ?, ?, ?, ?, datetime('now'))
+     `);
+     return stmt.run(
+       settings.model,
+       settings.openaiApiKey,
+       settings.medicalInstructions,
+       settings.voice || 'alloy',
+       settings.temperature || 0.6,
+       settings.maxResponseLength || 200
+     );
+   }
 
   // Report generation helpers
   generateIntakeReport(sessionId: string) {

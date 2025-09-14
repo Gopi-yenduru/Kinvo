@@ -37,7 +37,7 @@ app.post('/api/test-agent-response', (req: any, res: any) => {
     const { sessionId, text } = req.body;
     console.log(`🧪 TEST: Saving test agent response "${text}" to session ${sessionId}`);
 
-    db.saveConversationLog(sessionId, 'agent', text, { type: 'test' });
+    db.saveConversationLog(sessionId, 'agent', text, { type: 'test' }, new Date().toISOString());
 
     // Query back to verify it was saved
     const logs = db.getSessionConversationLogs(sessionId);
@@ -374,7 +374,7 @@ app.get('/api/sessions/:sessionId/transcript', (req: any, res: any) => {
 
     res.json({
       sessionId,
-      timestamp: new Date(),
+      timestamp: new Date().toISOString(),
       duration: sessionInfo?.end_time ? new Date(sessionInfo.end_time).getTime() - new Date(sessionInfo.start_time).getTime() : 0,
       transcript,
       redFlagEvents: redFlagEvents || [],
@@ -430,7 +430,7 @@ app.get('/api/dashboard/summary', (req: any, res: any) => {
       pausedSessions: sessions.filter((s: any) => s.status === 'paused').length,
       totalSessions: sessions.length,
       sessionsWithRedFlags: sessions.filter((s: any) => s.red_flags_detected > 0).length,
-      timestamp: new Date()
+      timestamp: new Date().toISOString()
     };
 
     res.json({ summary });
