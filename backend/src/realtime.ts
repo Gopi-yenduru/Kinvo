@@ -263,7 +263,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     
         // Event switch ----------------------------------------------------------------
         switch (event.type) {
-          case 'session.created':
+          case 'session.updated':
             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
 
             // Trigger agent to speak first when session starts
@@ -271,11 +271,12 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             if (initialRealtimeWs) {
               setTimeout(() => {
                 console.log('▶️ Triggering initial agent response at session start');
+                // Then create the response
                 initialRealtimeWs.send(JSON.stringify({
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio","text"]
-                  }
+                    type: "response.create",
+                    response: {
+                      modalities: ["audio","text"]
+                    }
                 }));
               }, 500); // Small delay to ensure session is fully ready
             }
