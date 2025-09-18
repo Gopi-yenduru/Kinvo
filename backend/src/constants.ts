@@ -3,7 +3,7 @@ export const REALTIME_CONFIG = {
   voice: 'alloy', // Professional female voice for medical context
   temperature: 0.5, // Very low temperature for consistent function calling
   max_response_length: 500, // Concise responses to save costs
-  model: 'gpt-4o-realtime-preview', // Keep current model but try optimizing
+  model: 'gpt-realtime', // Keep current model but try optimizing
 };
 
 // Strict Medical Boundaries Instructions

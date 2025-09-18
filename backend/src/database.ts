@@ -53,7 +53,7 @@ class DatabaseManager {
       -- Insert default settings if not exists
       INSERT OR IGNORE INTO settings (id, model, voice, temperature, max_response_length,
         medical_instructions, updated_at)
-      VALUES (1, 'gpt-4o-realtime-preview', 'alloy', 0.6, 200,
+      VALUES (1, 'gpt-4o-realtime-preview', 'alloy', 0.7, 500,
         'Collect structured pre-consultation medical intake information by following a friendly, fast-paced, step-by-step conversational flow and strictly avoiding medical advice or interpretation.
 
 Always begin with: "Hello, I''m the medical intake assistant. I''m here to ask a few questions to collect information for your provider. What brings you in today?" If no response, repeat the greeting after a short pause.
