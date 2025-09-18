@@ -33,7 +33,7 @@ const Settings: React.FC = () => {
       setLoading(true);
       setError('');
       // Fetch configuration from backend
-      const response = await fetch('http://localhost:3001/api/settings/config', {
+      const response = await fetch('/api/settings/config', {
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -84,7 +84,7 @@ const Settings: React.FC = () => {
       setError('');
       setSuccessMessage('');
 
-      const response = await fetch('http://localhost:3001/api/settings/config', {
+      const response = await fetch('/api/settings/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)

@@ -28,7 +28,7 @@ const Sessions: React.FC = () => {
   const fetchSessions = async () => {
     try {
       setLoading(true);
-      const response = await fetch('http://localhost:3001/api/sessions');
+      const response = await fetch('/api/sessions');
       const data = await response.json();
       
       if (data.sessions) {
@@ -49,7 +49,7 @@ const Sessions: React.FC = () => {
 
   const viewTranscript = async (sessionId: string) => {
     try {
-      const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/transcript`);
+      const response = await fetch(`/api/sessions/${sessionId}/transcript`);
       const data = await response.json();
 
       if (data.transcript) {
@@ -66,7 +66,7 @@ const Sessions: React.FC = () => {
   const generateReport = async (sessionId: string) => {
     try {
       setGeneratingReport(sessionId);
-      const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/generate-report`, {
+      const response = await fetch(`/api/sessions/${sessionId}/generate-report`, {
         method: 'POST',
       });
       const data = await response.json();

@@ -35,11 +35,11 @@ const Dashboard: React.FC = () => {
   const fetchDashboardData = async () => {
     try {
       // Fetch sessions data
-      const sessionsResponse = await fetch('http://localhost:3001/api/sessions');
+      const sessionsResponse = await fetch('/api/sessions');
       const sessionsData = await sessionsResponse.json();
 
       // Fetch red flags count
-      const redFlagsResponse = await fetch('http://localhost:3001/api/sessions/red-flags');
+      const redFlagsResponse = await fetch('/api/sessions/red-flags');
       const redFlagsData = await redFlagsResponse.json();
 
       if (sessionsData.sessions) {
@@ -68,7 +68,7 @@ const Dashboard: React.FC = () => {
 
   const fetchAlerts = async () => {
     try {
-      const response = await fetch('http://localhost:3001/api/sessions/red-flags');
+      const response = await fetch('/api/sessions/red-flags');
       const data = await response.json();
 
       if (data.redFlags) {

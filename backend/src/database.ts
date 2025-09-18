@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-// Database file path
-const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, '../../data/medical_intake.db');
+// Database file path - use /data for container persistence
+const DB_PATH = process.env.DATABASE_PATH || '/data/medical_intake.db';
 const DB_DIR = path.dirname(DB_PATH);
 
 // Ensure database directory exists

@@ -40,7 +40,7 @@ const Transcript: React.FC = () => {
 
         // If no state data, try to get sessionId from URL and fetch from API
         if (sessionId) {
-          const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/transcript`);
+          const response = await fetch(`/api/sessions/${sessionId}/transcript`);
           const data = await response.json();
 
           if (data.transcript) {

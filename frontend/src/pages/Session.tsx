@@ -60,7 +60,7 @@ const Session: React.FC = () => {
       setErrorMessage('');
       sessionStartTime.current = Date.now();
 
-      const response = await fetch('http://localhost:3001/api/sessions/start', {
+      const response = await fetch('/api/sessions/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ patientName: patientNameToUse }),
@@ -156,7 +156,7 @@ const Session: React.FC = () => {
 
   const connectWebSocket = (sessionId: string) => {
     try {
-      wsRef.current = new WebSocket('ws://localhost:3001');
+      wsRef.current = new WebSocket('ws://localhost/ws');
 
       wsRef.current.onopen = () => {
         setConnectionStatus('Connected');
