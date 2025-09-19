@@ -58,5 +58,5 @@
   "homepage": "https://github.com/your-username/medical-intake-voice-agent#readme",
   "devDependencies": {
     "concurrently": "^8.2.2"
-  },
+  }
 }

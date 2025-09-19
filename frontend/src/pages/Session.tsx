@@ -156,7 +156,7 @@ const Session: React.FC = () => {
 
   const connectWebSocket = (sessionId: string) => {
     try {
-      wsRef.current = new WebSocket('ws://localhost/ws');
+      wsRef.current = new WebSocket('/ws');
 
       wsRef.current.onopen = () => {
         setConnectionStatus('Connected');
