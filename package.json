@@ -59,8 +59,4 @@
   "devDependencies": {
     "concurrently": "^8.2.2"
   },
-  "workspaces": [
-    "backend",
-    "frontend"
-  ]
 }
