@@ -266,7 +266,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
           case 'session.updated':
             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
 
-            // Trigger agent to speak first when session starts
+            // Trigger agent to speak first when session start
             const initialRealtimeWs = this.connections.get(sessionId);
             if (initialRealtimeWs) {
               setTimeout(() => {
