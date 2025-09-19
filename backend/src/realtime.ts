@@ -266,20 +266,6 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
           case 'session.updated':
             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
 
-            // Trigger agent to speak first when session starts
-            const initialRealtimeWs = this.connections.get(sessionId);
-            if (initialRealtimeWs) {
-              setTimeout(() => {
-                console.log('▶️ Triggering initial agent response at session start');
-                // Then create the response
-                initialRealtimeWs.send(JSON.stringify({
-                    type: "response.create",
-                    response: {
-                      modalities: ["audio","text"]
-                    }
-                }));
-              }, 500); // Small delay to ensure session is fully ready
-            }
             break;
     
           case 'input_audio_buffer.speech_started':
@@ -586,6 +572,22 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     db.logAuditEvent('session_joined', { socketLinked: true }, sessionId);
 
     console.log(`✅ Frontend WebSocket linked for session ${sessionId}`);
+
+
+    // NEW: Trigger agent response now that frontend is connected
+    const realtimeWs = this.connections.get(sessionId);
+    if (realtimeWs) {
+      setTimeout(() => {
+        console.log('▶️ Triggering initial agent response after frontend link');
+          realtimeWs.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio","text"]
+          }
+        }));
+      }, 500); // Keep the delay for session stability
+    }
+    
   }
 
   // Unlink frontend WebSocket when disconnected
