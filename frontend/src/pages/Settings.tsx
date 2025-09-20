@@ -183,12 +183,16 @@ const Settings: React.FC = () => {
   ];
 
   const voiceOptions = [
-    { value: 'verse', label: 'Verse' },
     { value: 'alloy', label: 'Alloy' },
+    { value: 'echo', label: 'Echo' },
+    { value: 'shimmer', label: 'Shimmer' },
+    { value: 'marin', label: 'Marin' },
+    { value: 'cedar', label: 'Cedar' },
+    { value: 'ash', label: 'Ash' },
+    { value: 'bellad', label: 'Bellad' },
+    { value: 'coral', label: 'Coral' },
     { value: 'sage', label: 'Sage' },
-    { value: 'nova', label: 'Nova' },
-    { value: 'aria', label: 'Aria' },
-    { value: 'lumen', label: 'Lumen' }
+    { value: 'verse', label: 'Verse' }
   ];
 
   if (loading) {

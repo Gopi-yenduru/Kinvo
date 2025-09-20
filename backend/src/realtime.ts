@@ -133,7 +133,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               turn_detection: {
                 type: "server_vad",
                 prefix_padding_ms: 300,
-                silence_duration_ms: 200,
+                silence_duration_ms: 500,
                 create_response: false
               },
               tools: this.getFunctionTools(),
