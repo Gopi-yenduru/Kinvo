@@ -155,7 +155,7 @@ app.post('/api/sessions/start', (req: any, res: any) => {
       });
     }
 
-    // Get current settings from database
+    // Get current settings from databases
     const settings = db.getSettings();
     console.log(`Temparature from settings: ${settings?.temperature}, max response length from settings: ${settings?.max_response_length}`);
 
