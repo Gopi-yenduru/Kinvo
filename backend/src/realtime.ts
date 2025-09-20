@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import db from './database.js';
-import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY } from './constants.js';
+import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY, MEDICAL_INTAKE_INSTRUCTIONS, MEDICAL_INTAKE_INSTRUCTIONS_NEW } from './constants.js';
 
 interface RealtimeConfig {
   sessionId: string;
@@ -22,10 +22,13 @@ class RealtimeSessionManager {
 
 
   // Add inside class
-private recentPatientActivity: Map<string, number> = new Map(); // ms epoch for last patient delta/speech stop
-private pendingAgentSaves: Map<string, Array<{ transcript: string; ts: string; timer: any }>> = new Map();
-private AGENT_DEFER_MS = 800; // how long to wait for patient transcript before saving agent (tune as needed)
-private RECENT_PATIENT_WINDOW_MS = 1000; // how recent is considered 'patient activity'
+ private recentPatientActivity: Map<string, number> = new Map(); // ms epoch for last patient delta/speech stop
+ private pendingAgentSaves: Map<string, Array<{ transcript: string; ts: string; timer: any }>> = new Map();
+ private patientTurnTimestamp: Map<string, number> = new Map(); // Stores patient speech start timestamp per session
+ private responseInProgress: Map<string, boolean> = new Map(); // Tracks if AI response is currently being generated
+ private lastPatientTranscript: Map<string, string> = new Map(); // Tracks last processed patient transcript to prevent duplicates
+ private AGENT_DEFER_MS = 800; // how long to wait for patient transcript before saving agent (tune as needed)
+ private RECENT_PATIENT_WINDOW_MS = 1000; // how recent is considered 'patient activity'
 
 private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: string) {
   try {
@@ -38,6 +41,37 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 }
 
+
+  private validateInstructions(instructions: string): string {
+    if (!instructions || instructions.trim().length === 0) {
+      console.warn('Empty instructions, using defaults');
+      return MEDICAL_INTAKE_INSTRUCTIONS;
+    }
+
+    // Truncate if too long (OpenAI has limits)
+    if (instructions.length > 8000) {
+      console.warn(`Instructions too long (${instructions.length} chars), truncating to 8000 characters`);
+      return instructions.substring(0, 8000);
+    }
+
+    // Final JSON validation and character cleanup
+    try {
+      JSON.stringify({ test: instructions });
+      return instructions;
+    } catch (e) {
+      console.error('Instructions contain invalid JSON characters, cleaning up...');
+      // Remove control characters that can break JSON
+      const cleaned = instructions.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+      try {
+        JSON.stringify({ test: cleaned });
+        console.log('Successfully cleaned up instructions');
+        return cleaned;
+      } catch (e2) {
+        console.error('Still invalid after cleanup, using fallback');
+        return MEDICAL_INTAKE_INSTRUCTIONS;
+      }
+    }
+  }
 
   async createRealtimeSession(config: RealtimeConfig): Promise<WebSocket | null> {
     return new Promise((resolve, reject) => {
@@ -52,7 +86,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
         console.log(`Creating Realtime session for ${config.sessionId}...`);
 
         // Dynamic model selection and API key
-        const modelName = config.model || 'gpt-4o-mini-realtime-preview';
+        const modelName = config.model || 'gpt-realtime';
         const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
 
         if (!apiKey || apiKey === 'your_openai_api_key_here') {
@@ -81,12 +115,17 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
           clearTimeout(connectionTimeout);
           console.log(`✅ OpenAI Realtime WebSocket connected for session ${config.sessionId}`);
 
+          // Validate and clean instructions before using
+          const validatedInstructions = this.validateInstructions(config.instructions);
+          console.log(`📝 Using validated instructions (${validatedInstructions.length} chars)`);
+          console.log('Instructions preview:', validatedInstructions.substring(0, 200) + '...');
+
           // Send session configuration
           const sessionConfig = {
             type: 'session.update',
             session: {
               modalities: ['text', 'audio'],
-              instructions: config.instructions,
+              instructions: validatedInstructions,
               voice: config.voice || 'alloy',
               input_audio_format: 'pcm16',
               output_audio_format: 'pcm16',
@@ -104,20 +143,38 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
           };
 
           try {
-            ws.send(JSON.stringify(sessionConfig));
+            const configString = JSON.stringify(sessionConfig);
+            console.log(`📤 Sending session config (${configString.length} bytes)`);
+            console.log('Session config content:', JSON.stringify(sessionConfig, null, 2));
+            ws.send(configString);
             this.connections.set(config.sessionId, ws);
             resolve(ws);
           } catch (sendError) {
             console.error('Error sending session config:', sendError);
+            console.error('Config that failed:', sessionConfig);
             reject(sendError);
           }
         });
 
         ws.on('message', (data: Buffer) => {
           try {
+            const event = JSON.parse(data.toString());
+
+            // Add specific error handling for session.update failures
+            if (event.type === 'error' && event.error?.message) {
+              console.error(`❌ Session update error for ${config.sessionId}:`, event.error);
+              if (event.error.message.includes('instructions') || event.error.message.includes('session')) {
+                console.error('❌ Instructions-related error detected');
+                console.error('❌ Original instructions:', config.instructions);
+              }
+            }
+
             this.handleRealtimeResponse(config.sessionId, data);
           } catch (messageError) {
             console.error('Error handling message:', messageError);
+            if (messageError instanceof Error && messageError.message.includes('JSON')) {
+              console.error('Possible JSON parsing issue with OpenAI response');
+            }
           }
         });
 
@@ -263,15 +320,37 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     
         // Event switch ----------------------------------------------------------------
         switch (event.type) {
-          case 'session.updated':
-            frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
+           case 'session.updated':
+             console.log(`✅ Session updated successfully for ${sessionId} - AI is ready to respond`);
+             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
+             break;
 
-            break;
+           case 'session.update':
+             console.log(`📝 Session update event received for ${sessionId} - AI is ready to respond`);
+             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
+             break;
+
+           case 'error':
+             console.error(`❌ OpenAI error event for ${sessionId}:`, event.error);
+             if (event.error?.message) {
+               console.error(`Error message: ${event.error.message}`);
+             }
+             // Send error to frontend
+             frontendWs.send(JSON.stringify({
+               type: 'error',
+               message: event.error?.message || 'OpenAI API error',
+               timestamp: new Date().toISOString()
+             }));
+             break;
     
           case 'input_audio_buffer.speech_started':
             console.log(`🎤 Patient started speaking (${sessionId})`);
             // mark recent activity
             this.recentPatientActivity.set(sessionId, nowMs);
+            // Capture timestamp on first delta (if not already set for this turn)
+            if (!this.patientTurnTimestamp.has(sessionId)) {
+              this.patientTurnTimestamp.set(sessionId, nowMs);
+            }
             break;
     
           case 'input_audio_buffer.speech_stopped':
@@ -289,10 +368,33 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     
           case 'conversation.item.input_audio_transcription.completed':
           case 'input_audio_transcription.completed':
+            // Check if response is already in progress
+            if (this.responseInProgress.get(sessionId)) {
+              console.log(`⏳ Response already in progress for ${sessionId}, skipping transcription processing`);
+              return;
+            }
+
             // Final patient transcript — save immediately and flush any queued agent
             if (event.transcript || event.text) {
               const transcript = event.transcript || event.text;
-              const ts = new Date().toISOString();
+
+              // Skip empty or very short transcripts
+              if (!transcript.trim() || transcript.trim().length < 3) {
+                console.log(`⚠️ Skipping empty/short transcript for ${sessionId}`);
+                return;
+              }
+
+              // Check for duplicate recent transcripts
+              const lastTranscript = this.lastPatientTranscript.get(sessionId);
+              if (lastTranscript === transcript.trim()) {
+                console.log(`🔄 Duplicate transcript detected for ${sessionId}, skipping`);
+                return;
+              }
+              this.lastPatientTranscript.set(sessionId, transcript.trim());
+
+              // Use stored timestamp if available, otherwise fall back to now
+              const storedTs = this.patientTurnTimestamp.get(sessionId);
+              const ts = storedTs ? new Date(storedTs).toISOString() : new Date().toISOString();
               console.log(`👤 Patient said (final): "${transcript}"`);
 
               // 🔍 BACKUP RED FLAG DETECTION - Check for red flags in patient transcript
@@ -306,8 +408,10 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               })); */
 
               // 🔑 Now request the model's response manually
-              const realtimeWs = this.connections.get(sessionId);
+            const realtimeWs = this.connections.get(sessionId);
               if (realtimeWs) {
+                // Set response in progress before triggering
+                this.responseInProgress.set(sessionId, true);
                 console.log('▶️ Triggering model response after patient transcript');
                 realtimeWs.send(JSON.stringify({
                   type: "response.create",
@@ -330,8 +434,13 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
               // flush any pending agent saves immediately (patient is now saved)
               flushPendingAgents(sessionId);
-          }
-          break;
+            }
+
+            // Reset timestamp after saving
+            this.patientTurnTimestamp.delete(sessionId);
+            this.lastPatientTranscript.delete(sessionId);
+            this.responseInProgress.delete(sessionId);
+            break;
     
           // Agent streaming (frontend playback and deltas) --------------------------------
           case 'response.text.delta':
@@ -378,6 +487,9 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
             } catch (err) {
               console.error('Error in audio.done backup logic:', err);
             }
+
+            // Clear response in progress flag
+            this.responseInProgress.set(sessionId, false);
             break;
     
           case 'response.audio_transcript.delta':
@@ -783,6 +895,9 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     this.agentTextBuffers.delete(sessionId);
     this.agentFrontendBuffers.delete(sessionId);
     this.lastAgentResponse.delete(sessionId);
+    this.patientTurnTimestamp.delete(sessionId);
+    this.responseInProgress.delete(sessionId);
+    this.lastPatientTranscript.delete(sessionId);
   }
 
   getSession(sessionId: string) {

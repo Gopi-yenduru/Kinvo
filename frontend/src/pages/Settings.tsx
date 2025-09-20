@@ -107,7 +107,52 @@ const Settings: React.FC = () => {
     }
   };
 
+  const sanitizeInstructions = (text: string): string => {
+    if (!text || text.trim().length === 0) {
+      return '';
+    }
+
+    // Basic sanitization - remove excessive whitespace
+    let sanitized = text.trim();
+
+    // Remove potential control characters that could break JSON
+    sanitized = sanitized.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+
+    // Test JSON serialization to catch encoding issues early
+    try {
+      JSON.stringify({ test: sanitized });
+    } catch (e) {
+      console.warn('Invalid characters detected in instructions, attempting to clean...');
+      // Remove any remaining problematic characters
+      sanitized = sanitized.replace(/["\\]/g, (match) => `\\${match}`);
+    }
+
+    return sanitized;
+  };
+
+  const validateInstructions = (text: string): { isValid: boolean; error?: string } => {
+    if (text.length > 10000) {
+      return { isValid: false, error: 'Instructions are too long (max 10000 characters)' };
+    }
+    return { isValid: true };
+  };
+
   const handleInputChange = (field: keyof SettingsConfig, value: string | number) => {
+    // Special handling for medical instructions
+    if (field === 'medicalInstructions') {
+      const stringValue = value as string;
+      const validation = validateInstructions(stringValue);
+
+      if (!validation.isValid) {
+        setError(validation.error || 'Invalid input');
+        return;
+      }
+
+      // Sanitize the input
+      const sanitizedValue = sanitizeInstructions(stringValue);
+      value = sanitizedValue;
+    }
+
     // Track that this field has been modified by the user
     setModifiedFields(prev => new Set([...prev, field]));
 
@@ -115,6 +160,9 @@ const Settings: React.FC = () => {
       ...prev,
       [field]: value
     }));
+
+    // Clear any previous errors
+    if (error) setError('');
   };
 
 
