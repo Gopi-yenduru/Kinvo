@@ -1,5 +1,4 @@
 import React, {useState, useEffect} from 'react';
-import { useNavigate } from "react-router-dom";
 import UserMenu from './UserMenu';
 
 interface HeaderProps {
@@ -8,7 +7,6 @@ interface HeaderProps {
 }
 
 const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
-  const navigate = useNavigate();
   const [userName, setUserName] = useState<string | null>(null);
   // Load user from localStorage or token
   useEffect(() => {
@@ -16,12 +14,6 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
     if (storedName) setUserName(storedName);
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem('jwt_token');
-    localStorage.removeItem('user_name');
-    setUserName(null);
-     navigate("/login");
-  };
 
   return (
     <header className="medical-header w-100">

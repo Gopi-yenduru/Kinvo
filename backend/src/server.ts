@@ -221,6 +221,13 @@ app.post('/api/sessions/start', authenticateJWT, async (req: any, res: any) => {
     });
 
     // Create session configuration using dynamic settings
+    const instructions = setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS;
+
+    console.log(`🔧 Creating session config for ${sessionId}`);
+    console.log(`📝 Instructions source: ${setting?.medical_instructions ? 'database' : 'defaults'}`);
+    console.log(`📏 Instructions length: ${instructions.length} characters`);
+    console.log(`📋 Instructions preview: ${instructions.substring(0, 150)}...`);
+
     const config = {
       sessionId,
       instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
@@ -230,6 +237,15 @@ app.post('/api/sessions/start', authenticateJWT, async (req: any, res: any) => {
       model: setting?.model || 'gpt-4o-realtime-preview',
       apiKey: setting?.openai_api_key || process.env.OPENAI_API_KEY
     };
+
+    // Debug: Test JSON serialization
+    try {
+      JSON.stringify({ test: config.instructions });
+      console.log('✅ Instructions JSON serialization test passed');
+    } catch (jsonError) {
+      console.error('❌ Instructions JSON serialization test failed:', jsonError);
+      console.error('❌ Instructions content:', config.instructions);
+    }
 
     // Initialize Realtime API session
     realtimeManager.createRealtimeSession(config)
@@ -606,6 +622,29 @@ app.get('/api/settings/config', async (req: any, res: any) => {
   }
 });
 
+// Validate medical instructions format and content
+const validateMedicalInstructions = (instructions: string): { isValid: boolean; error?: string } => {
+  if (!instructions || typeof instructions !== 'string') {
+    return { isValid: false, error: 'Medical instructions must be a non-empty string' };
+  }
+
+  if (instructions.trim().length === 0) {
+    return { isValid: false, error: 'Medical instructions cannot be empty' };
+  }
+
+  if (instructions.length > 10000) {
+    return { isValid: false, error: 'Medical instructions are too long (max 10000 characters)' };
+  }
+
+  // Test JSON serialization to catch encoding issues
+  try {
+    JSON.stringify({ instructions });
+    return { isValid: true };
+  } catch (e) {
+    return { isValid: false, error: 'Medical instructions contain invalid characters or formatting' };
+  }
+};
+
 // Save settings configuration
 app.post('/api/settings/config', async (req: any, res: any) => {
   try {
@@ -617,6 +656,18 @@ app.post('/api/settings/config', async (req: any, res: any) => {
         error: 'Model and medical instructions are required'
       });
     }
+
+    // Validate medical instructions format
+    const validation = validateMedicalInstructions(settingsData.medicalInstructions);
+    if (!validation.isValid) {
+      return res.status(400).json({
+        error: 'Invalid medical instructions',
+        message: validation.error,
+        details: 'Please check for special characters, encoding issues, or excessive length'
+      });
+    }
+
+    console.log(`💾 Saving settings with medical instructions (${settingsData.medicalInstructions.length} chars)`);
 
     const mappedSettings = {
       id: settingsData.id, // optional if you update by id

@@ -183,16 +183,28 @@ setup_environment() {
     echo ""
 }
 
-# Function to create database directory
+# Function to setup database
 setup_database() {
-    print_header "Setting Up Database"
-    
-    # Create data directory if it doesn't exist
-    if [[ ! -d "backend/data" ]]; then
-        mkdir -p backend/data
-        print_status "Database directory created: backend/data"
+    print_header "Setting Up Database Configuration"
+
+    print_info "This application uses SQL Server (MSSQL) instead of SQLite."
+    print_info "Please ensure you have:"
+    echo ""
+    print_info "1. Access to a SQL Server instance (local or cloud)"
+    print_info "2. Database user credentials with read/write permissions"
+    print_info "3. Network connectivity to the SQL Server"
+    echo ""
+    print_warning "Database connection details are configured in: backend/src/dbConfig.ts"
+    print_info "Update the connection parameters in dbConfig.ts for your environment."
+    echo ""
+
+    # Check if dbConfig.ts exists and is properly configured
+    if [[ -f "backend/src/dbConfig.ts" ]]; then
+        print_status "Database configuration file found: backend/src/dbConfig.ts"
+        print_info "Please verify the connection details in this file match your SQL Server setup."
     else
-        print_info "Database directory already exists"
+        print_error "Database configuration file not found: backend/src/dbConfig.ts"
+        exit 1
     fi
     echo ""
 }

@@ -32,8 +32,7 @@ COPY nginx.conf /etc/nginx/nginx.conf
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-# Create directory for SQLite database
-RUN mkdir -p /data
+# Environment variables will be set at runtime for database connection
 
 # Install backend production dependencies
 WORKDIR /app/backend

@@ -75,7 +75,7 @@ export interface AuditLog {
 }
 
 export interface User {
-  id: number;
+  id: string; // Actually uniqueidentifier/GUID in database
   username: string;
   email: string;
   password_hash: string;
@@ -189,10 +189,10 @@ export class DataService {
 
     public async updateSessionStatus(sessionId: string, status: string): Promise<void> {
         await this.runQueryWithInput(
-            `UPDATE sessions SET SET status = ?, end_time = CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP ELSE end_time END WHERE id = @id`,
+            `UPDATE sessions SET status = @status, end_time = CASE WHEN @status = 'completed' THEN CURRENT_TIMESTAMP ELSE end_time END WHERE id = @id`,
             [
                 { name: 'status', type: sql.VarChar(50), value: status },
-                { name: 'id', type: sql.BigInt, value: sessionId }
+                { name: 'id', type: sql.VarChar, value: sessionId }
             ]
         );
     }
@@ -200,7 +200,7 @@ export class DataService {
     public async deleteSession(sessionId: string): Promise<void> {
         await this.runQueryWithInput(
             `DELETE FROM sessions WHERE id = @id`,
-            [{ name: 'id', type: sql.BigInt, value: sessionId }]
+            [{ name: 'id', type: sql.VarChar, value: sessionId }]
         );
     }
 
@@ -305,12 +305,12 @@ export class DataService {
     public async saveConversationLog(log: Omit<ConversationLog, 'id' | 'timestamp'>): Promise<void> {
         await this.runQueryWithInput(
             `INSERT INTO conversation_logs (session_id, speaker, message, audio_data, timestamp)
-       VALUES (@session_id, @speaker, @message, @audio_data, GETDATE())`,
+        VALUES (@session_id, @speaker, @message, @audio_data, GETDATE())`,
             [
                 { name: 'session_id', type: sql.VarChar, value: log.session_id },
                 { name: 'speaker', type: sql.VarChar(250), value: log.speaker },
                 { name: 'message', type: sql.VarChar(sql.MAX), value: log.message },
-                { name: 'audio_data', type: sql.VarBinary(sql.MAX), value: log.audio_data ?? null },
+                { name: 'audio_data', type: sql.VarBinary(sql.MAX), value: null }, // Set to null for now since we're only storing metadata as JSON strings
             ]
         );
     }
@@ -547,11 +547,11 @@ export class DataService {
 
     // --------------------- USERS & AUTHENTICATION ---------------------
     public async loginUser(username: string, password: string, ip: string | undefined, userAgent: string) {
+        // First find user by username only
         const users = await this.runQueryWithInputByType<User>(
-            `SELECT * FROM users WHERE username = @username and password_hash=@password_hash`,
+            `SELECT * FROM users WHERE username = @username`,
             [
-                { name: 'username', type: sql.VarChar(250), value: username },
-                { name: 'password_hash', type: sql.VarChar(500), value: password }
+                { name: 'username', type: sql.VarChar(250), value: username }
             ]
         );
 
@@ -559,41 +559,56 @@ export class DataService {
 
         let successful = false;
 
-        if (user && password == user.password_hash) { // later user await bcrypt.compare(password, user.password_hash)
-            successful = true;
+        if (user) {
+            let passwordMatch = false;
 
-            // Generate JWT token
-            // later I need to change process.env.JWT_SECRET!
-            const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, 'A7f9K2dL8qX3pV0b' , { expiresIn: '8h' });
+            // Check if password_hash is a valid bcrypt hash (starts with $2b$ or $2a$)
+            if (user.password_hash.startsWith('$2b$') || user.password_hash.startsWith('$2a$')) {
+                // It's a proper bcrypt hash
+                passwordMatch = await bcrypt.compare(password, user.password_hash);
+            } else {
+                // It's plain text (temporary fallback for existing users)
+                passwordMatch = password === user.password_hash;
+            }
 
-            // Save login history
-            await this.runQueryWithInput(
-                `INSERT INTO user_logins (user_id, successful, ip_address, user_agent) VALUES (@user_id, @successful, @ip_address, @user_agent)`,
-                [
-                    { name: 'user_id', type: sql.VarChar, value: user.id },
-                    { name: 'successful', type: sql.Bit, value: true },
-                    { name: 'ip_address', type: sql.VarChar(50), value: ip },
-                    { name: 'user_agent', type: sql.VarChar(250), value: userAgent }
-                ]
-            );
-            const userData = {
-                username: user.username,
-                email: user.email,
-                role: user.role
-            };
+            if (passwordMatch) {
+                successful = true;
 
-            return { token, userData };
+                // Generate JWT token
+                // later I need to change process.env.JWT_SECRET!
+                const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, 'A7f9K2dL8qX3pV0b' , { expiresIn: '8h' });
+
+                // Save login history
+                await this.runQueryWithInput(
+                    `INSERT INTO user_logins (user_id, successful, ip_address, user_agent) VALUES (@user_id, @successful, @ip_address, @user_agent)`,
+                    [
+                        { name: 'user_id', type: sql.UniqueIdentifier, value: user.id },
+                        { name: 'successful', type: sql.Bit, value: true },
+                        { name: 'ip_address', type: sql.VarChar(50), value: ip },
+                        { name: 'user_agent', type: sql.VarChar(250), value: userAgent }
+                    ]
+                );
+                const userData = {
+                    username: user.username,
+                    email: user.email,
+                    role: user.role
+                };
+
+                return { token, userData };
+            } else {
+                // Log failed attempt for wrong password
+                await this.runQueryWithInput(
+                    `INSERT INTO user_logins (user_id, successful, ip_address, user_agent) VALUES (@user_id, @successful, @ip_address, @user_agent)`,
+                    [
+                        { name: 'user_id', type: sql.UniqueIdentifier, value: user.id },
+                        { name: 'successful', type: sql.Bit, value: false },
+                        { name: 'ip_address', type: sql.VarChar(50), value: ip },
+                        { name: 'user_agent', type: sql.VarChar(250), value: userAgent }
+                    ]
+                );
+                throw new Error('Invalid username or password');
+            }
         } else {
-            // Log failed attempt
-            await this.runQueryWithInput(
-                `INSERT INTO user_logins (user_id, successful, ip_address, user_agent) VALUES (@user_id, @successful, @ip_address, @user_agent)`,
-                [
-                    { name: 'user_id', type: sql.VarChar, value: user?.id ?? 0 },
-                    { name: 'successful', type: sql.Bit, value: false },
-                    { name: 'ip_address', type: sql.VarChar(50), value: ip },
-                    { name: 'user_agent', type: sql.VarChar(250), value: userAgent }
-                ]
-            );
             throw new Error('Invalid username or password');
         }
     }

@@ -30,10 +30,6 @@
           "value": "3002"
         },
         {
-          "name": "DATABASE_PATH",
-          "value": "/data/medical_intake.db"
-        },
-        {
           "name": "OPENAI_API_KEY",
           "value": "YOUR_OPENAI_API_KEY_HERE"
         }

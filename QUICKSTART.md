@@ -6,6 +6,7 @@ Get the Medical Intake Voice Agent running in 5 minutes! 🚀
 
 - **macOS 10.15+** (Catalina or later)
 - **Node.js 18+** ([Download here](https://nodejs.org/))
+- **SQL Server Database** (Local SQL Server or Azure SQL Database)
 - **OpenAI API Key** ([Get one here](https://platform.openai.com/api-keys))
 
 ## 1-Minute Setup 🏃‍♂️
@@ -31,6 +32,10 @@ npm run install:all
 # Setup environment
 cp backend/.env.example backend/.env
 # Edit backend/.env and add your OpenAI API key
+
+# Configure database connection
+# Edit backend/src/dbConfig.ts with your SQL Server details
+# Ensure you have access to a SQL Server database with proper permissions
 ```
 
 ## 2-Minute Configuration ⚙️
@@ -167,7 +172,16 @@ npm run clean
 OPENAI_API_KEY=your_api_key_here
 PORT=3001
 NODE_ENV=development
-DATABASE_PATH=./data/medical_intake.db
+
+# Database connection configured in src/dbConfig.ts
+# Update dbConfig.ts with your SQL Server details
+
+# Security
+SESSION_SECRET=your_session_secret_here
+JWT_SECRET=your_jwt_secret_here
+AUDIT_LOG_ENABLED=true
+HOSPITAL_SYSTEM_ID=your_hospital_system_id
+
 FRONTEND_URL=http://localhost:5173
 ```
 
@@ -183,15 +197,40 @@ Pre-Consultation/
 │   ├── src/
 │   │   ├── server.ts      # Express server
 │   │   ├── realtime.ts    # OpenAI integration
-│   │   └── database.ts    # SQLite database
+│   │   ├── database-manager.ts # SQL Server database management
+│   │   ├── dbConfig.ts    # Database connection config
+│   │   ├── dbconnection.ts # Database connection pool
+│   │   └── auth.ts        # Authentication middleware
 │   └── package.json
 └── frontend/              # React frontend
     ├── src/
     │   ├── App.tsx        # Main application
     │   ├── pages/         # Application pages
-    │   └── components/    # UI components
+    │   ├── components/    # UI components (redesigned)
+    │   └── styles/        # Complete styling system
     └── package.json
 ```
+
+## Railway Deployment 🚂
+
+### Deploy to Railway in 3 Steps
+
+1. **Connect Repository**:
+   - Go to [Railway.app](https://railway.app)
+   - Connect your GitHub repository
+   - Railway will automatically detect the Dockerfile
+
+2. **Configure Environment**:
+   ```env
+   OPENAI_API_KEY=sk-your-openai-api-key
+   NODE_ENV=production
+   SESSION_SECRET=your-secure-session-secret
+   JWT_SECRET=your-secure-jwt-secret
+   ```
+
+3. **Deploy**: Click "Deploy" - Railway handles the rest!
+
+Your app will be available at `your-app.railway.app`
 
 ## Next Steps 📚
 

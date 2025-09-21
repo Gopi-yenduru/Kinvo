@@ -6,12 +6,12 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:3002',
+        target: 'http://localhost:3001',
         changeOrigin: true,
         secure: false,
       },
       '/ws': {
-        target: 'http://localhost:3002', // your backend WebSocket server
+        target: 'http://localhost:3001', // your backend WebSocket server
         ws: true,                       // enable websocket proxy
         changeOrigin: true,
         secure: false,
