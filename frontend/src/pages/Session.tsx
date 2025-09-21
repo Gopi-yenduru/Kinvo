@@ -26,6 +26,7 @@ const Session: React.FC = () => {
   const pendingSentenceRef = useRef<{speaker: string, text: string, timeoutId: number, timestamp?: string} | null>(null);
 
   const conversationMessagesRef = useRef<HTMLDivElement>(null);
+  const token = localStorage.getItem("jwt_token");
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -62,7 +63,10 @@ const Session: React.FC = () => {
 
       const response = await fetch('/api/sessions/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+           "Authorization": `Bearer ${token}`,
+          'Content-Type': 'application/json' 
+        },
         body: JSON.stringify({ patientName: patientNameToUse }),
       });
 
@@ -157,7 +161,8 @@ const Session: React.FC = () => {
   const connectWebSocket = (sessionId: string) => {
     try {
       wsRef.current = new WebSocket('/ws');
-
+      console.log('WebSocket readyState:', wsRef.current.readyState);
+      
       wsRef.current.onopen = () => {
         setConnectionStatus('Connected');
         wsRef.current?.send(JSON.stringify({
@@ -291,6 +296,7 @@ const Session: React.FC = () => {
       };
 
       wsRef.current.onerror = () => {
+        console.error('Failed to connect WebSocket on error method');
         setConnectionStatus('Error');
         setSessionStatus('error');
       };
@@ -630,40 +636,55 @@ const Session: React.FC = () => {
   };
 
   return (
-    <div className="session-page-container">
+    <div className="session-page-container w-100">
       {/* Page Header */}
-      <div className="session-page-header">
-        <div className="page-header-content">
-          <div className="page-header-left">
-            <h1 className="page-title">Voice Intake Session</h1>
-            <p className="page-subtitle">Conduct AI-powered medical intake interviews with real-time voice processing</p>
-          </div>
-          <div className="page-header-right">
-            <div className={`status-badge-large ${sessionStatus}`}>
-              <div className="status-indicator">
-                <div className="status-dot"></div>
-                <span className="status-text">
-                  {sessionStatus === 'idle' && 'Ready to Start'}
-                  {sessionStatus === 'connecting' && 'Connecting...'}
-                  {sessionStatus === 'active' && 'Session Active'}
-                  {sessionStatus === 'completed' && 'Session Complete'}
-                  {sessionStatus === 'error' && 'Error Occurred'}
-                </span>
+      <div className="session-page-header w-100">
+        <div className="container-fluid px-3 px-md-4">
+          <div className="row align-items-start g-3 py-3">
+            <div className="col-12 col-lg-8">
+              <h1 className="h2 fw-bold text-primary mb-2">Voice Intake Session</h1>
+              <p className="text-muted mb-0">Conduct AI-powered medical intake interviews with real-time voice processing</p>
+            </div>
+            <div className="col-12 col-lg-4">
+              <div className={`d-flex flex-column flex-sm-row align-items-start align-sm-center gap-2 gap-sm-3 p-3 rounded-3 border ${
+                sessionStatus === 'idle' ? 'bg-light border-secondary' :
+                sessionStatus === 'connecting' ? 'bg-warning-subtle border-warning' :
+                sessionStatus === 'active' ? 'bg-success-subtle border-success' :
+                sessionStatus === 'completed' ? 'bg-primary-subtle border-primary' :
+                'bg-danger-subtle border-danger'
+              }`}>
+                <div className="d-flex align-items-center gap-2 flex-shrink-0">
+                  <div className={`rounded-circle status-dot ${
+                    sessionStatus === 'active' ? 'bg-success' :
+                    sessionStatus === 'error' ? 'bg-danger' :
+                    sessionStatus === 'connecting' ? 'bg-warning' :
+                    'bg-secondary'
+                  }`}></div>
+                  <span className="fw-semibold small">
+                    {sessionStatus === 'idle' && 'Ready to Start'}
+                    {sessionStatus === 'connecting' && 'Connecting...'}
+                    {sessionStatus === 'active' && 'Session Active'}
+                    {sessionStatus === 'completed' && 'Session Complete'}
+                    {sessionStatus === 'error' && 'Error Occurred'}
+                  </span>
+                </div>
+
+                <div className="d-flex gap-2 flex-wrap">
+                  {sessionStatus === 'active' && (
+                    <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
+                      <i className="fas fa-clock text-muted"></i>
+                      <span className="font-monospace fw-semibold small">{formatDuration(sessionDuration)}</span>
+                    </div>
+                  )}
+
+                  {sessionId && (
+                    <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
+                      <span className="text-muted small">ID:</span>
+                      <span className="font-monospace fw-semibold small">{sessionId.slice(0, 8)}...</span>
+                    </div>
+                  )}
+                </div>
               </div>
-
-              {sessionStatus === 'active' && (
-                <div className="timer-display">
-                  <span className="timer-icon">⏱️</span>
-                  <span className="timer-value">{formatDuration(sessionDuration)}</span>
-                </div>
-              )}
-
-              {sessionId && (
-                <div className="session-id-display">
-                  <span className="session-id-label">ID:</span>
-                  <span className="session-id-value">{sessionId.slice(0, 8)}...</span>
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -671,235 +692,270 @@ const Session: React.FC = () => {
 
       {/* Error Alert */}
       {errorMessage && (
-        <div className="error-banner">
-          <div className="error-banner-content">
-            <div className="error-banner-icon">⚠️</div>
-            <div className="error-banner-text">
-              <h4>Session Error</h4>
-              <p>{errorMessage}</p>
+        <div className="container-fluid px-3 px-md-4">
+          <div className="alert alert-danger alert-dismissible mb-3" role="alert">
+            <div className="d-flex align-items-start">
+              <i className="fas fa-exclamation-triangle me-3 mt-1 flex-shrink-0"></i>
+              <div className="flex-grow-1">
+                <h6 className="alert-heading mb-1">Session Error</h6>
+                <p className="mb-0">{errorMessage}</p>
+              </div>
             </div>
-            <button className="error-banner-close" onClick={() => setErrorMessage('')}>
-              ✕
-            </button>
+            <button type="button" className="btn-close" onClick={() => setErrorMessage('')}></button>
           </div>
         </div>
       )}
 
       {/* Main Content Layout */}
-      <div className="session-layout">
-        {/* Main Conversation Area */}
-        <div className="session-main-area">
-          <div className="conversation-card">
-            <div className="conversation-card-header">
-              <div className="conversation-card-title">
-                <h2>Live Conversation</h2>
-              </div>
-              <div className="conversation-indicators">
-                {connectionStatus === 'Connected' && (
-                  <div className="status-indicator-small connected">
-                    <div className="connection-dot-small"></div>
-                    <span>Connected</span>
-                  </div>
-                )}
-                {isRecording && (
-                  <div className="status-indicator-small recording">
-                    <div className="recording-dot-small"></div>
-                    <span>Recording</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="conversation-card-body">
-              <div className="conversation-messages" ref={conversationMessagesRef}>
-                {conversationLog.length === 0 && !pendingSentence ? (
-                  <div className="empty-conversation">
-                    <div className="empty-conversation-icon">🎙️</div>
-                    <h3>Ready to Begin</h3>
-                    <p>Start a new session to begin the AI-powered medical intake conversation</p>
-                  </div>
-                ) : (
-                  <>
-                    {conversationLog.map((entry, index) => (
-                      <div key={index} className={`conversation-message ${entry.type} speaker-${entry.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
-                        <div className="message-avatar">
-                          {entry.speaker === 'Agent' && '🤖'}
-                          {entry.speaker === 'You' && '👤'}
-                          {entry.speaker === 'System' && '⚙️'}
-                          {entry.speaker === '⚠️ ALERT' && '🚨'}
-                        </div>
-                        <div className="message-bubble">
-                          <div className="message-header">
-                            <span className="message-speaker">{entry.speaker}</span>
-                            <span className="message-time">{entry.timestamp}</span>
-                          </div>
-                          <div className="message-content">
-                            {entry.message.split('\n').map((line, i) => (
-                              <p key={i}>{line}</p>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-
-                    {/* Show pending sentence with typing indicator */}
-                    {pendingSentence && (
-                      <div className={`conversation-message typing speaker-${pendingSentence.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
-                        <div className="message-avatar">
-                          {pendingSentence.speaker === 'Agent' && '🤖'}
-                          {pendingSentence.speaker === 'You' && '👤'}
-                        </div>
-                        <div className="message-bubble">
-                          <div className="message-header">
-                            <span className="message-speaker">{pendingSentence.speaker}</span>
-                            <span className="message-time">{new Date().toLocaleTimeString()}</span>
-                          </div>
-                          <div className="message-content">
-                            <p>{pendingSentence.text}<span className="typing-indicator">|</span></p>
-                          </div>
-                        </div>
-                      </div>
+      <div className="container-fluid px-3 px-md-4 pb-4">
+        <div className="row g-3 g-md-4">
+          {/* Main Conversation Area */}
+          <div className="col-12 col-xl-8">
+            <div className="card h-100 border-0 shadow-sm">
+              <div className="card-header bg-white border-bottom">
+                <div className="d-flex justify-content-between align-items-center">
+                  <h5 className="card-title mb-0">Live Conversation</h5>
+                  <div className="d-flex gap-2">
+                    {connectionStatus === 'Connected' && (
+                      <span className="badge bg-success-subtle text-success border border-success-subtle">
+                        <i className="fas fa-circle me-1 status-icon-small"></i>
+                        Connected
+                      </span>
                     )}
-                  </>
-                )}
+                    {isRecording && (
+                      <span className="badge bg-danger-subtle text-danger border border-danger-subtle">
+                        <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem', animation: 'pulse 1.5s infinite' }}></i>
+                        Recording
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="card-body p-0 conversation-card-body">
+                <div className="conversation-messages h-100 overflow-auto p-4" ref={conversationMessagesRef}>
+                  {conversationLog.length === 0 && !pendingSentence ? (
+                    <div className="d-flex flex-column align-items-center justify-content-center h-100 text-center">
+                      <i className="fas fa-microphone fa-4x text-muted mb-4" style={{ opacity: '0.5' }}></i>
+                      <h4 className="text-primary mb-2">Ready to Begin</h4>
+                      <p className="text-muted">Start a new session to begin the AI-powered medical intake conversation</p>
+                    </div>
+                  ) : (
+                    <>
+                      {conversationLog.map((entry, index) => (
+                        <div key={index} className={`conversation-message d-flex gap-3 mb-4 speaker-${entry.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
+                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${
+                            entry.speaker === 'Agent' ? 'bg-primary-subtle text-primary' :
+                            entry.speaker === 'You' ? 'bg-success-subtle text-success' :
+                            entry.speaker === 'System' ? 'bg-warning-subtle text-warning' :
+                            'bg-danger-subtle text-danger'
+                          } message-avatar"`}>
+                            {entry.speaker === 'Agent' && <i className="fas fa-robot"></i>}
+                            {entry.speaker === 'You' && <i className="fas fa-user"></i>}
+                            {entry.speaker === 'System' && <i className="fas fa-cog"></i>}
+                            {entry.speaker === '⚠️ ALERT' && <i className="fas fa-exclamation-triangle"></i>}
+                          </div>
+                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${
+                            entry.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' :
+                            entry.speaker === 'You' ? 'bg-success-subtle border border-success-subtle' :
+                            entry.speaker === 'System' ? 'bg-warning-subtle border border-warning-subtle' :
+                            'bg-danger-subtle border border-danger-subtle'
+                          }`} style={{ maxWidth: '80%' }}>
+                            <div className="d-flex justify-content-between align-items-center mb-2">
+                              <span className="fw-semibold small">{entry.speaker}</span>
+                              <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{entry.timestamp}</span>
+                            </div>
+                            <div className="message-content">
+                              {entry.message.split('\n').map((line, i) => (
+                                <p key={i} className="mb-1 last:mb-0">{line}</p>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Show pending sentence with typing indicator */}
+                      {pendingSentence && (
+                        <div className={`conversation-message d-flex gap-3 mb-4 speaker-${pendingSentence.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
+                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${
+                            pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle text-primary' : 'bg-success-subtle text-success'
+                          } message-avatar"`}>
+                            {pendingSentence.speaker === 'Agent' ? <i className="fas fa-robot"></i> : <i className="fas fa-user"></i>}
+                          </div>
+                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${
+                            pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' : 'bg-success-subtle border border-success-subtle'
+                          }`} style={{ maxWidth: '80%', opacity: '0.8' }}>
+                            <div className="d-flex justify-content-between align-items-center mb-2">
+                              <span className="fw-semibold small">{pendingSentence.speaker}</span>
+                              <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{new Date().toLocaleTimeString()}</span>
+                            </div>
+                            <div className="message-content">
+                              <p className="mb-0">{pendingSentence.text}<span className="typing-indicator text-primary fw-bold">|</span></p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           </div>
-        </div>
 
-        {/* Sidebar Controls */}
-        <div className="session-sidebar">
-          {/* Session Controls */}
-          <div className="control-panel">
-            <h3 className="panel-title">Session Controls</h3>
+          {/* Sidebar Controls */}
+          <div className="col-12 col-xl-4">
+            <div className="row g-3 g-md-4">
+              {/* Session Controls */}
+              <div className="col-12">
+                <div className="card border-0 shadow-sm h-100">
+                  <div className="card-header bg-white border-bottom">
+                    <h5 className="card-title mb-0">Session Controls</h5>
+                  </div>
+                  <div className="card-body">
+                    <div className="d-grid gap-3">
+                      {sessionStatus === 'idle' && (
+                        <button className="btn btn-primary btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={() => setShowPatientForm(true)}>
+                          <i className="fas fa-microphone fa-2x flex-shrink-0"></i>
+                          <div className="text-start flex-grow-1">
+                            <div className="fw-bold">Start New Session</div>
+                            <small className="opacity-75">Begin voice intake</small>
+                          </div>
+                        </button>
+                      )}
 
-            <div className="control-actions">
-              {sessionStatus === 'idle' && (
-                <div className="control-btn primary large" onClick={() => setShowPatientForm(true)}>
-                  <span className="btn-icon">🎙️</span>
-                  <span className="btn-content">
-                    <span className="btn-text">Start New Session</span>
-                    <span className="btn-subtitle">Begin voice intake</span>
-                  </span>
+                      {sessionStatus === 'active' && (
+                        <>
+                          <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
+                            <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
+                            <div className="text-start flex-grow-1">
+                              <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
+                              <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
+                            </div>
+                          </button>
+
+                          <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                            <i className="fas fa-stop fa-lg flex-shrink-0"></i>
+                            <div className="text-start flex-grow-1">
+                              <div className="fw-bold">End Session</div>
+                              <small className="opacity-75">Terminate conversation</small>
+                            </div>
+                          </button>
+                        </>
+                      )}
+
+                      {sessionStatus === 'completed' && (
+                        <>
+                          <button className="btn btn-success btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={resetSession}>
+                            <i className="fas fa-plus fa-2x flex-shrink-0"></i>
+                            <div className="text-start flex-grow-1">
+                              <div className="fw-bold">Start New Session</div>
+                              <small className="opacity-75">Begin another intake</small>
+                            </div>
+                          </button>
+
+                          <button className="btn btn-outline-secondary d-flex align-items-center gap-3 p-3 w-100" onClick={() => setShowTranscript(true)}>
+                            <i className="fas fa-file-alt fa-lg flex-shrink-0"></i>
+                            <div className="text-start flex-grow-1">
+                              <div className="fw-bold">View Transcript</div>
+                              <small className="opacity-75">See conversation history</small>
+                            </div>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              )}
+              </div>
 
-              {sessionStatus === 'active' && (
-                <>
-                  <div className="control-btn primary large" onClick={toggleRecording}>
-                    <span className="btn-icon">{isRecording ? '⏸️' : '🎤'}</span>
-                    <span className="btn-content">
-                      <span className="btn-text">{isRecording ? 'Pause Recording' : 'Resume Recording'}</span>
-                      <span className="btn-subtitle">{isRecording ? 'Stop voice input' : 'Continue conversation'}</span>
-                    </span>
+              {/* Helpful Tips */}
+              <div className="col-12">
+                <div className="card border-0 shadow-sm h-100">
+                  <div className="card-header bg-white border-bottom">
+                    <h5 className="card-title mb-0">Tips for Better Results</h5>
                   </div>
-
-                  <div className="control-btn danger" onClick={endSession}>
-                    <span className="btn-icon">⏹️</span>
-                    <span className="btn-content">
-                      <span className="btn-text">End Session</span>
-                      <span className="btn-subtitle">Terminate conversation</span>
-                    </span>
+                  <div className="card-body">
+                    <div className="d-flex flex-column gap-2 gap-md-3">
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-microphone text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Speak clearly and at a normal pace</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-volume-mute text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Minimize background noise</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-edit text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Provide detailed information</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-pause text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Pause between different topics</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-exclamation-triangle text-danger mt-1 flex-shrink-0"></i>
+                        <span className="small">Mention any urgent symptoms immediately</span>
+                      </div>
+                    </div>
                   </div>
-                </>
-              )}
-
-              {sessionStatus === 'completed' && (
-                <>
-                  <div className="control-btn success large" onClick={resetSession}>
-                    <span className="btn-icon">🆕</span>
-                    <span className="btn-content">
-                      <span className="btn-text">Start New Session</span>
-                      <span className="btn-subtitle">Begin another intake</span>
-                    </span>
-                  </div>
-
-                  <div className="control-btn secondary" onClick={() => setShowTranscript(true)}>
-                    <span className="btn-icon">📋</span>
-                    <span className="btn-content">
-                      <span className="btn-text">View Transcript</span>
-                      <span className="btn-subtitle">See conversation history</span>
-                    </span>
-                  </div>
-                </>
-              )}
+                </div>
+              </div>
             </div>
-          </div>
-
-
-          {/* Helpful Tips */}
-          <div className="tips-panel">
-            <h3 className="panel-title">Tips for Better Results</h3>
-            <ul className="tips-list">
-              <li className="tip-item">
-                <span className="tip-icon">🎤</span>
-                <span>Speak clearly and at a normal pace</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">🔇</span>
-                <span>Minimize background noise</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">📝</span>
-                <span>Provide detailed information</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">⏸️</span>
-                <span>Pause between different topics</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">🚨</span>
-                <span>Mention any urgent symptoms immediately</span>
-              </li>
-            </ul>
           </div>
         </div>
       </div>
 
       {/* Transcript Modal */}
       {showTranscript && (
-        <div className="modal-overlay" onClick={() => setShowTranscript(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 className="modal-title">Session Transcript</h2>
-              <button className="modal-close" onClick={() => setShowTranscript(false)}>
-                ✕
-              </button>
-            </div>
-            <div className="modal-body">
-              {conversationLog.length === 0 ? (
-                <p className="modal-empty">No conversation recorded yet.</p>
-              ) : (
-                <div className="modal-messages">
-                  {conversationLog.map((entry, index) => (
-                    <div key={index} className={`modal-message ${entry.type}`}>
-                      <div className="modal-message-meta">
-                        <span className="modal-speaker">{entry.speaker}</span>
-                        <span className="modal-time">{entry.timestamp}</span>
+        <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }} onClick={() => setShowTranscript(false)}>
+          <div className="modal-dialog modal-lg modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content border-0 shadow">
+              <div className="modal-header bg-light">
+                <h5 className="modal-title fw-semibold">Session Transcript</h5>
+                <button type="button" className="btn-close" onClick={() => setShowTranscript(false)}></button>
+              </div>
+              <div className="modal-body" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                {conversationLog.length === 0 ? (
+                  <div className="text-center text-muted py-5">
+                    <i className="fas fa-file-alt fa-3x mb-3 opacity-50"></i>
+                    <p className="mb-0">No conversation recorded yet.</p>
+                  </div>
+                ) : (
+                  <div className="d-flex flex-column gap-3">
+                    {conversationLog.map((entry, index) => (
+                      <div key={index} className={`p-3 rounded border-start border-4 ${
+                        entry.type === 'system' ? 'bg-warning-subtle border-warning' :
+                        entry.type === 'alert' ? 'bg-danger-subtle border-danger' :
+                        'bg-light border-primary'
+                      }`}>
+                        <div className="d-flex justify-content-between align-items-center mb-2">
+                          <span className="fw-semibold small text-primary">{entry.speaker}</span>
+                          <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{entry.timestamp}</span>
+                        </div>
+                        <div className="message-content">
+                          {entry.message.split('\n').map((line, i) => (
+                            <p key={i} className="mb-1 last:mb-0">{line}</p>
+                          ))}
+                        </div>
                       </div>
-                      <div className="modal-message-content">
-                        {entry.message.split('\n').map((line, i) => (
-                          <p key={i}>{line}</p>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setShowTranscript(false)}>
-                Close
-              </button>
-              <button className="btn btn-primary" onClick={() => {
-                const transcript = conversationLog.map(entry =>
-                  `[${entry.timestamp}] ${entry.speaker}: ${entry.message}`
-                ).join('\n\n');
-                navigator.clipboard.writeText(transcript);
-                alert('Transcript copied to clipboard!');
-              }}>
-                Copy Transcript
-              </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="modal-footer bg-light">
+                <button type="button" className="btn btn-secondary" onClick={() => setShowTranscript(false)}>
+                  Close
+                </button>
+                <button type="button" className="btn btn-primary d-flex align-items-center gap-2" onClick={() => {
+                  const transcript = conversationLog.map(entry =>
+                    `[${entry.timestamp}] ${entry.speaker}: ${entry.message}`
+                  ).join('\n\n');
+                  navigator.clipboard.writeText(transcript);
+                  alert('Transcript copied to clipboard!');
+                }}>
+                  <i className="fas fa-copy"></i>
+                  Copy Transcript
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -907,49 +963,54 @@ const Session: React.FC = () => {
 
       {/* Patient Name Form Modal */}
       {showPatientForm && (
-        <div className="modal-overlay" onClick={handlePatientFormCancel}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 className="modal-title">Enter Patient Information</h2>
-              <button className="modal-close" onClick={handlePatientFormCancel}>
-                ✕
-              </button>
-            </div>
-            <div className="modal-body">
-              <form onSubmit={handlePatientFormSubmit}>
-                <div className="form-group">
-                  <label htmlFor="patientName" className="form-label">
-                    Patient Name <span className="required">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    id="patientName"
-                    className="form-input"
-                    value={patientName}
-                    onChange={(e) => setPatientName(e.target.value)}
-                    placeholder="Enter patient's full name"
-                    autoFocus
-                    required
-                  />
-                </div>
-              </form>
-            </div>
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={handlePatientFormCancel}
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="btn btn-primary"
-                onClick={handlePatientFormSubmit}
-                disabled={!patientName.trim()}
-              >
-                Start Session
-              </button>
+        <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }} onClick={handlePatientFormCancel}>
+          <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content border-0 shadow">
+              <div className="modal-header bg-light">
+                <h5 className="modal-title fw-semibold">Enter Patient Information</h5>
+                <button type="button" className="btn-close" onClick={handlePatientFormCancel}></button>
+              </div>
+              <div className="modal-body">
+                <form onSubmit={handlePatientFormSubmit}>
+                  <div className="mb-3">
+                    <label htmlFor="patientName" className="form-label fw-semibold">
+                      Patient Name <span className="text-danger">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      id="patientName"
+                      className="form-control form-control-lg"
+                      value={patientName}
+                      onChange={(e) => setPatientName(e.target.value)}
+                      placeholder="Enter patient's full name"
+                      autoFocus
+                      required
+                    />
+                    <div className="form-text">
+                      <i className="fas fa-info-circle me-1"></i>
+                      This information will be used to identify the session
+                    </div>
+                  </div>
+                </form>
+              </div>
+              <div className="modal-footer bg-light">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handlePatientFormCancel}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary d-flex align-items-center gap-2"
+                  onClick={handlePatientFormSubmit}
+                  disabled={!patientName.trim()}
+                >
+                  <i className="fas fa-play"></i>
+                  Start Session
+                </button>
+              </div>
             </div>
           </div>
         </div>

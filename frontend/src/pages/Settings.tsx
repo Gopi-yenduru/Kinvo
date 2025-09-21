@@ -299,7 +299,8 @@ const Settings: React.FC = () => {
             onClick={handleSave}
             disabled={saving || !config.openaiApiKey}
           >
-            {saving ? '💾 Saving...' : '💾 Save Settings'}
+             <i className="fas fa-save me-2"></i>
+            {saving ? 'Saving...' : 'Save Settings'}
           </button>
 
           <button
@@ -308,7 +309,8 @@ const Settings: React.FC = () => {
             disabled={modifiedFields.size === 0}
             title="Reset to default values from .env and constants"
           >
-            🔄 Reset to Defaults
+             <i className="fas fa-refresh me-2"></i>
+            Reset to Defaults
           </button>
         </div>
       </div>

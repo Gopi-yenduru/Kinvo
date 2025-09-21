@@ -1,9 +1,9 @@
-import Database from 'better-sqlite3';
+import sqlite3 from 'sqlite3';
 import fs from 'fs';
 import path from 'path';
 
 // Database file path - use /data for container persistence
-const DB_PATH = process.env.DATABASE_PATH || '/data/medical_intake.db';
+const DB_PATH = process.env.DATABASE_PATH || './data/medical_intake.db';
 const DB_DIR = path.dirname(DB_PATH);
 
 // Ensure database directory exists
@@ -12,10 +12,10 @@ if (!fs.existsSync(DB_DIR)) {
 }
 
 class DatabaseManager {
-  public db: any;
+  public db: sqlite3.Database;
 
   constructor() {
-    this.db = new Database(DB_PATH);
+    this.db = new sqlite3.Database(DB_PATH);
     this.initializeTables();
     console.log('✅ Database initialized at:', DB_PATH);
   }
@@ -35,7 +35,11 @@ class DatabaseManager {
          red_flags_detected INTEGER DEFAULT 0,
          created_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
        );
-     `);
+     `, (err) => {
+       if (err) {
+         console.error('Error creating sessions table:', err);
+       }
+     });
 
     // Settings table - user-configurable system settings
      this.db.exec(`
@@ -263,7 +267,7 @@ Keep responses short, conversational, emotive, and friendly—respectful but qui
       SELECT * FROM conversation_logs
       WHERE session_id = ?
       ORDER BY timestamp ASC
-    `);
+    `); 
     return stmt.all(sessionId);
   }
 

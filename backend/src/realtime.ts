@@ -43,7 +43,8 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     return new Promise((resolve, reject) => {
       try {
         // Check if API key is available
-        if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here') {
+        console.log(`🤖 OpenAI API key: ${process.env.OPENAI_API_KEY}`);
+        if (!config.apiKey && (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here')) {
           console.error('OpenAI API key not configured properly');
           reject(new Error('OpenAI API key is required but not configured'));
           return;

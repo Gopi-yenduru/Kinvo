@@ -4,7 +4,7 @@ import { WebSocketServer } from 'ws';
 import * as http from 'http';
 import { v4 as uuidv4 } from 'uuid';
 import { OpenAI } from 'openai';
-
+import { authenticateJWT, AuthRequest } from "./auth.js";
 import 'dotenv/config';
 
 const app = express();
@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server });
 // Import our modules
 import realtimeManager from './realtime.js';
 import { MEDICAL_INTAKE_INSTRUCTIONS, REALTIME_CONFIG } from './constants.js';
-import db from './database.js';
+import db from './database-manager.js';
 
 // Middleware
 app.use(cors());
@@ -33,15 +33,20 @@ app.get('/health', (req: any, res: any) => {
 });
 
 // Debug route to test database saving
-app.post('/api/test-agent-response', (req: any, res: any) => {
+app.post('/api/test-agent-response', async (req: any, res: any) => {
   try {
     const { sessionId, text } = req.body;
     console.log(`🧪 TEST: Saving test agent response "${text}" to session ${sessionId}`);
 
-    db.saveConversationLog(sessionId, 'agent', text, { type: 'test' }, new Date().toISOString());
+    await db.saveConversationLog({
+      session_id: sessionId,        // number
+      speaker: 'agent',             // string
+      message: text,                // string
+      audio_data: JSON.stringify({ type: 'test' }) // optional, convert object to string or Buffer
+    });
 
     // Query back to verify it was saved
-    const logs = db.getSessionConversationLogs(sessionId);
+    const logs = await db.getSessionConversationLogs(sessionId);
     const agentLogs = logs?.filter((log: any) => log.speaker === 'agent');
 
     console.log(`🧪 TEST: Found ${agentLogs?.length || 0} agent logs after saving`);
@@ -59,11 +64,11 @@ app.post('/api/test-agent-response', (req: any, res: any) => {
 });
 
 // Debug endpoint to check red flag events table directly
-app.get('/api/debug/red-flags', (req: any, res: any) => {
+app.get('/api/debug/red-flags', async (req: any, res: any) => {
   try {
     console.log('🔍 DEBUG: Checking red_flag_events table directly');
-    const stmt = db.db.prepare('SELECT * FROM red_flag_events ORDER BY timestamp DESC');
-    const redFlags = stmt.all();
+    const redFlags = await db.getAllRedFlagEvents();
+
     console.log(`🔍 DEBUG: Found ${redFlags?.length || 0} red flag events in database`);
 
     res.json({
@@ -120,8 +125,23 @@ app.post('/api/test-red-flag-detection', async (req: any, res: any) => {
     // If red flags detected, try to save them (only if session exists)
     if (detectedFlags.length > 0) {
       try {
-        db.saveRedFlagEvent(sessionId, detectedFlags, maxSeverity);
-        db.logAuditEvent('red_flag_detected_test', result, sessionId);
+        await db.saveRedFlagEvent({
+          session_id: sessionId,
+          symptoms: JSON.stringify(detectedFlags),
+          severity: maxSeverity,
+          resolved: false,
+          clinician_notified: true
+        });
+
+        //db.saveRedFlagEvent(sessionId, detectedFlags, maxSeverity);
+        //db.logAuditEvent('red_flag_detected_test', result, sessionId);
+
+        await db.insertAuditLog({
+          action: 'red_flag_detected_test',
+          details: JSON.stringify(result),
+          session_id: sessionId,
+          ip_address: req.ip || null
+        });
         console.log(`🚨 TEST: Red flags saved to database for session ${sessionId}`);
       } catch (saveError: any) {
         console.log(`🚨 TEST: Could not save to database (session may not exist): ${saveError.message}`);
@@ -142,9 +162,9 @@ app.post('/api/test-red-flag-detection', async (req: any, res: any) => {
 });
 
 // Start a new intake session
-app.post('/api/sessions/start', (req: any, res: any) => {
+app.post('/api/sessions/start', authenticateJWT, async (req: any, res: any) => {
+  let sessionId = uuidv4();
   try {
-    const sessionId = uuidv4();
     const { patientName } = req.body;
 
     // Validate patient name
@@ -156,10 +176,11 @@ app.post('/api/sessions/start', (req: any, res: any) => {
     }
 
     // Get current settings from database
-    const settings = db.getSettings();
-    console.log(`Temparature from settings: ${settings?.temperature}, max response length from settings: ${settings?.max_response_length}`);
+    const settings = await db.getAllSettings();
+    const setting = settings && settings.length > 0 ? settings[0] : null;
+    console.log(`Temparature from settings: ${setting?.temperature}, max response length from settings: ${setting?.max_response_length}`);
 
-    if (!settings || !settings.openai_api_key) {
+    if (!setting || !setting.openai_api_key) {
       // Fallback to .env API key if database is not configured
       if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here') {
         return res.status(400).json({
@@ -171,29 +192,43 @@ app.post('/api/sessions/start', (req: any, res: any) => {
     }
 
     // Create session in database first
-    db.createSession({
-      id: sessionId,
-      patientName: patientName.trim(),
-      status: 'active'
+    var insertedData = await db.createSession({      
+      patient_id: 0,
+      patient_name: patientName.trim(),
+      status: 'active',
+      start_time: new Date(),
+      end_time: null,
+      red_flags_detected: 0
     });
 
+    console.log(' Inserted data:', insertedData);
+    console.log(' setting data:', setting);
+    sessionId = insertedData.id; // use the actual session ID from DB
+
     // Log audit event
-    db.logAuditEvent('session_started', {
+    let audioResult = {
       clientIp: req.ip,
       userAgent: req.headers['user-agent'],
-      model: settings.model,
-      voice: settings.voice
-    }, sessionId);
+      model: setting?.model,
+      voice: setting?.voice
+    };
+
+    await db.insertAuditLog({
+      action: 'session_started',
+      details: JSON.stringify(audioResult),
+      session_id: sessionId,
+      ip_address: req.ip || null
+    });
 
     // Create session configuration using dynamic settings
     const config = {
       sessionId,
-      instructions: settings?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
-      voice: settings?.voice || 'alloy',
-      temperature: settings?.temperature || 0.6,
-      maxResponseLength: settings?.max_response_length || 200,
-      model: settings?.model || 'gpt-4o-realtime-preview',
-      apiKey: settings?.openai_api_key || process.env.OPENAI_API_KEY
+      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
+      voice: setting?.voice || 'alloy',
+      temperature: setting?.temperature || 0.6,
+      maxResponseLength: setting?.max_response_length || 200,
+      model: setting?.model || 'gpt-4o-realtime-preview',
+      apiKey: setting?.openai_api_key || process.env.OPENAI_API_KEY
     };
 
     // Initialize Realtime API session
@@ -211,13 +246,17 @@ app.post('/api/sessions/start', (req: any, res: any) => {
           throw new Error('Realtime connection failed to initialize');
         }
       })
-      .catch((error: any) => {
+      .catch(async (error: any) => {
         console.error('Failed to create Realtime session:', error);
 
         // Update database on failure
-        db.updateSessionStatus(sessionId, 'error');
-        db.logAuditEvent('session_start_failed', { error: error.message }, sessionId);
-
+        await db.updateSessionStatus(sessionId, 'error');
+        await db.insertAuditLog({
+          action: 'session_start_failed',
+          details: JSON.stringify({ error: error.message }),
+          session_id: sessionId,
+          ip_address: req.ip || null
+        });
         res.status(500).json({
           error: 'Failed to create session',
           message: error.message,
@@ -232,7 +271,7 @@ app.post('/api/sessions/start', (req: any, res: any) => {
 });
 
 // Get red flag events for all sessions (for clinician dashboard) - MUST be defined BEFORE :sessionId routes
-app.get('/api/sessions/red-flags', (req: any, res: any) => {
+app.get('/api/sessions/red-flags', async (req: any, res: any) => {
   console.log('📡 REQUEST DETAILS:', {
     method: req.method,
     url: req.url,
@@ -244,18 +283,15 @@ app.get('/api/sessions/red-flags', (req: any, res: any) => {
     const redFlags: any[] = [];
 
     // Get all sessions to include completed ones that may have red flags
-    const stmt = db.db.prepare(`
-      SELECT * FROM sessions
-      ORDER BY start_time DESC
-    `);
-    const sessions = stmt.all();
+    const sessions = await db.getAllSessions();
+
     console.log(`🔍 DEBUG: Found ${sessions?.length || 0} sessions`);
 
     if (sessions && sessions.length > 0) {
-      sessions.forEach((session: any) => {
+      await Promise.all(sessions.map(async (session: any) => {
         console.log(`🔍 DEBUG: Checking session ${session.id} for red flags`);
         try {
-          const sessionRedFlags = db.getRedFlagEvents(session.id);
+          const sessionRedFlags = await db.getRedFlagEvents(session.id);
           console.log(`🔍 DEBUG: Session ${session.id} has ${sessionRedFlags?.length || 0} red flags`);
           if (sessionRedFlags && sessionRedFlags.length > 0) {
             redFlags.push(...sessionRedFlags);
@@ -263,7 +299,7 @@ app.get('/api/sessions/red-flags', (req: any, res: any) => {
         } catch (sessionError: any) {
           console.error(`🔍 DEBUG: Error getting red flags for session ${session.id}:`, sessionError.message);
         }
-      });
+      }));
     }
 
     // Sort by timestamp (most recent first)
@@ -307,14 +343,10 @@ app.post('/api/sessions/:sessionId/end', (req: any, res: any) => {
 
 
 // Get all active sessions
-app.get('/api/sessions', (req: any, res: any) => {
+app.get('/api/sessions', async (req: any, res: any) => {
   console.log('🔍 DEBUG: Getting all sessions');
   try {
-    const stmt = db.db.prepare(`
-      SELECT * FROM sessions
-      ORDER BY start_time DESC
-    `);
-    const sessions = stmt.all();
+    const sessions = await db.getAllSessions();
     res.json({ sessions: sessions || [] });
   } catch (error: any) {
     console.error('Failed to get sessions:', error);
@@ -323,7 +355,7 @@ app.get('/api/sessions', (req: any, res: any) => {
 });
 
 // Get intake report for a session
-app.get('/api/sessions/:sessionId/report', (req: any, res: any) => {
+app.get('/api/sessions/:sessionId/report', async (req: any, res: any) => {
   try {
     const { sessionId } = req.params;
     const report = db.generateIntakeReport(sessionId);
@@ -332,8 +364,13 @@ app.get('/api/sessions/:sessionId/report', (req: any, res: any) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Log audit event for report access
-    db.logAuditEvent('report_accessed', {}, sessionId, undefined, req.ip);
+    // Log audit event for report access    
+    await db.insertAuditLog({
+      action: 'report_accessed',
+      details: null,
+      session_id: sessionId,
+      ip_address: req.ip || null
+    });
 
     res.json({ report });
   } catch (error: any) {
@@ -343,12 +380,12 @@ app.get('/api/sessions/:sessionId/report', (req: any, res: any) => {
 });
 
 // Get complete conversation transcript for a session (chronological)
-app.get('/api/sessions/:sessionId/transcript', (req: any, res: any) => {
+app.get('/api/sessions/:sessionId/transcript', async (req: any, res: any) => {
   try {
     const { sessionId } = req.params;
 
     // Get all conversation logs
-    const conversationLogs = db.getSessionConversationLogs(sessionId);
+    const conversationLogs = await db.getSessionConversationLogs(sessionId);
     console.log(`📋 DEBUG: Fetching transcript for session ${sessionId} - found ${conversationLogs?.length || 0} logs`);
     conversationLogs?.forEach((log: any, index: number) => {
       console.log(`📋 DEBUG: Log ${index + 1}: ${log.speaker} - "${log.message?.substring(0, 100)}${log.message?.length > 100 ? '...' : ''}"`);
@@ -359,8 +396,8 @@ app.get('/api/sessions/:sessionId/transcript', (req: any, res: any) => {
     }
 
     // Get red flag and red flag events for context
-    const redFlagEvents = db.getRedFlagEvents(sessionId);
-    const sessionInfo = db.getSession(sessionId);
+    const redFlagEvents = await db.getRedFlagEvents(sessionId);
+    const sessionInfo = await db.getSession(sessionId);
 
     // Format conversation as chronological transcript
     const transcript = conversationLogs.map((log: any) => ({
@@ -371,8 +408,13 @@ app.get('/api/sessions/:sessionId/transcript', (req: any, res: any) => {
       type: log.audio_data ? 'audio_with_text' : 'text_only'
     }));
 
-    // Log audit event
-    db.logAuditEvent('transcript_accessed', { lines: transcript.length }, sessionId, undefined, req.ip);
+    // Log audit event    
+    await db.insertAuditLog({
+      action: 'report_accessed',
+      details: JSON.stringify({ lines: transcript.length }),
+      session_id: sessionId,
+      ip_address: req.ip || null
+    });
 
     res.json({
       sessionId,
@@ -396,40 +438,44 @@ app.get('/api/sessions/:sessionId/transcript', (req: any, res: any) => {
 
 // Generate report using OpenAI
 app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) => {
- try {
-   const { sessionId } = req.params;
+  try {
+    const { sessionId } = req.params;
 
-   // Get settings for API key
-   const settings = db.getSettings();
-   const apiKey = settings?.openai_api_key || process.env.OPENAI_API_KEY;
+    // Get settings for API key   
+    const settings = await db.getAllSettings();
+    const setting = settings && settings.length > 0 ? settings[0] : null;
+    const apiKey = setting?.openai_api_key || process.env.OPENAI_API_KEY;
 
-   if (!apiKey) {
-     return res.status(400).json({ error: 'OpenAI API key not configured' });
-   }
+    if (!apiKey) {
+      return res.status(400).json({ error: 'OpenAI API key not configured' });
+    }
 
-   // Initialize OpenAI client
-   const openai = new OpenAI({ apiKey });
+    // Initialize OpenAI client
+    const openai = new OpenAI({ apiKey });
 
-   // Get conversation logs
-   const conversationLogs = db.getSessionConversationLogs(sessionId);
-   if (!conversationLogs || conversationLogs.length === 0) {
-     return res.status(404).json({ error: 'No conversation data found for this session' });
-   }
+    // Get conversation logs
+    const conversationLogs = await db.getSessionConversationLogs(sessionId);
+    if (!conversationLogs || conversationLogs.length === 0) {
+      return res.status(404).json({ error: 'No conversation data found for this session' });
+    }
+    console.log(`📝 Generating report for session ${sessionId} with ${conversationLogs.length} conversation lines`);
 
-   // Get session info and red flags
-   const sessionInfo = db.getSession(sessionId);
-   const redFlagEvents = db.getRedFlagEvents(sessionId);
+    // Get session info and red flags
+    const sessionInfo = await db.getSession(sessionId);
+    console.log(' Session info:', sessionInfo);
+    const redFlagEvents = await db.getRedFlagEvents(sessionId);
+    console.log(` Session has ${redFlagEvents?.length || 0} red flag events`);
 
-   // Format conversation for prompt
-   const conversationText = conversationLogs.map((log: any) =>
-     `${log.speaker.toUpperCase()}: ${log.message}`
-   ).join('\n\n');
+    // Format conversation for prompt
+    const conversationText = conversationLogs.map((log: any) =>
+      `${log.speaker.toUpperCase()}: ${log.message}`
+    ).join('\n\n');
 
-   const prompt = `Please generate a comprehensive medical intake report based on the following conversation transcript.
+    const prompt = `Please generate a comprehensive medical intake report based on the following conversation transcript.
 
 Session Information:
 - Patient Name: ${sessionInfo?.patient_name || 'Not specified'}
-- Session Date: ${new Date(sessionInfo?.start_time).toLocaleDateString()}
+- Session Date: ${(sessionInfo?.start_time ? new Date(sessionInfo.start_time).toLocaleDateString() : 'Not specified')}
 - Duration: ${sessionInfo?.end_time ? Math.round((new Date(sessionInfo.end_time).getTime() - new Date(sessionInfo.start_time).getTime()) / 1000 / 60) + ' minutes' : 'Ongoing'}
 - Red Flags Detected: ${redFlagEvents?.length || 0}
 
@@ -446,39 +492,44 @@ Please structure the report with the following sections:
 
 Make the report professional, concise, and suitable for medical records.`;
 
-   // Call OpenAI API
-   const completion = await openai.chat.completions.create({
-     model: 'gpt-4',
-     messages: [
-       { role: 'system', content: 'You are a medical assistant generating intake reports from conversation transcripts.' },
-       { role: 'user', content: prompt }
-     ],
-     max_tokens: 2000,
-     temperature: 0.3,
-   });
+    // Call OpenAI API
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: 'You are a medical assistant generating intake reports from conversation transcripts.' },
+        { role: 'user', content: prompt }
+      ],
+      max_tokens: 2000,
+      temperature: 0.3,
+    });
 
-   const report = completion.choices[0]?.message?.content?.trim();
+    const report = completion.choices[0]?.message?.content?.trim();
 
-   if (!report) {
-     return res.status(500).json({ error: 'Failed to generate report from OpenAI' });
-   }
+    if (!report) {
+      return res.status(500).json({ error: 'Failed to generate report from OpenAI' });
+    }
 
-   // Log audit event
-   db.logAuditEvent('report_generated', { lines: conversationLogs.length }, sessionId, undefined, req.ip);
+    // Log audit event   
+    await db.insertAuditLog({
+      action: 'report_generated',
+      details: JSON.stringify({ lines: conversationLogs.length }),
+      session_id: sessionId,
+      ip_address: req.ip || null
+    });
 
-   res.json({ report });
+    res.json({ report });
 
- } catch (error: any) {
-   console.error('Failed to generate report:', error);
-   res.status(500).json({ error: 'Failed to generate report', details: error.message });
- }
+  } catch (error: any) {
+    console.error('Failed to generate report:', error);
+    res.status(500).json({ error: 'Failed to generate report', details: error.message });
+  }
 });
 
 // Get conversation logs for a session
-app.get('/api/sessions/:sessionId/logs', (req: any, res: any) => {
+app.get('/api/sessions/:sessionId/logs', async (req: any, res: any) => {
   try {
     const { sessionId } = req.params;
-    const logs = db.getSessionConversationLogs(sessionId);
+    const logs = await db.getSessionConversationLogs(sessionId);
 
     // Add timestamp formatting for better display
     const formattedLogs = logs?.map((log: any) => ({
@@ -504,9 +555,9 @@ app.get('/api/sessions/:sessionId/logs', (req: any, res: any) => {
 
 
 // Clinician dashboard summary
-app.get('/api/dashboard/summary', (req: any, res: any) => {
+app.get('/api/dashboard/summary', async (req: any, res: any) => {
   try {
-    const sessions = db.getActiveSessions() || [];
+    const sessions = await db.getActiveSessions() || [];
     const summary = {
       activeSessions: sessions.filter((s: any) => s.status === 'active').length,
       pausedSessions: sessions.filter((s: any) => s.status === 'paused').length,
@@ -523,19 +574,19 @@ app.get('/api/dashboard/summary', (req: any, res: any) => {
 });
 
 // Settings configuration endpoint
-app.get('/api/settings/config', (req: any, res: any) => {
+app.get('/api/settings/config', async (req: any, res: any) => {
   try {
-    const settings = db.getSettings();
-
-    if (settings) {
+    const settings = await db.getAllSettings();
+    const setting = settings && settings.length > 0 ? settings[0] : null;
+    if (setting) {
       res.json({
-        id: settings.id,
-        model: settings.model,
+        id: setting.id,
+        model: setting.model,
         openaiApiKey: process.env.OPENAI_API_KEY || '', // Use .env value as default
-        medicalInstructions: settings.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS, // Use constants as default
-        voice: settings.voice,
-        temperature: settings.temperature,
-        maxResponseLength: settings.max_response_length
+        medicalInstructions: setting.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS, // Use constants as default
+        voice: setting.voice,
+        temperature: setting.temperature,
+        maxResponseLength: setting.max_response_length
       });
     } else {
       // No settings table exists yet, return defaults
@@ -556,7 +607,7 @@ app.get('/api/settings/config', (req: any, res: any) => {
 });
 
 // Save settings configuration
-app.post('/api/settings/config', (req: any, res: any) => {
+app.post('/api/settings/config', async (req: any, res: any) => {
   try {
     const settingsData = req.body;
 
@@ -567,11 +618,24 @@ app.post('/api/settings/config', (req: any, res: any) => {
       });
     }
 
-    const result = db.saveSettings(settingsData);
+    const mappedSettings = {
+      id: settingsData.id, // optional if you update by id
+      model: String(settingsData.model),
+      openai_api_key: settingsData.openaiApiKey ?? null,
+      medical_instructions: String(settingsData.medicalInstructions),
+      voice: String(settingsData.voice ?? 'alloy'),
+      temperature: Number(settingsData.temperature ?? 0.6), // ensure number
+      max_response_length: Number(settingsData.maxResponseLength ?? 200),
+    };
 
-    if (result.changes > 0) {
+    // Save to DB
+    console.log('Saving settings:', mappedSettings);
+    await db.saveSettings(mappedSettings);      
+    const settings = await db.getAllSettings();
+    const savedSettings = settings && settings.length > 0 ? settings[0] : null;
+
+    if (savedSettings) {
       // Return saved settings
-      const savedSettings = db.getSettings();
       res.json({
         id: savedSettings.id,
         model: savedSettings.model,
@@ -588,6 +652,19 @@ app.post('/api/settings/config', (req: any, res: any) => {
   } catch (error: any) {
     console.error('Failed to save settings:', error);
     res.status(500).json({ error: 'Failed to save settings', details: error.message });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const ip = req.ip;
+    const userAgent = req.get('User-Agent') || '';
+
+    const result = await db.loginUser(username, password, ip, userAgent);
+    res.json(result);
+  } catch (err: any) {
+    res.status(401).json({ error: err.message });
   }
 });
 

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, {useState, useEffect} from 'react';
 import { NavLink } from 'react-router-dom';
 
 interface SidebarProps {
@@ -7,86 +7,117 @@ interface SidebarProps {
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
+  const [userName, setUserName] = useState<string | null>(null);
+    // Load user from localStorage or token
+    useEffect(() => {
+      const storedName = localStorage.getItem('user_name') || 'User';
+      if (storedName) setUserName(storedName);
+    }, []);
+
   const menuItems = [
     {
       path: '/',
-      icon: '🏠',
+      icon: 'fas fa-home',
       label: 'Dashboard',
       description: 'Overview & Analytics'
     },
     {
       path: '/session',
-      icon: '🎙️',
+      icon: 'fas fa-microphone',
       label: 'New Session',
       description: 'Start Voice Intake'
     },
     {
       path: '/sessions',
-      icon: '📋',
+      icon: 'fas fa-list',
       label: 'Sessions',
       description: 'View All Sessions'
     },
     {
       path: '/analytics',
-      icon: '📊',
+      icon: 'fas fa-chart-bar',
       label: 'Analytics',
       description: 'Reports & Insights'
     },
     {
       path: '/settings',
-      icon: '⚙️',
+      icon: 'fas fa-cog',
       label: 'Settings',
       description: 'System Configuration'
     }
   ];
 
   return (
-    <aside className={`sidebar ${isCollapsed ? 'collapsed' : ''}`}>
+    <aside className={`medical-sidebar ${isCollapsed ? 'sidebar-collapsed' : ''}`}>
+      {/* Header */}
       <div className="sidebar-header">
-        <div className="logo">
-          <div className="logo-icon">🏥</div>
-          {!isCollapsed && (
-            <div className="logo-text">
-              <h2>MedIntake</h2>
-              <span>AI Voice Assistant</span>
+        <div className="d-flex align-items-center justify-content-between">
+          <div className="d-flex align-items-center gap-2">
+            <div className="sidebar-logo-icon">
+              <i className="fas fa-hospital text-white"></i>
             </div>
-          )}
+            {!isCollapsed && (
+              <div className="sidebar-logo-text">
+                <h5 className="mb-0 fw-bold text-white">MedIntake</h5>
+                <small className="text-white text-opacity-75">AI Voice Assistant</small>
+              </div>
+            )}
+          </div>
+          <button
+            className="sidebar-toggle-btn"
+            onClick={onToggle}
+          >
+            <i className={`fas ${isCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
+          </button>
         </div>
-        <button className="sidebar-toggle" onClick={onToggle}>
-          {isCollapsed ? '→' : '←'}
-        </button>
       </div>
 
+      {/* Navigation */}
       <nav className="sidebar-nav">
-        <ul className="nav-list">
+        <ul className="list-unstyled mb-0">
           {menuItems.map((item) => (
-            <li key={item.path} className="nav-item">
+            <li key={item.path} className="sidebar-nav-item">
               <NavLink
                 to={item.path}
-                className={({ isActive }) => 
-                  `nav-link ${isActive ? 'active' : ''}`
+                className={({ isActive }) =>
+                  `sidebar-nav-link ${isActive ? 'active' : ''}`
                 }
               >
-                <div className="nav-icon">{item.icon}</div>
-                {!isCollapsed && (
-                  <div className="nav-content">
-                    <span className="nav-label">{item.label}</span>
-                    <span className="nav-description">{item.description}</span>
-                  </div>
-                )}
+                <div className="d-flex align-items-center gap-3 w-100">
+                  <i className={`${item.icon} sidebar-nav-icon ${isCollapsed ? 'fa-lg' : ''}`}></i>
+                  {!isCollapsed && (
+                    <div className="sidebar-nav-content">
+                      <div className="sidebar-nav-label">{item.label}</div>
+                      <div className="sidebar-nav-description">
+                        {item.description}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </NavLink>
             </li>
           ))}
         </ul>
       </nav>
 
+      {/* Footer */}
       <div className="sidebar-footer">
-        {!isCollapsed && (
-          <div className="user-profile">
-            <div className="user-avatar">👨‍⚕️</div>
-            <div className="user-info">
-              <span className="user-name">Dr. Smith</span>
-              <span className="user-role">Medical Professional</span>
+        {!isCollapsed ? (
+          <div className="d-flex align-items-center gap-2">
+            <div className="sidebar-user-avatar">
+              <i className="fas fa-user-md text-white"></i>
+            </div>
+            <div className="sidebar-user-info">
+              <div className="fw-semibold small text-white">Dr. {userName ?? 'User'}</div>
+              <div className="text-white text-opacity-75 small">
+                Medical Professional
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="d-flex justify-content-center">
+            <div className="sidebar-user-avatar">
+              <i className="fas fa-user-md text-white"></i>
             </div>
           </div>
         )}
