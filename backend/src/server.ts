@@ -32,7 +32,7 @@ app.get('/health', (req: any, res: any) => {
   res.json({ status: 'OK', message: 'Medical Intake Voice Agent Backend is running' });
 });
 
-// Debug route to test database saving
+// Debug route to test database savings
 app.post('/api/test-agent-response', async (req: any, res: any) => {
   try {
     const { sessionId, text } = req.body;
