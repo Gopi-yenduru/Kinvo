@@ -14,12 +14,9 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
-    "@types/sqlite3": "^5.1.0",
     "@types/uuid": "^10.0.0",
-    "better-sqlite3": "^12.2.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
@@ -27,8 +24,6 @@
     "jsonwebtoken": "^9.0.2",
     "mssql": "^11.0.1",
     "openai": "^5.19.1",
-    "sqlite3": "^5.1.7",
-    "typescript": "^5.9.2",
     "uuid": "^12.0.0",
     "ws": "^8.18.3"
   },
