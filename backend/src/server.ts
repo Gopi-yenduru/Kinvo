@@ -21,7 +21,7 @@ import db from './database-manager.js';
 app.use(cors());
 app.use(express.json());
 
-// Debug middleware to log all requests
+// Debug middleware to log all request
 app.use((req: any, res: any, next: any) => {
   console.log(`📡 ${req.method} ${req.path} - ${new Date().toISOString()}`);
   next();
