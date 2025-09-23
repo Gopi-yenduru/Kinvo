@@ -44,8 +44,8 @@ RUN chmod +x /start.sh
 WORKDIR /app/backend
 RUN npm ci --only=production
 
-# Expose port 80
-EXPOSE 80
+# Expose port 8080
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
