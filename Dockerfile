@@ -28,6 +28,9 @@ COPY --from=backend-builder /app/backend /app/backend
 # Copy frontend build (force rebuild)
 COPY --from=frontend-builder /app/frontend/dist /usr/share/nginx/html
 
+# Verify assets are copied
+RUN ls -la /usr/share/nginx/html/assets/
+
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
 
