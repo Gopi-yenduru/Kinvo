@@ -8,11 +8,13 @@ RUN npm ci
 COPY backend/ ./
 RUN npm run build
 
-# Stage 2: Copy pre-built frontend (build locally to avoid dependency issues)
-FROM alpine:latest AS frontend-builder
-WORKDIR /app
-# Copy the pre-built frontend files from local build
-COPY frontend/dist ./frontend/dist
+# Stage 2: Build frontend
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
 
 # Stage 3: Production image with nginx and Node.js
 FROM node:20-alpine
