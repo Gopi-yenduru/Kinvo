@@ -25,7 +25,7 @@ RUN apk add --no-cache nginx
 # Copy backend build
 COPY --from=backend-builder /app/backend /app/backend
 
-# Copy frontend build
+# Copy frontend build (force rebuild)
 COPY --from=frontend-builder /app/frontend/dist /usr/share/nginx/html
 
 # Copy nginx configuration
