@@ -10,6 +10,7 @@ RUN npm run build
 
 # Stage 2: Build frontend
 FROM node:20-alpine AS frontend-builder
+# Force rebuild
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm ci
