@@ -8,14 +8,11 @@ RUN npm ci
 COPY backend/ ./
 RUN npm run build
 
-# Stage 2: Build frontend
-FROM node:20-alpine AS frontend-builder
-# Force rebuild
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm ci
-COPY frontend/ ./
-RUN npm run build
+# Stage 2: Copy pre-built frontend (build locally to avoid dependency issues)
+FROM alpine:latest AS frontend-builder
+WORKDIR /app
+# Copy the pre-built frontend files from local build
+COPY frontend/dist ./frontend/dist
 
 # Stage 3: Production image with nginx and Node.js
 FROM node:20-alpine
@@ -25,11 +22,8 @@ RUN apk add --no-cache nginx
 # Copy backend build
 COPY --from=backend-builder /app/backend /app/backend
 
-# Copy frontend build (force rebuild)
+# Copy frontend build
 COPY --from=frontend-builder /app/frontend/dist /usr/share/nginx/html
-
-# Verify assets are copied
-RUN ls -la /usr/share/nginx/html/assets/
 
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
@@ -38,14 +32,15 @@ COPY nginx.conf /etc/nginx/nginx.conf
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-# Environment variables will be set at runtime for database connection
+# Create directory for SQLite database
+RUN mkdir -p /data
 
 # Install backend production dependencies
 WORKDIR /app/backend
 RUN npm ci --only=production
 
-# Expose port 8080
-EXPOSE 8080
+# Expose port 80
+EXPOSE 80
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

@@ -8,7 +8,7 @@ import { authenticateJWT, AuthRequest } from "./auth.js";
 import 'dotenv/config';
 
 const app = express();
-const PORT = 3002;
+const PORT = process.env.PORT || 3002;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
