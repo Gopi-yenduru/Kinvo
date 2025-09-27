@@ -9,7 +9,8 @@ const dbConfig: SQLConfig = {
   options: {
     encrypt: true,               // required for Azure
     trustServerCertificate: true // for local dev / self-signed certs
-  }
+  },
+  pool: { max: 10, min: 0, idleTimeoutMillis: 30000 }
 };
 
 export default dbConfig;

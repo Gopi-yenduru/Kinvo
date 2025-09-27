@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useNavigate } from "react-router-dom";
+import authService from '../services/authService';
 
 interface LoginProps {
-  onLoginSuccess: (token: string) => void;
+  onLoginSuccess: (token: string, user: string, userName: string) => void;
 }
 
 const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
@@ -32,15 +33,13 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
 
       const { token, userData } = data;
 
-      // ✅ Save token & user info
-      localStorage.setItem('jwt_token', token);
-      localStorage.setItem('user', JSON.stringify(userData));
-      if (userData?.username) {
-        localStorage.setItem('user_name', userData.username);
-      }
+      // ✅ Save auth data using the auth service
+      const userString = JSON.stringify(userData);
+      const userName = userData?.username || '';
+      authService.setAuth(token, userString, userName);
 
       // ✅ Update parent App state
-      onLoginSuccess(token);
+      onLoginSuccess(token, userString, userName);
 
       // ✅ Redirect to dashboard
       navigate("/");

@@ -19,6 +19,7 @@ const Session: React.FC = () => {
   const [sessionDuration, setSessionDuration] = useState(0);
   const [showTranscript, setShowTranscript] = useState(false);
   const [pendingSentence, setPendingSentence] = useState<{speaker: string, text: string, timeoutId: number, timestamp?: string} | null>(null);
+  const [speaker, setSpeaker] = useState<string>(''); // Current speaker indicator
 
   // New state for patient name input
   const [patientName, setPatientName] = useState<string>('');
@@ -195,6 +196,7 @@ const Session: React.FC = () => {
               console.log('📝 Processing agent delta:', message.text);
               // For agent deltas, always accumulate - don't check immediate sentence first
               // The backend will tell us when the response is complete
+              setSpeaker('Patient');
               processTranscriptDelta('Agent', message.text, message.timestamp);
             } else {
               console.log('⚠️ Agent transcript delta is empty or null:', message);
@@ -215,12 +217,14 @@ const Session: React.FC = () => {
                 clearTimeout(pendingSentence.timeoutId);
                 setPendingSentence(null);
               }
+              setSpeaker('');
               // Add complete transcript directly
               addSentenceToConversationLog('Agent', message.transcript, 'text', message.timestamp);
             }
             break;
           case 'conversation.item.input_audio_transcription.delta':
             if (message.delta) {
+              setSpeaker('');
               // Handle patient transcript deltas
               if (!checkImmediateSentence('You', message.delta) && message.delta.trim()) {
                 processTranscriptDelta('You', message.delta);
@@ -228,6 +232,7 @@ const Session: React.FC = () => {
             }
             break;
           case 'response.content_part.done':
+            setSpeaker('');
             // Handle complete transcript from OpenAI (more reliable than delta accumulation)
             if (message.part && message.part.transcript && message.part.type === 'audio') {
               // Clear any pending agent sentences since we have the complete transcript
@@ -255,6 +260,7 @@ const Session: React.FC = () => {
             }
             break;
           case 'agent_response_complete':
+            setSpeaker('');
             // Play accumulated audio when response is complete
             playAccumulatedAudio();
             // Finalize any pending sentence
@@ -281,6 +287,12 @@ const Session: React.FC = () => {
             // Finalize any pending sentences before ending session
             console.log('Received request_session_end from backend, ending session');
             endSession();
+            break;
+          case "listening":
+            setSpeaker('Patient');
+            break;
+          case "speaking":
+            setSpeaker('Agent');
             break;
           case 'error':
             setErrorMessage(message.message || 'An error occurred');
@@ -637,7 +649,7 @@ const Session: React.FC = () => {
 
   return (
     <div className="session-page-container w-100">
-      {/* Page Header */}
+      {/* Page Header */}      
       <div className="session-page-header w-100">
         <div className="container-fluid px-3 px-md-4">
           <div className="row align-items-start g-3 py-3">
@@ -714,7 +726,17 @@ const Session: React.FC = () => {
             <div className="card h-100 border-0 shadow-sm">
               <div className="card-header bg-white border-bottom">
                 <div className="d-flex justify-content-between align-items-center">
-                  <h5 className="card-title mb-0">Live Conversation</h5>
+                  <div className="d-flex align-items-center gap-3">
+                    <h5 className="card-title mb-0">Live Conversation</h5>
+                    {speaker && (
+                      <span className="badge bg-info-subtle text-info border border-info-subtle fw-semibold px-3 py-2">
+                        <i className={`fas me-2 ${speaker === 'Agent' ? 'fa-volume-up' : 'fa-microphone'}`} style={{ fontSize: '0.875rem' }}></i>
+                        <span className="fs-6">
+                          {speaker === 'Agent' ? 'Doctor' : 'Patient'}
+                        </span>
+                      </span>
+                    )}
+                  </div>
                   <div className="d-flex gap-2">
                     {connectionStatus === 'Connected' && (
                       <span className="badge bg-success-subtle text-success border border-success-subtle">
@@ -750,7 +772,7 @@ const Session: React.FC = () => {
                             entry.speaker === 'System' ? 'bg-warning-subtle text-warning' :
                             'bg-danger-subtle text-danger'
                           } message-avatar"`}>
-                            {entry.speaker === 'Agent' && <i className="fas fa-robot"></i>}
+                            {entry.speaker === 'Agent' && <i className="fas fa-user-md"></i>}
                             {entry.speaker === 'You' && <i className="fas fa-user"></i>}
                             {entry.speaker === 'System' && <i className="fas fa-cog"></i>}
                             {entry.speaker === '⚠️ ALERT' && <i className="fas fa-exclamation-triangle"></i>}
@@ -780,13 +802,15 @@ const Session: React.FC = () => {
                           <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${
                             pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle text-primary' : 'bg-success-subtle text-success'
                           } message-avatar"`}>
-                            {pendingSentence.speaker === 'Agent' ? <i className="fas fa-robot"></i> : <i className="fas fa-user"></i>}
+                            {pendingSentence.speaker === 'Agent' ? <i className="fas fa-user-md"></i> : <i className="fas fa-user"></i>}
                           </div>
                           <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${
                             pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' : 'bg-success-subtle border border-success-subtle'
                           }`} style={{ maxWidth: '80%', opacity: '0.8' }}>
                             <div className="d-flex justify-content-between align-items-center mb-2">
-                              <span className="fw-semibold small">{pendingSentence.speaker}</span>
+                              <span className="fw-semibold small">
+                                {pendingSentence.speaker === 'Agent' ? 'Doctor' : 'Patient'}
+                              </span>
                               <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{new Date().toLocaleTimeString()}</span>
                             </div>
                             <div className="message-content">

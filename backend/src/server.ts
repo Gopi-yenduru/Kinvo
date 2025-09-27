@@ -356,7 +356,16 @@ app.post('/api/sessions/:sessionId/end', (req: any, res: any) => {
     });
 });
 
-
+// Get session counts for dashboard
+app.get('/api/sessions-counts', async (req: any, res: any) => {
+  try {
+    const counts = await db.getSessionCounts();
+    res.json(counts);
+  } catch (error: any) {
+    console.error('Failed to get session counts:', error);
+    res.status(500).json({ error: 'Failed to retrieve session counts' });
+  }
+});
 
 // Get all active sessions
 app.get('/api/sessions', async (req: any, res: any) => {
@@ -747,6 +756,11 @@ wss.on('connection', (ws: any, req: any) => {
               message: 'Connected to voice agent'
             }));
 
+            ws.send(JSON.stringify({
+              type: 'listening',
+              message: 'Agent is listening'
+            }));
+
             console.log(`✅ Frontend WebSocket linked to session ${currentSessionId}`);
           } else {
             ws.send(JSON.stringify({
@@ -763,6 +777,11 @@ wss.on('connection', (ws: any, req: any) => {
           if (sessionIdForAudio && realtimeManager.getSession(sessionIdForAudio)) {
             try {
               // Pass the data object directly to realtime manager (simplified format)
+              // 🟢 Agent is now processing/responding → tell frontend "speaking"
+              ws.send(JSON.stringify({
+                type: 'speaking',
+                message: 'Agent is speaking'
+              }));
               realtimeManager.sendAudioData(sessionIdForAudio, message.data);
               console.log(`📡 Audio data forwarded for session ${sessionIdForAudio}`);
             } catch (error: any) {

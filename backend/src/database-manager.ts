@@ -1,6 +1,7 @@
 import { sql, poolPromise } from "./dbconnection.js";
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
+import cacheService, { CACHE_PATTERNS } from './cache-service.js';
 
 // Interfaces
 export interface Session {
@@ -117,6 +118,15 @@ export class DataService {
 
     // --------------------- SESSIONS ---------------------
     public async getSession(sessionId: string): Promise<Session | null> {
+        const cacheKey = `session:${sessionId}`;
+
+        // Try cache first
+        const cached = cacheService.get<Session>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
         const sessions = await this.runQueryWithInput<Session>(
             `SELECT *
             FROM sessions
@@ -125,19 +135,65 @@ export class DataService {
                 { name: 'id', type: sql.VarChar, value: sessionId }
             ]
         );
-        
+
         if (!sessions) return null;
         const session = sessions.length > 0 ? sessions[0] : null;
         if (!session) return null;
-        return {...session};
+
+        const result = {...session};
+
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
     }
 
     public async getAllSessions(): Promise<Session[]> {
-        return this.runQuery<Session>(`
+        const cacheKey = `${CACHE_PATTERNS.SESSIONS}:all`;
+
+        // Try cache first
+        const cached = cacheService.get<Session[]>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
+        const result = await this.runQuery<Session>(`
       SELECT *
-      FROM sessions      
+      FROM sessions
       ORDER BY start_time DESC
     `);
+
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
+    }
+
+    public async getSessionCounts(): Promise<{ totalSessions: number, completedToday: number }> {
+        const cacheKey = `${CACHE_PATTERNS.SESSION_COUNTS}`;
+
+        // Try cache first
+        const cached = cacheService.get<{ totalSessions: number, completedToday: number }>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
+        const totalResult = await this.runQuery<{ count: number }>(`
+            SELECT COUNT(*) as count FROM sessions
+        `);
+        const totalSessions = totalResult[0]?.count || 0;
+
+        const todayResult = await this.runQuery<{ count: number }>(`
+            SELECT COUNT(*) as count FROM sessions
+            WHERE CAST(start_time AS DATE) = CAST(GETDATE() AS DATE)
+        `);
+        const completedToday = todayResult[0]?.count || 0;
+
+        const result = { totalSessions, completedToday };
+
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
     }
 
     public async generateIntakeReport(sessionId: string) {
@@ -162,12 +218,25 @@ export class DataService {
     }
 
     public async getActiveSessions(): Promise<Session[]> {
-        return this.runQuery<Session>(`
+        const cacheKey = `${CACHE_PATTERNS.DASHBOARD_SUMMARY}:active-sessions`;
+
+        // Try cache first
+        const cached = cacheService.get<Session[]>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
+        const result = await this.runQuery<Session>(`
       SELECT *
       FROM sessions
       WHERE status IN ('active', 'paused') AND start_time > DATEADD(HOUR, -24, GETDATE())
       ORDER BY start_time DESC
     `);
+
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
     }
 
     public async createSession(session: Omit<Session, 'id' | 'created_at'>): Promise<Session> {
@@ -175,7 +244,7 @@ export class DataService {
             `INSERT INTO sessions (patient_id, patient_name, status, start_time, end_time, red_flags_detected, created_at)
             OUTPUT INSERTED.*
             VALUES (@patient_id, @patient_name, @status, @start_time, @end_time, @red_flags_detected, GETDATE())`,
-            [                
+            [
                 { name: 'patient_id', type: sql.BigInt, value: session.patient_id || null },
                 { name: 'patient_name', type: sql.VarChar(250), value: session.patient_name || null },
                 { name: 'status', type: sql.VarChar(50), value: session.status },
@@ -184,7 +253,13 @@ export class DataService {
                 { name: 'red_flags_detected', type: sql.Int, value: session.red_flags_detected }
             ]
         );
-         return result[0]; // first (and only) inserted row
+
+        // Invalidate cache for sessions and counts
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.DASHBOARD_SUMMARY);
+
+        return result[0]; // first (and only) inserted row
     }
 
     public async updateSessionStatus(sessionId: string, status: string): Promise<void> {
@@ -195,6 +270,13 @@ export class DataService {
                 { name: 'id', type: sql.VarChar, value: sessionId }
             ]
         );
+
+        // Invalidate cache for sessions and related data
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.DASHBOARD_SUMMARY);
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.LOGS}:${sessionId}`);
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.TRANSCRIPT}:${sessionId}`);
     }
 
     public async deleteSession(sessionId: string): Promise<void> {
@@ -202,11 +284,33 @@ export class DataService {
             `DELETE FROM sessions WHERE id = @id`,
             [{ name: 'id', type: sql.VarChar, value: sessionId }]
         );
+
+        // Invalidate cache for sessions and related data
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.DASHBOARD_SUMMARY);
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.LOGS}:${sessionId}`);
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.TRANSCRIPT}:${sessionId}`);
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.RED_FLAGS}:${sessionId}`);
+        cacheService.delete(`session:${sessionId}`);
     }
 
     // --------------------- SETTINGS ---------------------
     public async getAllSettings(): Promise<Setting[]> {
-        return this.runQuery<Setting>(`SELECT * FROM settings WHERE id = 1`);
+        const cacheKey = `${CACHE_PATTERNS.SETTINGS}:all`;
+
+        // Try cache first
+        const cached = cacheService.get<Setting[]>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
+        const result = await this.runQuery<Setting>(`SELECT * FROM settings WHERE id = 1`);
+
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
     }
 
     public async getRecentSettings(): Promise<Setting[]> {
@@ -262,10 +366,13 @@ export class DataService {
 
             await this.runQueryWithInput(
                 `INSERT INTO settings (id, model, openai_api_key, medical_instructions, voice, temperature, max_response_length, updated_at)
-             VALUES (@id, @model, @openai_api_key, @medical_instructions, @voice, @temperature, @max_response_length, GETDATE())`,
+              VALUES (@id, @model, @openai_api_key, @medical_instructions, @voice, @temperature, @max_response_length, GETDATE())`,
                 inputs
             );
         }
+
+        // Invalidate settings cache
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SETTINGS);
     }
 
     public async updateSetting(setting: Partial<Setting> & { id: number }): Promise<void> {
@@ -281,11 +388,23 @@ export class DataService {
             `UPDATE settings SET ${setClauses} WHERE id = @id`,
             inputs
         );
+
+        // Invalidate settings cache
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SETTINGS);
     }
 
     // --------------------- CONVERSATION LOGS ---------------------    
     public async getSessionConversationLogs(sessionId: string): Promise<ConversationLog[]> {
-        return await this.runQueryWithInput<ConversationLog>(
+        const cacheKey = `${CACHE_PATTERNS.LOGS}:${sessionId}`;
+
+        // Try cache first
+        const cached = cacheService.get<ConversationLog[]>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
+        const result = await this.runQueryWithInput<ConversationLog>(
             `SELECT * FROM conversation_logs
                 WHERE session_id = @id
                 ORDER BY timestamp ASC `,
@@ -294,6 +413,9 @@ export class DataService {
             ]
         );
 
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
     }
 
     public async getRecentConversationLogs(): Promise<ConversationLog[]> {
@@ -313,27 +435,70 @@ export class DataService {
                 { name: 'audio_data', type: sql.VarBinary(sql.MAX), value: null }, // Set to null for now since we're only storing metadata as JSON strings
             ]
         );
+
+        // Invalidate cache for conversation logs of this session
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.LOGS}:${log.session_id}`);
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.TRANSCRIPT}:${log.session_id}`);
     }
 
     public async deleteConversationLog(logId: number): Promise<void> {
+        // First get the session ID to invalidate cache properly
+        const logs = await this.runQueryWithInput<ConversationLog>(
+            `SELECT session_id FROM conversation_logs WHERE id = @id`,
+            [{ name: 'id', type: sql.BigInt, value: logId }]
+        );
+
         await this.runQueryWithInput(
             `DELETE FROM conversation_logs WHERE id = @id`,
             [{ name: 'id', type: sql.BigInt, value: logId }]
         );
+
+        // Invalidate cache if we found the log
+        if (logs && logs.length > 0) {
+            const sessionId = logs[0].session_id;
+            cacheService.invalidateByPattern(`${CACHE_PATTERNS.LOGS}:${sessionId}`);
+            cacheService.invalidateByPattern(`${CACHE_PATTERNS.TRANSCRIPT}:${sessionId}`);
+        }
     }
 
     // --------------------- RED FLAG EVENTS ---------------------
     public async getAllRedFlagEvents(): Promise<RedFlagEvent[]> {
-        return this.runQuery<RedFlagEvent>(`SELECT * FROM red_flag_events ORDER BY timestamp DESC`);
+        const cacheKey = `${CACHE_PATTERNS.RED_FLAGS}:all`;
+
+        // Try cache first
+        const cached = cacheService.get<RedFlagEvent[]>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
+        const result = await this.runQuery<RedFlagEvent>(`SELECT * FROM red_flag_events ORDER BY timestamp DESC`);
+
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
     }
 
     public async getRedFlagEvents(sessionId: string): Promise<Session[]> {
-        return await this.runQueryWithInput<Session>(
+        const cacheKey = `${CACHE_PATTERNS.RED_FLAGS}:${sessionId}`;
+
+        // Try cache first
+        const cached = cacheService.get<Session[]>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Fetch from database
+        const result = await this.runQueryWithInput<Session>(
             `SELECT * FROM red_flag_events WHERE session_id =  @id;`,
             [
                 { name: 'id', type: sql.VarChar, value: sessionId }
             ]
         );
+
+        // Cache the result
+        cacheService.set(cacheKey, result);
+        return result;
     }
 
     public async getRecentRedFlagEvents(): Promise<RedFlagEvent[]> {
@@ -354,13 +519,30 @@ export class DataService {
                 { name: 'clinician_notified', type: sql.Bit, value: event.clinician_notified }
             ]
         );
+
+        // Invalidate cache for red flags
+        cacheService.invalidateByPattern(CACHE_PATTERNS.RED_FLAGS);
+        cacheService.invalidateByPattern(`${CACHE_PATTERNS.RED_FLAGS}:${event.session_id}`);
     }
 
     public async deleteRedFlagEvent(eventId: number): Promise<void> {
+        // First get the session ID to invalidate cache properly
+        const events = await this.runQueryWithInput<RedFlagEvent>(
+            `SELECT session_id FROM red_flag_events WHERE id = @id`,
+            [{ name: 'id', type: sql.BigInt, value: eventId }]
+        );
+
         await this.runQueryWithInput(
             `DELETE FROM red_flag_events WHERE id = @id`,
             [{ name: 'id', type: sql.BigInt, value: eventId }]
         );
+
+        // Invalidate cache if we found the event
+        if (events && events.length > 0) {
+            const sessionId = events[0].session_id;
+            cacheService.invalidateByPattern(CACHE_PATTERNS.RED_FLAGS);
+            cacheService.invalidateByPattern(`${CACHE_PATTERNS.RED_FLAGS}:${sessionId}`);
+        }
     }
 
     // --------------------- AUDIT LOGS ---------------------
@@ -397,6 +579,9 @@ export class DataService {
                 { name: 'user_agent', type: sql.VarChar(250), value: log.user_agent ?? null }
             ]
         );
+
+        // Invalidate audit log caches
+        cacheService.invalidateByPattern('audit-logs');
     }
 
     public async deleteAuditLog(logId: number): Promise<void> {
@@ -404,6 +589,9 @@ export class DataService {
             `DELETE FROM audit_logs WHERE id = @id`,
             [{ name: 'id', type: sql.BigInt, value: logId }]
         );
+
+        // Invalidate audit log caches
+        cacheService.invalidateByPattern('audit-logs');
     }
 
     // --------------------- FHIR RESOURCES ---------------------
@@ -420,6 +608,9 @@ export class DataService {
                 { name: 'resource_data', type: sql.VarChar(250), value: resource.resource_data },
             ]
         );
+
+        // Invalidate FHIR resource caches
+        cacheService.invalidateByPattern('fhir-resources');
     }
 
     // READ all
@@ -459,6 +650,9 @@ export class DataService {
             `UPDATE fhir_resources SET ${setClauses} WHERE id = @id`,
             inputs
         );
+
+        // Invalidate FHIR resource caches
+        cacheService.invalidateByPattern('fhir-resources');
     }
 
     // DELETE
@@ -467,6 +661,9 @@ export class DataService {
             `DELETE FROM fhir_resources WHERE id = @id`,
             [{ name: 'id', type: sql.BigInt, value: id }]
         );
+
+        // Invalidate FHIR resource caches
+        cacheService.invalidateByPattern('fhir-resources');
     }
 
     // --------------------- INTAKE RESPONSES ---------------------
@@ -483,6 +680,9 @@ export class DataService {
                 { name: 'category', type: sql.VarChar(250), value: response.category }
             ]
         );
+
+        // Invalidate intake response caches
+        cacheService.invalidateByPattern('intake-responses');
     }
 
     // READ all
@@ -522,6 +722,9 @@ export class DataService {
             `UPDATE intake_responses SET ${setClauses} WHERE id = @id`,
             inputs
         );
+
+        // Invalidate intake response caches
+        cacheService.invalidateByPattern('intake-responses');
     }
 
     // DELETE
@@ -530,6 +733,9 @@ export class DataService {
             `DELETE FROM intake_responses WHERE id = @id`,
             [{ name: 'id', type: sql.BigInt, value: id }]
         );
+
+        // Invalidate intake response caches
+        cacheService.invalidateByPattern('intake-responses');
     }
 
     public async registerUser(username: string, email: string, password: string) {
@@ -575,8 +781,8 @@ export class DataService {
                 successful = true;
 
                 // Generate JWT token
-                // later I need to change process.env.JWT_SECRET!
-                const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, 'A7f9K2dL8qX3pV0b' , { expiresIn: '8h' });
+                // Extended expiration for better user experience
+                const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, 'A7f9K2dL8qX3pV0b' , { expiresIn: '7d' });
 
                 // Save login history
                 await this.runQueryWithInput(

@@ -7,30 +7,67 @@ import Sessions from './pages/Sessions';
 import Settings from './pages/Settings';
 import Transcript from './pages/Transcript';
 import Login from './pages/Login';
+import authService from './services/authService';
 import './App.css';
 
-function App() {
-  const [token, setToken] = useState<string | null>(null);
+// Global fetch interceptor for authentication
+const originalFetch = window.fetch;
+window.fetch = async (url: RequestInfo | URL, options?: RequestInit) => {
+  const response = await originalFetch(url, options);
 
-  // Load token from localStorage on mount
+  // Handle authentication failures for protected API routes
+  const urlString = typeof url === 'string' ? url : url.toString();
+  if ((urlString.includes('/api/') && !urlString.includes('/api/login')) &&
+      (response.status === 401 || response.status === 403)) {
+    console.log('Authentication failed for protected API, clearing auth data');
+
+    // Clear authentication data through the service
+    authService.clearAuth();
+
+    // The auth service will notify subscribers (like App component) of the change
+    console.log('Auth data cleared, React will handle redirect to login');
+  }
+
+  return response;
+};
+
+
+function App() {
+  const [authState, setAuthState] = useState(authService.getAuthState());
+
+  // Subscribe to auth state changes
   useEffect(() => {
-    const savedToken = localStorage.getItem('jwt_token');
-    if (savedToken) setToken(savedToken);
+    const unsubscribe = authService.subscribe((newAuthState) => {
+      console.log('App: Auth state changed:', newAuthState.token ? 'Authenticated' : 'Not authenticated');
+      setAuthState(newAuthState);
+    });
+
+    // Initial load
+    const initialState = authService.getAuthState();
+    console.log('App: Initial auth state:', initialState.token ? 'Authenticated' : 'Not authenticated');
+    setAuthState(initialState);
+
+    return unsubscribe;
   }, []);
 
+  const handleLoginSuccess = (token: string, user: string, userName: string) => {
+    console.log('App: Login successful, setting auth data');
+    authService.setAuth(token, user, userName);
+  };
+
   const handleLogout = () => {
-    localStorage.removeItem('jwt_token');
-    setToken(null);
+    console.log('App: Logout triggered, clearing auth data');
+    authService.clearAuth();
   };
 
   return (
     <Router>
       <Routes>
         {/* Login route */}
-        <Route path="/login" element={<Login onLoginSuccess={setToken} />} />
+        <Route path="/login" element={<Login onLoginSuccess={handleLoginSuccess} />} />
 
         {/* Protected routes */}
-        {token ? (
+        {authState.token ? (
           <Route path="/" element={<Layout onLogout={handleLogout} />}>
             <Route index element={<Dashboard />} />
             <Route path="session" element={<Session />} />

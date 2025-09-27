@@ -116,7 +116,7 @@ const Transcript: React.FC = () => {
             className="btn btn-secondary"
             onClick={() => navigate('/sessions')}
           >
-            <span className="btn-icon">⬅️</span>
+            <span className="btn-icon">←</span>
             Back to Sessions
           </button>
         </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 interface DashboardStats {
@@ -27,88 +27,63 @@ const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const token = localStorage.getItem("jwt_token");
+  const hasFetched = useRef(false);
 
   useEffect(() => {
-    fetchDashboardData();
-    fetchAlerts();
+    if (!hasFetched.current) {
+      hasFetched.current = true;
+      fetchDashboardData();
+    }
   }, []);
 
   const fetchDashboardData = async () => {
     try {
-      // Fetch sessions data
-      const sessionsResponse = await fetch('/api/sessions', {
-        method: 'GET',
-        headers: { 
-           "Authorization": `Bearer ${token}`,
-          'Content-Type': 'application/json' 
-        }
-      });
+      // Fetch sessions count
+      const sessionsResponse = await fetch('/api/sessions-counts');
       const sessionsData = await sessionsResponse.json();
 
-      // Fetch red flags count
+      // Fetch red flags
       const redFlagsResponse = await fetch('/api/sessions/red-flags');
       const redFlagsData = await redFlagsResponse.json();
 
-      if (sessionsData.sessions) {
-        const sessions = sessionsData.sessions;
-        const today = new Date().toDateString();
+      const totalRedFlagsCount = redFlagsData.redFlags ? redFlagsData.redFlags.length : 0;
 
-        const todaySessions = sessions.filter((s: any) =>
-          new Date(s.start_time).toDateString() === today
-        );
+      setStats({
+        totalSessions: sessionsData.totalSessions,
+        completedToday: sessionsData.completedToday,
+        redFlags: totalRedFlagsCount
+      });
 
-        const totalRedFlagsCount = redFlagsData.redFlags ? redFlagsData.redFlags.length : 0;
+      // Create alerts
+      const recentAlerts: Alert[] = redFlagsData.redFlags.map((flag: any) => {
+        const symptoms = JSON.parse(flag.symptoms || '[]');
+        const timeAgo = getTimeAgo(flag.timestamp);
 
-        setStats({
-          totalSessions: sessions.length,
-          completedToday: todaySessions.length,
-          redFlags: totalRedFlagsCount
+        return {
+          id: `red-flag-${flag.id}`,
+          type: flag.severity === 'critical' ? 'critical' : 'warning',
+          title: `Red Flag Detected`,
+          description: `Patient symptoms: ${symptoms.join(', ')} in Session #${flag.session_id.substring(0, 8)}`,
+          timeAgo: timeAgo,
+          sessionId: flag.session_id
+        };
+      });
+
+      // Add a system alert if there are no red flags
+      if (recentAlerts.length === 0) {
+        recentAlerts.push({
+          id: 'system-1',
+          type: 'info',
+          title: 'System Status',
+          description: 'All systems operating normally',
+          timeAgo: 'Just now'
         });
-
       }
+
+      setAlerts(recentAlerts);
     } catch (error) {
       console.error('Failed to fetch dashboard data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchAlerts = async () => {
-    try {
-      const response = await fetch('/api/sessions/red-flags');
-      const data = await response.json();
-
-      if (data.redFlags) {
-        const recentAlerts: Alert[] = data.redFlags.map((flag: any) => {
-          const symptoms = JSON.parse(flag.symptoms || '[]');
-          const timeAgo = getTimeAgo(flag.timestamp);
-
-          return {
-            id: `red-flag-${flag.id}`,
-            type: flag.severity === 'critical' ? 'critical' : 'warning',
-            title: `Red Flag Detected`,
-            description: `Patient symptoms: ${symptoms.join(', ')} in Session #${flag.session_id.substring(0, 8)}`,
-            timeAgo: timeAgo,
-            sessionId: flag.session_id
-          };
-        });
-
-        // Add a system alert if there are no red flags
-        if (recentAlerts.length === 0) {
-          recentAlerts.push({
-            id: 'system-1',
-            type: 'info',
-            title: 'System Status',
-            description: 'All systems operating normally',
-            timeAgo: 'Just now'
-          });
-        }
-
-        setAlerts(recentAlerts);
-      }
-    } catch (error) {
-      console.error('Failed to fetch alerts:', error);
-      // Fallback to static alerts on error
+      // Fallback for alerts
       setAlerts([
         {
           id: 'system-1',
@@ -118,8 +93,11 @@ const Dashboard: React.FC = () => {
           timeAgo: 'Just now'
         }
       ]);
+    } finally {
+      setLoading(false);
     }
   };
+
 
   const getTimeAgo = (timestamp: string): string => {
     // Log the raw timestamp for debugging
@@ -171,7 +149,7 @@ const Dashboard: React.FC = () => {
       <div className="container-fluid px-3 px-md-4 py-3 py-md-4">
         {/* Dashboard Header */}
         <div className="dashboard-header mb-4">
-          <div className="row align-items-start g-3">
+          <div className="row align-items-start col-12 g-3">
             <div className="col-12 col-lg-8">
               <div className="page-title">
                 <h1 className="h2 fw-bold text-primary mb-2">Medical Intake Dashboard</h1>
@@ -248,7 +226,7 @@ const Dashboard: React.FC = () => {
 
         {/* Main Content */}
         <div className="row g-3 g-md-4">
-          <div className="col-12 col-xl-8">
+          <div className="col-12 col-xl-12">
             <div className="alerts-section">
               <div className="section-header">
                 <h2 className="h4 mb-0">Recent Alerts</h2>
@@ -297,7 +275,7 @@ const Dashboard: React.FC = () => {
             </div>
           </div>
 
-          <div className="col-12 col-xl-4">
+          {/* <div className="col-12 col-xl-4">
             <div className="quick-actions">
               <div className="section-header">
                 <h2 className="h4 mb-3">Quick Actions</h2>
@@ -331,7 +309,7 @@ const Dashboard: React.FC = () => {
                 </div>
               </div>
             </div>
-          </div>
+          </div> */}
         </div>
       </div>
     </div>

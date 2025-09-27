@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface SettingsConfig {
   model: string;
@@ -23,6 +23,8 @@ const Settings: React.FC = () => {
   const [successMessage, setSuccessMessage] = useState<string>('');
   const [modifiedFields, setModifiedFields] = useState<Set<string>>(new Set());
   const [defaults, setDefaults] = useState<{[key: string]: any}>({});
+  const [isFormatting, setIsFormatting] = useState(false);
+  const editorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchSettings();
@@ -135,6 +137,18 @@ const Settings: React.FC = () => {
       return { isValid: false, error: 'Instructions are too long (max 10000 characters)' };
     }
     return { isValid: true };
+  };
+
+  const formatText = (command: string, value?: string) => {
+    document.execCommand(command, false, value);
+    setIsFormatting(true);
+    setTimeout(() => setIsFormatting(false), 100);
+  };
+
+  const getPlainText = (html: string): string => {
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = html;
+    return tempDiv.textContent || tempDiv.innerText || '';
   };
 
   const handleInputChange = (field: keyof SettingsConfig, value: string | number) => {
@@ -291,13 +305,74 @@ const Settings: React.FC = () => {
                 <span className="field-indicator user-indicator">✏️ Modified</span>
               )}
             </label>
-            <textarea
-              className="field-input instructions-textarea"
-              value={config.medicalInstructions}
-              onChange={(e) => handleInputChange('medicalInstructions', e.target.value)}
-              placeholder="Enter the medical intake instructions..."
-              rows={20}
+
+            {/* Rich Text Formatting Toolbar */}
+            <div className="rich-text-toolbar">
+              <button
+                type="button"
+                className="format-btn"
+                onClick={() => formatText('bold')}
+                title="Bold"
+              >
+                <strong>B</strong>
+              </button>
+              <button
+                type="button"
+                className="format-btn"
+                onClick={() => formatText('italic')}
+                title="Italic"
+              >
+                <em>I</em>
+              </button>
+              <button
+                type="button"
+                className="format-btn"
+                onClick={() => formatText('underline')}
+                title="Underline"
+              >
+                <u>U</u>
+              </button>
+              <button
+                type="button"
+                className="format-btn"
+                onClick={() => formatText('insertUnorderedList')}
+                title="Bullet List"
+              >
+                •
+              </button>
+              <button
+                type="button"
+                className="format-btn"
+                onClick={() => formatText('insertOrderedList')}
+                title="Numbered List"
+              >
+                1.
+              </button>
+            </div>
+
+            {/* Rich Text Editor */}
+            <div
+              ref={editorRef}
+              className={`field-input instructions-editor ${!config.medicalInstructions ? 'empty' : ''}`}
+              contentEditable
+              dangerouslySetInnerHTML={{ __html: config.medicalInstructions ? config.medicalInstructions.replace(/\n/g, '<br>') : '<span class="editor-placeholder">Enter the medical intake instructions...</span>' }}
+              onKeyDown={(e) => {
+                // Ensure Enter key works for new lines
+                if (e.key === 'Enter') {
+                  // Allow default behavior for Enter
+                  return;
+                }
+              }}
+              onBlur={(e) => {
+                if (editorRef.current) {
+                  const html = editorRef.current.innerHTML;
+                  const plainText = getPlainText(html);
+                  handleInputChange('medicalInstructions', plainText);
+                }
+              }}
+              suppressContentEditableWarning={true}
             />
+
             <div className="field-meta">
               <span className="character-count">
                 {config.medicalInstructions.length} characters
