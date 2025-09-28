@@ -102,25 +102,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
 
       {/* Footer */}
       <div className="sidebar-footer">
-        {!isCollapsed ? (
-          <div className="d-flex align-items-center gap-2">
-            <div className="sidebar-user-avatar">
-              <i className="fas fa-user-md text-white"></i>
-            </div>
-            <div className="sidebar-user-info">
-              <div className="fw-semibold small text-white">Dr. {userName ?? 'User'}</div>
-              <div className="text-white text-opacity-75 small">
-                Medical Professional
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="d-flex justify-content-center">
-            <div className="sidebar-user-avatar">
-              <i className="fas fa-user-md text-white"></i>
-            </div>
-          </div>
-        )}
+        
       </div>
     </aside>
   );

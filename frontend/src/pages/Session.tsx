@@ -18,13 +18,13 @@ const Session: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [sessionDuration, setSessionDuration] = useState(0);
   const [showTranscript, setShowTranscript] = useState(false);
-  const [pendingSentence, setPendingSentence] = useState<{speaker: string, text: string, timeoutId: number, timestamp?: string} | null>(null);
+  const [pendingSentence, setPendingSentence] = useState<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
   const [speaker, setSpeaker] = useState<string>(''); // Current speaker indicator
 
   // New state for patient name input
   const [patientName, setPatientName] = useState<string>('');
   const [showPatientForm, setShowPatientForm] = useState<boolean>(false);
-  const pendingSentenceRef = useRef<{speaker: string, text: string, timeoutId: number, timestamp?: string} | null>(null);
+  const pendingSentenceRef = useRef<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
 
   const conversationMessagesRef = useRef<HTMLDivElement>(null);
   const token = localStorage.getItem("jwt_token");
@@ -64,9 +64,9 @@ const Session: React.FC = () => {
 
       const response = await fetch('/api/sessions/start', {
         method: 'POST',
-        headers: { 
-           "Authorization": `Bearer ${token}`,
-          'Content-Type': 'application/json' 
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({ patientName: patientNameToUse }),
       });
@@ -125,7 +125,7 @@ const Session: React.FC = () => {
         const audioBuffer = event.inputBuffer;
         const monoChannel = audioBuffer.getChannelData(0);
         const pcm16Data = new Int16Array(monoChannel.length);
-        
+
         for (let i = 0; i < monoChannel.length; i++) {
           pcm16Data[i] = Math.max(-32768, Math.min(32767, monoChannel[i] * 32767));
         }
@@ -163,7 +163,7 @@ const Session: React.FC = () => {
     try {
       wsRef.current = new WebSocket('/ws');
       console.log('WebSocket readyState:', wsRef.current.readyState);
-      
+
       wsRef.current.onopen = () => {
         setConnectionStatus('Connected');
         wsRef.current?.send(JSON.stringify({
@@ -247,7 +247,7 @@ const Session: React.FC = () => {
           case 'response.output_item.done':
             // Handle complete item from OpenAI (includes final transcript)
             if (message.item && message.item.content && message.item.content[0] &&
-                message.item.content[0].type === 'audio' && message.item.content[0].transcript) {
+              message.item.content[0].type === 'audio' && message.item.content[0].transcript) {
               console.log('🔄 Received complete agent transcript from response.output_item.done',
                 message.item.content[0].transcript);
               // This could be used for verification or fallback
@@ -566,7 +566,7 @@ const Session: React.FC = () => {
       }
 
       const audioContext = audioContextRef.current;
-      
+
       // Resume audio context if suspended
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
@@ -587,7 +587,7 @@ const Session: React.FC = () => {
       // Create and play audio source
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
-      
+
       // Connect to gain node if available, otherwise directly to destination
       if (gainNodeRef.current) {
         source.connect(gainNodeRef.current);
@@ -601,7 +601,7 @@ const Session: React.FC = () => {
       };
 
       source.start();
-      
+
       // Clear the buffer after playing
       audioBufferRef.current = '';
 
@@ -649,7 +649,7 @@ const Session: React.FC = () => {
 
   return (
     <div className="session-page-container w-100">
-      {/* Page Header */}      
+      {/* Page Header */}
       <div className="session-page-header w-100">
         <div className="container-fluid px-3 px-md-4">
           <div className="row align-items-start g-3 py-3">
@@ -657,47 +657,48 @@ const Session: React.FC = () => {
               <h1 className="h2 fw-bold text-primary mb-2">Voice Intake Session</h1>
               <p className="text-muted mb-0">Conduct AI-powered medical intake interviews with real-time voice processing</p>
             </div>
-            <div className="col-12 col-lg-4">
-              <div className={`d-flex flex-column flex-sm-row align-items-start align-sm-center gap-2 gap-sm-3 p-3 rounded-3 border ${
-                sessionStatus === 'idle' ? 'bg-light border-secondary' :
-                sessionStatus === 'connecting' ? 'bg-warning-subtle border-warning' :
-                sessionStatus === 'active' ? 'bg-success-subtle border-success' :
-                sessionStatus === 'completed' ? 'bg-primary-subtle border-primary' :
-                'bg-danger-subtle border-danger'
-              }`}>
-                <div className="d-flex align-items-center gap-2 flex-shrink-0">
-                  <div className={`rounded-circle status-dot ${
-                    sessionStatus === 'active' ? 'bg-success' :
-                    sessionStatus === 'error' ? 'bg-danger' :
-                    sessionStatus === 'connecting' ? 'bg-warning' :
-                    'bg-secondary'
-                  }`}></div>
-                  <span className="fw-semibold small">
-                    {sessionStatus === 'idle' && 'Ready to Start'}
-                    {sessionStatus === 'connecting' && 'Connecting...'}
-                    {sessionStatus === 'active' && 'Session Active'}
-                    {sessionStatus === 'completed' && 'Session Complete'}
-                    {sessionStatus === 'error' && 'Error Occurred'}
-                  </span>
-                </div>
-
-                <div className="d-flex gap-2 flex-wrap">
-                  {sessionStatus === 'active' && (
-                    <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
-                      <i className="fas fa-clock text-muted"></i>
-                      <span className="font-monospace fw-semibold small">{formatDuration(sessionDuration)}</span>
+            {sessionStatus !== 'idle' && (
+              <>
+                <div className="col-12 col-lg-4">
+                  <div className={`d-flex flex-column flex-sm-row align-items-start align-sm-center gap-2 gap-sm-3 p-3 rounded-3 border ${sessionStatus === 'connecting' ? 'bg-warning-subtle border-warning' :
+                      sessionStatus === 'active' ? 'bg-success-subtle border-success' :
+                        sessionStatus === 'completed' ? 'bg-primary-subtle border-primary' :
+                          'bg-danger-subtle border-danger'
+                    }`}>
+                    <div className="d-flex align-items-center gap-2 flex-shrink-0">
+                      <div className={`rounded-circle status-dot ${sessionStatus === 'active' ? 'bg-success' :
+                          sessionStatus === 'error' ? 'bg-danger' :
+                            sessionStatus === 'connecting' ? 'bg-warning' :
+                              'bg-secondary'
+                        }`}></div>
+                      <span className="fw-semibold small">
+                        {sessionStatus === 'connecting' && 'Connecting...'}
+                        {sessionStatus === 'active' && 'Session Active'}
+                        {sessionStatus === 'completed' && 'Session Complete'}
+                        {sessionStatus === 'error' && 'Error Occurred'}
+                      </span>
                     </div>
-                  )}
 
-                  {sessionId && (
-                    <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
-                      <span className="text-muted small">ID:</span>
-                      <span className="font-monospace fw-semibold small">{sessionId.slice(0, 8)}...</span>
+                    <div className="d-flex gap-2 flex-wrap">
+                      {sessionStatus === 'active' && (
+                        <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
+                          <i className="fas fa-clock text-muted"></i>
+                          <span className="font-monospace fw-semibold small">{formatDuration(sessionDuration)}</span>
+                        </div>
+                      )}
+
+                      {sessionId && (
+                        <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
+                          <span className="text-muted small">ID:</span>
+                          <span className="font-monospace fw-semibold small">{sessionId.slice(0, 8)}...</span>
+                        </div>
+                      )}
                     </div>
-                  )}
+                  </div>
                 </div>
-              </div>
-            </div>
+              </>
+            )}
+
           </div>
         </div>
       </div>
@@ -757,7 +758,8 @@ const Session: React.FC = () => {
               <div className="card-body p-0 conversation-card-body">
                 <div className="conversation-messages h-100 overflow-auto p-4" ref={conversationMessagesRef}>
                   {conversationLog.length === 0 && !pendingSentence ? (
-                    <div className="d-flex flex-column align-items-center justify-content-center h-100 text-center">
+                    <div className="d-flex flex-column align-items-center justify-content-center h-100 text-center conversation-card-body-cursor"
+                      onClick={() => setShowPatientForm(true)}>
                       <i className="fas fa-microphone fa-4x text-muted mb-4" style={{ opacity: '0.5' }}></i>
                       <h4 className="text-primary mb-2">Ready to Begin</h4>
                       <p className="text-muted">Start a new session to begin the AI-powered medical intake conversation</p>
@@ -766,23 +768,21 @@ const Session: React.FC = () => {
                     <>
                       {conversationLog.map((entry, index) => (
                         <div key={index} className={`conversation-message d-flex gap-3 mb-4 speaker-${entry.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
-                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${
-                            entry.speaker === 'Agent' ? 'bg-primary-subtle text-primary' :
-                            entry.speaker === 'You' ? 'bg-success-subtle text-success' :
-                            entry.speaker === 'System' ? 'bg-warning-subtle text-warning' :
-                            'bg-danger-subtle text-danger'
-                          } message-avatar"`}>
+                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${entry.speaker === 'Agent' ? 'bg-primary-subtle text-primary' :
+                              entry.speaker === 'You' ? 'bg-success-subtle text-success' :
+                                entry.speaker === 'System' ? 'bg-warning-subtle text-warning' :
+                                  'bg-danger-subtle text-danger'
+                            } message-avatar"`}>
                             {entry.speaker === 'Agent' && <i className="fas fa-user-md"></i>}
                             {entry.speaker === 'You' && <i className="fas fa-user"></i>}
                             {entry.speaker === 'System' && <i className="fas fa-cog"></i>}
                             {entry.speaker === '⚠️ ALERT' && <i className="fas fa-exclamation-triangle"></i>}
                           </div>
-                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${
-                            entry.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' :
-                            entry.speaker === 'You' ? 'bg-success-subtle border border-success-subtle' :
-                            entry.speaker === 'System' ? 'bg-warning-subtle border border-warning-subtle' :
-                            'bg-danger-subtle border border-danger-subtle'
-                          }`} style={{ maxWidth: '80%' }}>
+                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${entry.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' :
+                              entry.speaker === 'You' ? 'bg-success-subtle border border-success-subtle' :
+                                entry.speaker === 'System' ? 'bg-warning-subtle border border-warning-subtle' :
+                                  'bg-danger-subtle border border-danger-subtle'
+                            }`} style={{ maxWidth: '80%' }}>
                             <div className="d-flex justify-content-between align-items-center mb-2">
                               <span className="fw-semibold small">{entry.speaker}</span>
                               <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{entry.timestamp}</span>
@@ -799,14 +799,12 @@ const Session: React.FC = () => {
                       {/* Show pending sentence with typing indicator */}
                       {pendingSentence && (
                         <div className={`conversation-message d-flex gap-3 mb-4 speaker-${pendingSentence.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
-                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${
-                            pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle text-primary' : 'bg-success-subtle text-success'
-                          } message-avatar"`}>
+                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle text-primary' : 'bg-success-subtle text-success'
+                            } message-avatar"`}>
                             {pendingSentence.speaker === 'Agent' ? <i className="fas fa-user-md"></i> : <i className="fas fa-user"></i>}
                           </div>
-                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${
-                            pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' : 'bg-success-subtle border border-success-subtle'
-                          }`} style={{ maxWidth: '80%', opacity: '0.8' }}>
+                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' : 'bg-success-subtle border border-success-subtle'
+                            }`} style={{ maxWidth: '80%', opacity: '0.8' }}>
                             <div className="d-flex justify-content-between align-items-center mb-2">
                               <span className="fw-semibold small">
                                 {pendingSentence.speaker === 'Agent' ? 'Doctor' : 'Patient'}
@@ -830,66 +828,63 @@ const Session: React.FC = () => {
           <div className="col-12 col-xl-4">
             <div className="row g-3 g-md-4">
               {/* Session Controls */}
-              <div className="col-12">
-                <div className="card border-0 shadow-sm h-100">
-                  <div className="card-header bg-white border-bottom">
-                    <h5 className="card-title mb-0">Session Controls</h5>
-                  </div>
-                  <div className="card-body">
-                    <div className="d-grid gap-3">
-                      {sessionStatus === 'idle' && (
-                        <button className="btn btn-primary btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={() => setShowPatientForm(true)}>
-                          <i className="fas fa-microphone fa-2x flex-shrink-0"></i>
-                          <div className="text-start flex-grow-1">
-                            <div className="fw-bold">Start New Session</div>
-                            <small className="opacity-75">Begin voice intake</small>
-                          </div>
-                        </button>
-                      )}
+              {sessionStatus && sessionStatus !== 'idle' && (
+                <>
+                <div className="col-12">
+                  <div className="card border-0 shadow-sm h-100">
 
-                      {sessionStatus === 'active' && (
-                        <>
-                          <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
-                            <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
-                            <div className="text-start flex-grow-1">
-                              <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
-                              <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
-                            </div>
-                          </button>
+                    <div className="card-header bg-white border-bottom">
+                      <h5 className="card-title mb-0">Session Controls</h5>
+                    </div>
+                    <div className="card-body">
+                      <div className="d-grid gap-3">
 
-                          <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
-                            <i className="fas fa-stop fa-lg flex-shrink-0"></i>
-                            <div className="text-start flex-grow-1">
-                              <div className="fw-bold">End Session</div>
-                              <small className="opacity-75">Terminate conversation</small>
-                            </div>
-                          </button>
-                        </>
-                      )}
 
-                      {sessionStatus === 'completed' && (
-                        <>
-                          <button className="btn btn-success btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={resetSession}>
-                            <i className="fas fa-plus fa-2x flex-shrink-0"></i>
-                            <div className="text-start flex-grow-1">
-                              <div className="fw-bold">Start New Session</div>
-                              <small className="opacity-75">Begin another intake</small>
-                            </div>
-                          </button>
+                        {sessionStatus === 'active' && (
+                          <>
+                            <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
+                              <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
+                              <div className="text-start flex-grow-1">
+                                <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
+                                <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
+                              </div>
+                            </button>
 
-                          <button className="btn btn-outline-secondary d-flex align-items-center gap-3 p-3 w-100" onClick={() => setShowTranscript(true)}>
-                            <i className="fas fa-file-alt fa-lg flex-shrink-0"></i>
-                            <div className="text-start flex-grow-1">
-                              <div className="fw-bold">View Transcript</div>
-                              <small className="opacity-75">See conversation history</small>
-                            </div>
-                          </button>
-                        </>
-                      )}
+                            <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                              <i className="fas fa-stop fa-lg flex-shrink-0"></i>
+                              <div className="text-start flex-grow-1">
+                                <div className="fw-bold">End Session</div>
+                                <small className="opacity-75">Terminate conversation</small>
+                              </div>
+                            </button>
+                          </>
+                        )}
+
+                        {sessionStatus === 'completed' && (
+                          <>
+                            <button className="btn btn-success btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={resetSession}>
+                              <i className="fas fa-plus fa-2x flex-shrink-0"></i>
+                              <div className="text-start flex-grow-1">
+                                <div className="fw-bold">Start New Session</div>
+                                <small className="opacity-75">Begin another intake</small>
+                              </div>
+                            </button>
+
+                            <button className="btn btn-outline-secondary d-flex align-items-center gap-3 p-3 w-100" onClick={() => setShowTranscript(true)}>
+                              <i className="fas fa-file-alt fa-lg flex-shrink-0"></i>
+                              <div className="text-start flex-grow-1">
+                                <div className="fw-bold">View Transcript</div>
+                                <small className="opacity-75">See conversation history</small>
+                              </div>
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
+              </>
+            )}
 
               {/* Helpful Tips */}
               <div className="col-12">
@@ -946,11 +941,10 @@ const Session: React.FC = () => {
                 ) : (
                   <div className="d-flex flex-column gap-3">
                     {conversationLog.map((entry, index) => (
-                      <div key={index} className={`p-3 rounded border-start border-4 ${
-                        entry.type === 'system' ? 'bg-warning-subtle border-warning' :
-                        entry.type === 'alert' ? 'bg-danger-subtle border-danger' :
-                        'bg-light border-primary'
-                      }`}>
+                      <div key={index} className={`p-3 rounded border-start border-4 ${entry.type === 'system' ? 'bg-warning-subtle border-warning' :
+                          entry.type === 'alert' ? 'bg-danger-subtle border-danger' :
+                            'bg-light border-primary'
+                        }`}>
                         <div className="d-flex justify-content-between align-items-center mb-2">
                           <span className="fw-semibold small text-primary">{entry.speaker}</span>
                           <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{entry.timestamp}</span>
