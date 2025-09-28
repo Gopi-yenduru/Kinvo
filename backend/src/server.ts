@@ -16,6 +16,8 @@ const wss = new WebSocketServer({ server });
 import realtimeManager from './realtime.js';
 import { MEDICAL_INTAKE_INSTRUCTIONS, REALTIME_CONFIG } from './constants.js';
 import db from './database-manager.js';
+import ProviderFactory from './providers/ProviderFactory.js';
+import RetellAIProvider from './providers/RetellAIProvider.js';
 
 // Middleware
 app.use(cors());
@@ -180,21 +182,48 @@ app.post('/api/sessions/start', authenticateJWT, async (req: any, res: any) => {
     const setting = settings && settings.length > 0 ? settings[0] : null;
     console.log(`Temparature from settings: ${setting?.temperature}, max response length from settings: ${setting?.max_response_length}`);
 
-    if (!setting || !setting.openai_api_key) {
-      // Fallback to .env API key if database is not configured
-      if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here') {
+    // Set the provider based on database settings
+    const providerType = setting?.provider || 'openai';
+    realtimeManager.setProvider(ProviderFactory.getProvider(providerType as any));
+    console.log(`Using provider: ${providerType}`);
+
+    // Validate API keys based on selected provider
+    let apiKeyConfigured = false;
+    if (providerType === 'openai') {
+      apiKeyConfigured = !!(setting?.openai_api_key || process.env.OPENAI_API_KEY);
+      if (!apiKeyConfigured) {
         return res.status(400).json({
-          error: 'API key missing',
-          message: 'OpenAI API key not configured. Please check your .env file or Settings page.'
+          error: 'OpenAI API key missing',
+          message: 'OpenAI API key not configured. Please check your Settings page or .env file.'
         });
       }
-      console.log('⚠️ Using API key from .env file as fallback (database not configured)');
+    } else if (providerType === 'retellai') {
+      const retellApiKey = (setting as any)?.retellai_api_key || process.env.RETELLAI_API_KEY;
+      const retellAgentId = (setting as any)?.retellai_agent_id || process.env.RETELLAI_AGENT_ID;
+      apiKeyConfigured = !!(retellApiKey && retellAgentId);
+      if (!apiKeyConfigured) {
+        return res.status(400).json({
+          error: 'RetellAI configuration missing',
+          message: 'RetellAI API key and Agent ID must be configured. Please check your Settings page or .env file.'
+        });
+      }
+    } else if (providerType === 'vapi') {
+      // VAPI not implemented yet
+      return res.status(400).json({
+        error: 'VAPI not supported yet',
+        message: 'VAPI integration is planned but not yet implemented.'
+      });
+    }
+
+    if (!setting) {
+      console.log('⚠️ Using API keys from .env file as fallback (database settings not configured)');
     }
 
     // Create session in database first
-    var insertedData = await db.createSession({      
+    var insertedData = await db.createSession({
       patient_id: 0,
       patient_name: patientName.trim(),
+      provider: providerType,
       status: 'active',
       start_time: new Date(),
       end_time: null,
@@ -220,69 +249,441 @@ app.post('/api/sessions/start', authenticateJWT, async (req: any, res: any) => {
       ip_address: req.ip || null
     });
 
-    // Create session configuration using dynamic settings
-    const instructions = setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS;
+    // Initialize based on provider type
+    if (providerType === 'retellai') {
+      // For Retell AI, just create the session in database - no realtime connection needed
+      console.log(`📝 Session ${sessionId} started successfully for Retell AI`);
 
-    console.log(`🔧 Creating session config for ${sessionId}`);
-    console.log(`📝 Instructions source: ${setting?.medical_instructions ? 'database' : 'defaults'}`);
-    console.log(`📏 Instructions length: ${instructions.length} characters`);
-    console.log(`📋 Instructions preview: ${instructions.substring(0, 150)}...`);
-
-    const config = {
-      sessionId,
-      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
-      voice: setting?.voice || 'alloy',
-      temperature: setting?.temperature || 0.6,
-      maxResponseLength: setting?.max_response_length || 200,
-      model: setting?.model || 'gpt-4o-realtime-preview',
-      apiKey: setting?.openai_api_key || process.env.OPENAI_API_KEY
-    };
-
-    // Debug: Test JSON serialization
-    try {
-      JSON.stringify({ test: config.instructions });
-      console.log('✅ Instructions JSON serialization test passed');
-    } catch (jsonError) {
-      console.error('❌ Instructions JSON serialization test failed:', jsonError);
-      console.error('❌ Instructions content:', config.instructions);
-    }
-
-    // Initialize Realtime API session
-    realtimeManager.createRealtimeSession(config)
-      .then((realtimeConnection: any) => {
-        if (realtimeConnection) {
-          console.log(`📝 Session ${sessionId} started successfully with Realtime connection`);
-
-          res.json({
-            sessionId,
-            status: 'active',
-            message: 'Session started successfully'
-          });
-        } else {
-          throw new Error('Realtime connection failed to initialize');
-        }
-      })
-      .catch(async (error: any) => {
-        console.error('Failed to create Realtime session:', error);
-
-        // Update database on failure
-        await db.updateSessionStatus(sessionId, 'error');
-        await db.insertAuditLog({
-          action: 'session_start_failed',
-          details: JSON.stringify({ error: error.message }),
-          session_id: sessionId,
-          ip_address: req.ip || null
-        });
-        res.status(500).json({
-          error: 'Failed to create session',
-          message: error.message,
-          details: 'Check your OpenAI API key and Realtime API access'
-        });
+      res.json({
+        sessionId,
+        status: 'active',
+        provider: providerType,
+        message: 'Session started successfully'
       });
+    } else if (providerType === 'openai') {
+      // For OpenAI, create session configuration and initialize Realtime API session
+      const instructions = setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS;
+
+      console.log(`🔧 Creating session config for ${sessionId}`);
+      console.log(`📝 Instructions source: ${setting?.medical_instructions ? 'database' : 'defaults'}`);
+      console.log(`📏 Instructions length: ${instructions.length} characters`);
+      console.log(`📋 Instructions preview: ${instructions.substring(0, 150)}...`);
+
+      const config = {
+        sessionId,
+        instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
+        voice: setting?.voice || 'alloy',
+        temperature: setting?.temperature || 0.6,
+        maxResponseLength: setting?.max_response_length || 200,
+        model: setting?.model || 'gpt-4o-realtime-preview',
+        apiKey: setting?.openai_api_key || process.env.OPENAI_API_KEY
+      };
+
+      // Debug: Test JSON serialization
+      try {
+        JSON.stringify({ test: config.instructions });
+        console.log('✅ Instructions JSON serialization test passed');
+      } catch (jsonError) {
+        console.error('❌ Instructions JSON serialization test failed:', jsonError);
+        console.error('❌ Instructions content:', config.instructions);
+      }
+
+      realtimeManager.createRealtimeSession(config)
+        .then((realtimeConnection: any) => {
+          if (realtimeConnection) {
+            console.log(`📝 Session ${sessionId} started successfully with Realtime connection`);
+
+            res.json({
+              sessionId,
+              status: 'active',
+              provider: providerType,
+              message: 'Session started successfully'
+            });
+          } else {
+            throw new Error('Realtime connection failed to initialize');
+          }
+        })
+        .catch(async (error: any) => {
+          console.error('Failed to create Realtime session:', error);
+
+          // Update database on failure
+          await db.updateSessionStatus(sessionId, 'error');
+          await db.insertAuditLog({
+            action: 'session_start_failed',
+            details: JSON.stringify({ error: error.message }),
+            session_id: sessionId,
+            ip_address: req.ip || null
+          });
+          res.status(500).json({
+            error: 'Failed to create session',
+            message: error.message,
+            details: 'Check your OpenAI API key and Realtime API access'
+          });
+        });
+    } else if (providerType === 'vapi') {
+      // VAPI not implemented yet
+      return res.status(400).json({
+        error: 'VAPI not supported yet',
+        message: 'VAPI integration is planned but not yet implemented.'
+      });
+    } else {
+      return res.status(400).json({
+        error: 'Unknown provider',
+        message: `Provider '${providerType}' is not supported.`
+      });
+    }
 
   } catch (error: any) {
     console.error('Session start error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Start Retell AI web call for a session
+app.post('/api/sessions/:sessionId/start-web-call', authenticateJWT, async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
+
+    // Validate session exists
+    const session = await db.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (session.status !== 'active') {
+      return res.status(400).json({ error: 'Session is not active' });
+    }
+
+    console.log(`🔄 Starting Retell AI web call for session ${sessionId}`);
+
+    // Get settings for API key and agent ID
+    const settings = await db.getAllSettings();
+    const setting = settings && settings.length > 0 ? settings[0] : null;
+
+    // Check for Retell AI configuration in database, fall back to environment variables
+    const retellApiKey = (setting as any)?.retellai_api_key || process.env.RETELLAI_API_KEY;
+    const retellAgentId = (setting as any)?.retellai_agent_id || process.env.RETELLAI_AGENT_ID;
+
+    if (!retellApiKey || !retellAgentId) {
+      return res.status(400).json({
+        error: 'Retell AI configuration missing',
+        message: 'Retell AI API key and Agent ID must be configured in settings or environment variables'
+      });
+    }
+
+    // Create Retell AI provider instance
+    const retellProvider = new RetellAIProvider();
+
+    // Override environment variables temporarily for this call
+    const originalApiKey = process.env.RETELLAI_API_KEY;
+    const originalAgentId = process.env.RETELLAI_AGENT_ID;
+
+    process.env.RETELLAI_API_KEY = retellApiKey;
+    process.env.RETELLAI_AGENT_ID = retellAgentId;
+
+    try {
+      // Create web call
+      const webCallResponse = await retellProvider.createWebCall({
+        sessionId: sessionId,
+        agentId: retellAgentId
+      });
+
+      // Log audit event
+      await db.insertAuditLog({
+        action: 'retell_web_call_started',
+        details: JSON.stringify({
+          call_id: webCallResponse.call_id,
+          agent_id: webCallResponse.agent_id
+        }),
+        session_id: sessionId,
+        ip_address: req.ip || null
+      });
+
+      // Store call metadata in database
+      await db.saveConversationLog({
+        session_id: sessionId,
+        speaker: 'system',
+        message: `Retell AI web call started`,
+        audio_data: JSON.stringify({
+          type: 'retell_call_metadata',
+          call_id: webCallResponse.call_id,
+          access_token: webCallResponse.access_token,
+          agent_id: webCallResponse.agent_id,
+          start_time: new Date().toISOString()
+        })
+      });
+
+      console.log(`✅ Retell AI web call started for session ${sessionId}`);
+
+      res.json({
+        sessionId,
+        call_id: webCallResponse.call_id,
+        access_token: webCallResponse.access_token,
+        agent_id: webCallResponse.agent_id,
+        message: 'Web call started successfully'
+      });
+
+    } finally {
+      // Restore original environment variables
+      process.env.RETELLAI_API_KEY = originalApiKey;
+      process.env.RETELLAI_AGENT_ID = originalAgentId;
+    }
+
+  } catch (error: any) {
+    console.error('Failed to start Retell AI web call:', error);
+
+    // Update session status on failure
+    try {
+      await db.updateSessionStatus(req.params.sessionId, 'error');
+      await db.insertAuditLog({
+        action: 'retell_web_call_start_failed',
+        details: JSON.stringify({ error: error.message }),
+        session_id: req.params.sessionId,
+        ip_address: req.ip || null
+      });
+    } catch (dbError: any) {
+      console.error('Failed to update database on web call failure:', dbError.message);
+    }
+
+    res.status(500).json({
+      error: 'Failed to start web call',
+      message: error.message,
+      details: 'Check your Retell AI API key and Agent ID configuration'
+    });
+  }
+});
+
+// Get Retell AI call transcript using get-call API
+app.get('/api/sessions/:sessionId/retell-transcript', authenticateJWT, async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
+
+    // Get session to find associated call_id
+    const session = await db.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const retellApiKey = process.env.RETELLAI_API_KEY;
+    if (!retellApiKey) {
+      return res.status(500).json({ error: 'Retell AI API key not configured' });
+    }
+
+    // Find the call_id from stored conversation logs where we saved the web call metadata
+    const conversationLogs = await db.getSessionConversationLogs(sessionId);
+    console.log(`🔍 DEBUG: Found ${conversationLogs?.length || 0} conversation logs for session ${sessionId}`);
+
+    // Debug: Log all system logs to see what's stored
+    const systemLogs = conversationLogs?.filter((log: any) => log.speaker === 'system');
+    console.log(`🔍 DEBUG: Found ${systemLogs?.length || 0} system logs`);
+    systemLogs?.forEach((log: any, index: number) => {
+      console.log(`🔍 DEBUG: System log ${index + 1}: ${log.message}, audio_data: ${log.audio_data?.substring(0, 200)}...`);
+    });
+
+    const callMetadataLog = conversationLogs?.find((log: any) =>
+      log.speaker === 'system' &&
+      log.audio_data &&
+      typeof log.audio_data === 'string' &&
+      log.audio_data.includes('retell_call_metadata')
+    );
+
+    if (!callMetadataLog) {
+      return res.status(404).json({
+        error: 'Call metadata not found',
+        message: 'No Retell AI web call metadata found for this session'
+      });
+    }
+
+    let callMetadata;
+    try {
+      if (!callMetadataLog.audio_data) {
+        return res.status(500).json({
+          error: 'Invalid call metadata',
+          message: 'Call metadata is empty'
+        });
+      }
+      callMetadata = JSON.parse(callMetadataLog.audio_data);
+    } catch (parseError) {
+      console.error('Failed to parse call metadata:', parseError);
+      return res.status(500).json({
+        error: 'Invalid call metadata',
+        message: 'Call metadata is corrupted'
+      });
+    }
+
+    const { call_id } = callMetadata;
+    if (!call_id) {
+      return res.status(404).json({
+        error: 'Call ID not found',
+        message: 'Call ID not stored in metadata'
+      });
+    }
+
+    console.log(`📞 Retrieving transcript for Retell AI call ${call_id}`);
+
+    // Use the REST API endpoint directly as specified in documentation
+    const getCallUrl = `https://api.retellai.com/v2/get-call/${call_id}`;
+
+    const response = await fetch(getCallUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${retellApiKey}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return res.status(404).json({
+          error: 'Call not found',
+          message: 'Retell AI call not found or expired'
+        });
+      }
+      throw new Error(`Retell API responded with status ${response.status}: ${response.statusText}`);
+    }
+
+    const call: any = await response.json();
+
+    if (!call) {
+      return res.status(404).json({
+        error: 'Call not found',
+        message: 'Retell AI call not found or expired'
+      });
+    }
+
+    // Check if the call has ended and update session status accordingly
+    const callEndedStatuses = ['ended', 'completed', 'error', 'failed'];
+    if (call.call_status && callEndedStatuses.includes(call.call_status.toLowerCase())) {
+      console.log(`📞 RetellAI call ${call_id} has ended with status: ${call.call_status}. Updating session status to completed.`);
+      try {
+        await db.updateSessionStatus(sessionId, 'completed');
+        console.log(`✅ Session ${sessionId} status updated to completed`);
+      } catch (statusError: any) {
+        console.error(`❌ Failed to update session status for ${sessionId}:`, statusError.message);
+      }
+    }
+
+    // Extract transcript data from transcript_object (detailed array)
+    const transcript = Array.isArray(call.transcript_object) ? call.transcript_object : [];
+
+    console.log(`📝 Retrieved ${transcript.length} transcript items from transcript_object for call ${call_id}`);
+
+    // Save each transcript item to our database for persistence
+    for (const item of transcript) {
+      try {
+        await db.saveConversationLog({
+          session_id: sessionId,
+          speaker: item.role || item.speaker || 'unknown', // 'agent' or 'user'
+          message: item.content || item.text || '',
+          audio_data: JSON.stringify({
+            type: 'retell_transcript',
+            transcript_id: item.id,
+            timestamp: item.created_at || item.timestamp,
+            source: 'retell_get_call_api'
+          })
+        });
+      } catch (saveError: any) {
+        console.error(`Failed to save transcript item ${item.id || 'unknown'}:`, saveError.message);
+        // Continue with other items even if one fails
+      }
+    }
+
+    // Log audit event
+    await db.insertAuditLog({
+      action: 'retell_transcript_retrieved',
+      details: JSON.stringify({
+        call_id: call_id,
+        transcript_items: transcript.length,
+        call_status: call.call_status
+      }),
+      session_id: sessionId,
+      ip_address: req.ip || null
+    });
+
+    // Return the transcript data with call information
+    res.json({
+      sessionId,
+      call_id: call.call_id,
+      status: call.call_status,
+      start_time: call.start_timestamp,
+      end_time: call.end_timestamp,
+      duration: call.duration || 0,
+      transcript: transcript.map((item: any) => ({
+        id: item.id,
+        role: item.role,
+        content: item.content,
+        created_at: item.created_at
+      })),
+      summary: {
+        total_items: transcript.length,
+        agent_lines: transcript.filter((t: any) => t.role === 'agent').length,
+        user_lines: transcript.filter((t: any) => t.role === 'user').length
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Failed to get Retell transcript:', error);
+
+    // Handle specific Retell API errors
+    if (error.status === 404) {
+      return res.status(404).json({
+        error: 'Call not found',
+        message: 'The Retell AI call was not found or has expired'
+      });
+    }
+
+    if (error.status === 401) {
+      return res.status(500).json({
+        error: 'Authentication failed',
+        message: 'Invalid Retell AI API key'
+      });
+    }
+
+    res.status(500).json({
+      error: 'Failed to retrieve call transcript',
+      message: error.message
+    });
+  }
+});
+
+// Save transcript for a Retell AI session
+app.post('/api/sessions/:sessionId/transcript', authenticateJWT, async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
+    const { speaker, message, timestamp, type } = req.body;
+
+    // Validate session exists
+    const session = await db.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (session.status !== 'active') {
+      return res.status(400).json({ error: 'Session is not active' });
+    }
+
+    console.log(`📝 Saving ${speaker} transcript for Retell AI session ${sessionId}: "${message}"`);
+
+    // Save transcript to database
+    await db.saveConversationLog({
+      session_id: sessionId,
+      speaker: speaker,
+      message: message,
+      audio_data: JSON.stringify({
+        type: type || 'realtime_transcript',
+        timestamp: timestamp || new Date().toISOString(),
+        source: 'retell_ai_web_call'
+      })
+    });
+
+    res.json({ success: true, message: 'Transcript saved successfully' });
+
+  } catch (error: any) {
+    console.error('Failed to save transcript:', error);
+    res.status(500).json({
+      error: 'Failed to save transcript',
+      message: error.message
+    });
   }
 });
 
@@ -344,16 +745,31 @@ app.get('/api/sessions/:sessionId', (req: any, res: any) => {
 });
 
 // End session
-app.post('/api/sessions/:sessionId/end', (req: any, res: any) => {
-  const { sessionId } = req.params;
+app.post('/api/sessions/:sessionId/end', async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
 
-  realtimeManager.endSession(sessionId)
-    .then(() => {
-      res.json({ message: 'Session ended successfully' });
-    })
-    .catch((error: any) => {
-      res.status(500).json({ error: 'Failed to end session' });
-    });
+    // Get the session to determine which provider was used
+    const session = await db.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Use the correct provider for ending the session
+    if (session.provider === 'retellai') {
+      // For RetellAI sessions, use the RetellAI provider
+      const retellProvider = ProviderFactory.getProvider('retellai');
+      await retellProvider.endSession(sessionId);
+    } else {
+      // For OpenAI (and other) sessions, use the realtime manager
+      await realtimeManager.endSession(sessionId);
+    }
+
+    res.json({ message: 'Session ended successfully' });
+  } catch (error: any) {
+    console.error('Error ending session:', error);
+    res.status(500).json({ error: 'Failed to end session', details: error.message });
+  }
 });
 
 // Get session counts for dashboard
@@ -606,8 +1022,11 @@ app.get('/api/settings/config', async (req: any, res: any) => {
     if (setting) {
       res.json({
         id: setting.id,
+        provider: (setting as any).provider || 'openai',
         model: setting.model,
         openaiApiKey: process.env.OPENAI_API_KEY || '', // Use .env value as default
+        retellAIApiKey: (setting as any).retellai_api_key || '',
+        retellAIAgentId: (setting as any).retellai_agent_id || '',
         medicalInstructions: setting.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS, // Use constants as default
         voice: setting.voice,
         temperature: setting.temperature,
@@ -679,9 +1098,12 @@ app.post('/api/settings/config', async (req: any, res: any) => {
     console.log(`💾 Saving settings with medical instructions (${settingsData.medicalInstructions.length} chars)`);
 
     const mappedSettings = {
-      id: settingsData.id, // optional if you update by id
+      id: Number(settingsData.id), // ensure number
+      provider: settingsData.provider || 'openai',
       model: String(settingsData.model),
       openai_api_key: settingsData.openaiApiKey ?? null,
+      retellai_api_key: settingsData.retellAIApiKey ?? null,
+      retellai_agent_id: settingsData.retellAIAgentId ?? null,
       medical_instructions: String(settingsData.medicalInstructions),
       voice: String(settingsData.voice ?? 'alloy'),
       temperature: Number(settingsData.temperature ?? 0.6), // ensure number
@@ -698,8 +1120,11 @@ app.post('/api/settings/config', async (req: any, res: any) => {
       // Return saved settings
       res.json({
         id: savedSettings.id,
+        provider: savedSettings.provider || 'openai',
         model: savedSettings.model,
         openaiApiKey: savedSettings.openai_api_key || '',
+        retellAIApiKey: (savedSettings as any).retellai_api_key || '',
+        retellAIAgentId: (savedSettings as any).retellai_agent_id || '',
         medicalInstructions: savedSettings.medical_instructions || '',
         voice: savedSettings.voice,
         temperature: savedSettings.temperature,

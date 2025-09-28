@@ -5,25 +5,29 @@ import cacheService, { CACHE_PATTERNS } from './cache-service.js';
 
 // Interfaces
 export interface Session {
-    id: string;
-    patient_id: number;
-    patient_name: string;
-    status: string;
-    start_time: Date;
-    end_time?: Date | null;
-    red_flags_detected: number;
-    created_at: Date;
+  id: string;
+  patient_id: number;
+  patient_name: string;
+  provider?: string;
+  status: string;
+  start_time: Date;
+  end_time?: Date | null;
+  red_flags_detected: number;
+  created_at: Date;
 }
 
 export interface Setting {
-    id: number;
-    model: string;
-    openai_api_key?: string | null;
-    medical_instructions?: string | null;
-    voice: string;
-    temperature: number;
-    max_response_length: number;
-    updated_at: Date;
+  id: number;
+  provider?: string;
+  model: string;
+  openai_api_key?: string | null;
+  retellai_api_key?: string | null;
+  retellai_agent_id?: string | null;
+  medical_instructions?: string | null;
+  voice: string;
+  temperature: number;
+  max_response_length: number;
+  updated_at: Date;
 }
 
 export interface ConversationLog {
@@ -240,19 +244,20 @@ export class DataService {
     }
 
     public async createSession(session: Omit<Session, 'id' | 'created_at'>): Promise<Session> {
-        const result = await this.runQueryWithInputByType<Session>(
-            `INSERT INTO sessions (patient_id, patient_name, status, start_time, end_time, red_flags_detected, created_at)
-            OUTPUT INSERTED.*
-            VALUES (@patient_id, @patient_name, @status, @start_time, @end_time, @red_flags_detected, GETDATE())`,
-            [
-                { name: 'patient_id', type: sql.BigInt, value: session.patient_id || null },
-                { name: 'patient_name', type: sql.VarChar(250), value: session.patient_name || null },
-                { name: 'status', type: sql.VarChar(50), value: session.status },
-                { name: 'start_time', type: sql.DateTime, value: session.start_time },
-                { name: 'end_time', type: sql.DateTime, value: session.end_time ?? null },
-                { name: 'red_flags_detected', type: sql.Int, value: session.red_flags_detected }
-            ]
-        );
+      const result = await this.runQueryWithInputByType<Session>(
+        `INSERT INTO sessions (patient_id, patient_name, provider, status, start_time, end_time, red_flags_detected, created_at)
+        OUTPUT INSERTED.*
+        VALUES (@patient_id, @patient_name, @provider, @status, @start_time, @end_time, @red_flags_detected, GETDATE())`,
+        [
+          { name: 'patient_id', type: sql.BigInt, value: session.patient_id || null },
+          { name: 'patient_name', type: sql.VarChar(250), value: session.patient_name || null },
+          { name: 'provider', type: sql.VarChar(50), value: session.provider || null },
+          { name: 'status', type: sql.VarChar(50), value: session.status },
+          { name: 'start_time', type: sql.DateTime, value: session.start_time },
+          { name: 'end_time', type: sql.DateTime, value: session.end_time ?? null },
+          { name: 'red_flags_detected', type: sql.Int, value: session.red_flags_detected }
+        ]
+      );
 
         // Invalidate cache for sessions and counts
         cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
@@ -320,56 +325,65 @@ export class DataService {
     }
 
     public async saveSettings(setting: Partial<Setting> & { id?: number }): Promise<void> {
-        const temperature: number = Number(setting.temperature ?? 0.6);
-        const maxLength: number = Number(setting.max_response_length ?? 200);
-        // If ID exists, update. Otherwise, insert
-        if (setting.id) {
-            // Update existing settings
-            const setClauses = [
-                "model = @model",
-                "openai_api_key = @openai_api_key",
-                "medical_instructions = @medical_instructions",
-                "voice = @voice",
-                "temperature = @temperature",
-                "max_response_length = @max_response_length",
-                "updated_at = GETDATE()"
-            ].join(", ");
+      const temperature: number = Number(setting.temperature ?? 0.6);
+      const maxLength: number = Number(setting.max_response_length ?? 200);
+      // If ID exists, update. Otherwise, insert
+      if (setting.id) {
+        // Update existing settings
+        const setClauses = [
+          "provider = @provider",
+          "model = @model",
+          "openai_api_key = @openai_api_key",
+          "retellai_api_key = @retellai_api_key",
+          "retellai_agent_id = @retellai_agent_id",
+          "medical_instructions = @medical_instructions",
+          "voice = @voice",
+          "temperature = @temperature",
+          "max_response_length = @max_response_length",
+          "updated_at = GETDATE()"
+        ].join(", ");
 
-            const inputs = [
-                { name: "id", type: sql.BigInt, value: setting.id },
-                { name: "model", type: sql.VarChar(250), value: setting.model ?? "gpt-4o-realtime-preview" },
-                { name: "openai_api_key", type: sql.VarChar(sql.MAX), value: setting.openai_api_key ?? null },
-                { name: "medical_instructions", type: sql.VarChar(sql.MAX), value: setting.medical_instructions ?? null },
-                { name: "voice", type: sql.VarChar(250), value: setting.voice ?? "alloy" },
-                { name: "temperature", type: sql.Decimal(5, 1), value: temperature },
-                { name: "max_response_length", type: sql.BigInt, value: maxLength }
-            ];
+        const inputs = [
+          { name: "id", type: sql.BigInt, value: setting.id },
+          { name: "provider", type: sql.VarChar(250), value: setting.provider ?? "openai" },
+          { name: "model", type: sql.VarChar(250), value: setting.model ?? "gpt-4o-realtime-preview" },
+          { name: "openai_api_key", type: sql.VarChar(sql.MAX), value: setting.openai_api_key ?? null },
+          { name: "retellai_api_key", type: sql.VarChar(sql.MAX), value: setting.retellai_api_key ?? null },
+          { name: "retellai_agent_id", type: sql.VarChar(250), value: setting.retellai_agent_id ?? null },
+          { name: "medical_instructions", type: sql.VarChar(sql.MAX), value: setting.medical_instructions ?? null },
+          { name: "voice", type: sql.VarChar(250), value: setting.voice ?? "alloy" },
+          { name: "temperature", type: sql.Decimal(5, 1), value: temperature },
+          { name: "max_response_length", type: sql.BigInt, value: maxLength }
+        ];
 
-            await this.runQueryWithInput(
-                `UPDATE settings SET ${setClauses} WHERE id = @id`,
-                inputs
-            );
+        await this.runQueryWithInput(
+          `UPDATE settings SET ${setClauses} WHERE id = @id`,
+          inputs
+        );
 
-        } else {
-            // Insert new settings
-            const newId = Date.now(); // or generate a proper unique ID/UUID
+      } else {
+        // Insert new settings
+        const newId = Date.now(); // or generate a proper unique ID/UUID
 
-            const inputs = [
-                { name: "id", type: sql.BigInt, value: newId },
-                { name: "model", type: sql.VarChar(250), value: setting.model ?? "gpt-4o-realtime-preview" },
-                { name: "openai_api_key", type: sql.VarChar(sql.MAX), value: setting.openai_api_key ?? null },
-                { name: "medical_instructions", type: sql.VarChar(sql.MAX), value: setting.medical_instructions ?? null },
-                { name: "voice", type: sql.VarChar(250), value: setting.voice ?? "alloy" },
-                { name: "temperature", type: sql.Decimal(5, 1), value: temperature },
-                { name: "max_response_length", type: sql.BigInt, value: maxLength }
-            ];
+        const inputs = [
+          { name: "id", type: sql.BigInt, value: newId },
+          { name: "provider", type: sql.VarChar(250), value: setting.provider ?? "openai" },
+          { name: "model", type: sql.VarChar(250), value: setting.model ?? "gpt-4o-realtime-preview" },
+          { name: "openai_api_key", type: sql.VarChar(sql.MAX), value: setting.openai_api_key ?? null },
+          { name: "retellai_api_key", type: sql.VarChar(sql.MAX), value: setting.retellai_api_key ?? null },
+          { name: "retellai_agent_id", type: sql.VarChar(250), value: setting.retellai_agent_id ?? null },
+          { name: "medical_instructions", type: sql.VarChar(sql.MAX), value: setting.medical_instructions ?? null },
+          { name: "voice", type: sql.VarChar(250), value: setting.voice ?? "alloy" },
+          { name: "temperature", type: sql.Decimal(5, 1), value: temperature },
+          { name: "max_response_length", type: sql.BigInt, value: maxLength }
+        ];
 
-            await this.runQueryWithInput(
-                `INSERT INTO settings (id, model, openai_api_key, medical_instructions, voice, temperature, max_response_length, updated_at)
-              VALUES (@id, @model, @openai_api_key, @medical_instructions, @voice, @temperature, @max_response_length, GETDATE())`,
-                inputs
-            );
-        }
+        await this.runQueryWithInput(
+          `INSERT INTO settings (id, provider, model, openai_api_key, retellai_api_key, retellai_agent_id, medical_instructions, voice, temperature, max_response_length, updated_at)
+        VALUES (@id, @provider, @model, @openai_api_key, @retellai_api_key, @retellai_agent_id, @medical_instructions, @voice, @temperature, @max_response_length, GETDATE())`,
+          inputs
+        );
+      }
 
         // Invalidate settings cache
         cacheService.invalidateByPattern(CACHE_PATTERNS.SETTINGS);
@@ -403,11 +417,13 @@ export class DataService {
             return cached;
         }
 
-        // Fetch from database
+        // Fetch from database - convert varbinary audio_data back to varchar for JSON parsing
         const result = await this.runQueryWithInput<ConversationLog>(
-            `SELECT * FROM conversation_logs
-                WHERE session_id = @id
-                ORDER BY timestamp ASC `,
+            `SELECT id, session_id, timestamp, speaker, message,
+                    CASE WHEN audio_data IS NOT NULL THEN CONVERT(varchar(max), audio_data) ELSE NULL END as audio_data
+             FROM conversation_logs
+             WHERE session_id = @id
+             ORDER BY timestamp ASC `,
             [
                 { name: 'id', type: sql.VarChar, value: sessionId }
             ]
@@ -427,12 +443,12 @@ export class DataService {
     public async saveConversationLog(log: Omit<ConversationLog, 'id' | 'timestamp'>): Promise<void> {
         await this.runQueryWithInput(
             `INSERT INTO conversation_logs (session_id, speaker, message, audio_data, timestamp)
-        VALUES (@session_id, @speaker, @message, @audio_data, GETDATE())`,
+        VALUES (@session_id, @speaker, @message, CONVERT(varbinary(max), @audio_data), GETDATE())`,
             [
                 { name: 'session_id', type: sql.VarChar, value: log.session_id },
                 { name: 'speaker', type: sql.VarChar(250), value: log.speaker },
                 { name: 'message', type: sql.VarChar(sql.MAX), value: log.message },
-                { name: 'audio_data', type: sql.VarBinary(sql.MAX), value: null }, // Set to null for now since we're only storing metadata as JSON strings
+                { name: 'audio_data', type: sql.VarChar(sql.MAX), value: log.audio_data || null }, // Store audio_data as text when provided (JSON strings), convert to varbinary
             ]
         );
 

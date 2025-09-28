@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { RetellWebClient } from 'retell-client-js-sdk';
 
 type SessionStatus = 'idle' | 'connecting' | 'active' | 'completed' | 'error';
 
@@ -20,6 +21,7 @@ const Session: React.FC = () => {
   const [showTranscript, setShowTranscript] = useState(false);
   const [pendingSentence, setPendingSentence] = useState<{speaker: string, text: string, timeoutId: number, timestamp?: string} | null>(null);
   const [speaker, setSpeaker] = useState<string>(''); // Current speaker indicator
+  const [provider, setProvider] = useState<string>('openai'); // AI provider type
 
   // New state for patient name input
   const [patientName, setPatientName] = useState<string>('');
@@ -30,6 +32,7 @@ const Session: React.FC = () => {
   const token = localStorage.getItem("jwt_token");
 
   const wsRef = useRef<WebSocket | null>(null);
+  const retellWebClientRef = useRef<RetellWebClient | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isRecordingRef = useRef(false);
@@ -75,6 +78,7 @@ const Session: React.FC = () => {
 
       if (data.sessionId) {
         setSessionId(data.sessionId);
+        setProvider(data.provider || 'openai');
         setSessionStatus('active');
         setConversationLog([{
           timestamp: new Date().toLocaleTimeString(),
@@ -82,8 +86,15 @@ const Session: React.FC = () => {
           message: 'Welcome to the Medical Intake Voice Agent. Please speak clearly and provide detailed information about your medical concerns.',
           type: 'system'
         }]);
-        await initializeAudioRecording();
-        connectWebSocket(data.sessionId);
+
+        if (data.provider === 'retellai') {
+          // For Retell AI, start web call directly
+          await startRetellWebCall(data.sessionId);
+        } else {
+          // For OpenAI, initialize audio and connect WebSocket
+          await initializeAudioRecording();
+          connectWebSocket(data.sessionId);
+        }
       } else {
         setErrorMessage('Failed to start session');
         setSessionStatus('error');
@@ -319,6 +330,154 @@ const Session: React.FC = () => {
     }
   };
 
+  const startRetellWebCall = async (sessionId: string) => {
+    try {
+      setConnectionStatus('Connecting to Retell AI...');
+
+      // Get access token from backend
+      const response = await fetch(`/api/sessions/${sessionId}/start-web-call`, {
+        method: 'POST',
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const data = await response.json();
+
+      if (!data.access_token) {
+        throw new Error(data.message || 'Failed to get access token');
+      }
+
+      // Initialize Retell Web Client
+      retellWebClientRef.current = new RetellWebClient();
+      const retellWebClient = retellWebClientRef.current;
+
+      // Set up event listeners - log ALL events for debugging
+      const allEvents = [
+        'call_started', 'call_ended', 'realtime_transcript',
+        'agent_start_talking', 'agent_stop_talking', 'error',
+        'audio', 'transcript', 'tool_call', 'function_call'
+      ];
+
+      allEvents.forEach(eventName => {
+        retellWebClient.on(eventName, (event: any) => {
+          console.log(`🔄 Retell AI event [${eventName}]:`, event);
+        });
+      });
+
+      retellWebClient.on('call_started', () => {
+        console.log('Retell AI call started');
+        setConnectionStatus('Connected');
+        addToConversationLog('System', 'Connected to Retell AI. Call is active.', 'system');
+      });
+
+      retellWebClient.on('call_ended', async () => {
+        console.log('Retell AI call ended');
+        setConnectionStatus('Disconnected');
+        setSessionStatus('completed');
+        addToConversationLog('System', 'Call ended successfully', 'system');
+
+        // Automatically fetch the complete transcript after call ends
+        if (sessionId) {
+          try {
+            console.log('Fetching complete transcript from Retell AI...');
+            const response = await fetch(`/api/sessions/${sessionId}/retell-transcript`, {
+              method: 'GET',
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              }
+            });
+
+            const transcriptData = await response.json();
+
+            if (response.ok && transcriptData.transcript) {
+              console.log('Successfully retrieved complete transcript:', transcriptData);
+              addToConversationLog('System', `Complete transcript retrieved: ${transcriptData.summary.total_items} items (${transcriptData.summary.agent_lines} agent, ${transcriptData.summary.user_lines} user)`, 'system');
+            } else {
+              console.error('Failed to retrieve transcript:', transcriptData);
+              addToConversationLog('System', 'Failed to retrieve complete transcript', 'system');
+            }
+          } catch (error) {
+            console.error('Error fetching transcript:', error);
+            addToConversationLog('System', 'Error retrieving complete transcript', 'system');
+          }
+        }
+      });
+
+      // ✅ CORRECT EVENT 1: Real-time Transcript (User only, streaming)
+      retellWebClient.on('realtime_transcript', (event: any) => {
+        console.log('Retell AI REALTIME transcript:', event);
+        // { transcript: "...", is_final: false, turn: "user" }
+
+        if (event.transcript && event.turn === 'user') {
+          // Update live typing indicator (optional)
+          // processRealtimeTranscript(event.transcript);
+        }
+      });
+
+      // ✅ CORRECT EVENT 2: Final Transcript (User AND Agent)
+      retellWebClient.on('transcript', async (event: any) => {
+        console.log('Retell AI FINAL transcript:', event);
+        // { transcript: "...", turn: "user" | "agent" }
+
+        if (event.transcript) {
+          const speaker = event.turn === 'user' ? 'patient' : 'agent';
+
+          try {
+            // Save transcript to backend for persistence
+            await fetch(`/api/sessions/${sessionId}/transcript`, {
+              method: 'POST',
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                speaker: speaker,
+                message: event.transcript,
+                timestamp: new Date().toISOString(),
+                type: event.turn === 'user' ? 'user_transcript' : 'agent_transcript'
+              })
+            });
+
+            // Update UI
+            const uiSpeaker = event.turn === 'user' ? 'You' : 'Agent';
+            if (!checkImmediateSentence(uiSpeaker, event.transcript) && event.transcript.trim()) {
+              processTranscriptDelta(uiSpeaker, event.transcript);
+            }
+          } catch (error) {
+            console.error('Failed to save transcript:', error);
+          }
+        }
+      });
+
+      retellWebClient.on('agent_start_talking', () => {
+        setSpeaker('Agent');
+      });
+
+      retellWebClient.on('agent_stop_talking', () => {
+        setSpeaker('Patient');
+      });
+
+      retellWebClient.on('error', (error: any) => {
+        console.error('Retell AI error:', error);
+        setErrorMessage(error.message || 'Retell AI error occurred');
+        setSessionStatus('error');
+      });
+
+      // Start the call
+      await retellWebClient.startCall({
+        accessToken: data.access_token,
+      });
+
+    } catch (error: any) {
+      console.error('Failed to start Retell AI web call:', error);
+      setErrorMessage(error.message || 'Failed to connect to Retell AI');
+      setSessionStatus('error');
+    }
+  };
+
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     if (conversationMessagesRef.current) {
@@ -511,29 +670,45 @@ const Session: React.FC = () => {
 
   const endSession = async () => {
     console.log('endSession called');
-    if (isRecording) {
-      console.log('Stopping recording');
-      setIsRecording(false);
-      isRecordingRef.current = false;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-    }
-    // Delay closing audio context to allow any ongoing audio playback to complete
-    setTimeout(() => {
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+
+    // Handle provider-specific cleanup
+    if (provider === 'retellai') {
+      // End Retell AI call
+      if (retellWebClientRef.current) {
         try {
-          audioContextRef.current.close();
-          audioContextRef.current = null;
-          gainNodeRef.current = null;
+          await retellWebClientRef.current.stopCall();
+          console.log('Retell AI call stopped');
         } catch (error) {
-          console.error('Error closing audio context:', error);
+          console.error('Error stopping Retell AI call:', error);
         }
       }
-    }, 20000);
-    if (wsRef.current) {
-      wsRef.current.send(JSON.stringify({ type: 'end_session' }));
+    } else {
+      // Handle OpenAI/WebSocket cleanup
+      if (isRecording) {
+        console.log('Stopping recording');
+        setIsRecording(false);
+        isRecordingRef.current = false;
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      // Delay closing audio context to allow any ongoing audio playback to complete
+      setTimeout(() => {
+        if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+          try {
+            audioContextRef.current.close();
+            audioContextRef.current = null;
+            gainNodeRef.current = null;
+          } catch (error) {
+            console.error('Error closing audio context:', error);
+          }
+        }
+      }, 20000);
+      if (wsRef.current) {
+        wsRef.current.send(JSON.stringify({ type: 'end_session' }));
+      }
     }
+
     setSessionStatus('completed');
     setIsRecording(false);
   };
@@ -622,10 +797,15 @@ const Session: React.FC = () => {
     setErrorMessage('');
     setSessionDuration(0);
     sessionStartTime.current = null;
+    setProvider('openai'); // Reset to default provider
     // Clear audio buffers
     audioBufferRef.current = '';
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
+    // Clean up Retell Web Client if exists
+    if (retellWebClientRef.current) {
+      retellWebClientRef.current = null;
+    }
   };
 
   const handlePatientFormSubmit = (e: React.FormEvent) => {
@@ -744,7 +924,13 @@ const Session: React.FC = () => {
                         Connected
                       </span>
                     )}
-                    {isRecording && (
+                    {connectionStatus === 'Connecting to Retell AI...' && (
+                      <span className="badge bg-warning-subtle text-warning border border-warning-subtle">
+                        <i className="fas fa-spinner fa-spin me-1" style={{ fontSize: '0.5rem' }}></i>
+                        Connecting to Retell AI
+                      </span>
+                    )}
+                    {provider !== 'retellai' && isRecording && (
                       <span className="badge bg-danger-subtle text-danger border border-danger-subtle">
                         <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem', animation: 'pulse 1.5s infinite' }}></i>
                         Recording
@@ -849,21 +1035,35 @@ const Session: React.FC = () => {
 
                       {sessionStatus === 'active' && (
                         <>
-                          <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
-                            <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
-                            <div className="text-start flex-grow-1">
-                              <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
-                              <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
-                            </div>
-                          </button>
+                          {provider === 'retellai' ? (
+                            // Retell AI controls - simpler, just end call
+                            <button className="btn btn-danger btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                              <i className="fas fa-phone-slash fa-2x flex-shrink-0"></i>
+                              <div className="text-start flex-grow-1">
+                                <div className="fw-bold">End Call</div>
+                                <small className="opacity-75">Terminate voice call</small>
+                              </div>
+                            </button>
+                          ) : (
+                            // OpenAI controls - recording controls
+                            <>
+                              <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
+                                <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
+                                <div className="text-start flex-grow-1">
+                                  <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
+                                  <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
+                                </div>
+                              </button>
 
-                          <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
-                            <i className="fas fa-stop fa-lg flex-shrink-0"></i>
-                            <div className="text-start flex-grow-1">
-                              <div className="fw-bold">End Session</div>
-                              <small className="opacity-75">Terminate conversation</small>
-                            </div>
-                          </button>
+                              <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                                <i className="fas fa-stop fa-lg flex-shrink-0"></i>
+                                <div className="text-start flex-grow-1">
+                                  <div className="fw-bold">End Session</div>
+                                  <small className="opacity-75">Terminate conversation</small>
+                                </div>
+                              </button>
+                            </>
+                          )}
                         </>
                       )}
 

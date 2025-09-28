@@ -26,7 +26,6 @@ const Dashboard: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const token = localStorage.getItem("jwt_token");
   const hasFetched = useRef(false);
 
   useEffect(() => {

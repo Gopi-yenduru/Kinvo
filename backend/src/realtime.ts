@@ -1,6 +1,8 @@
 import WebSocket from 'ws';
 import db from './database-manager.js';
 import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY, MEDICAL_INTAKE_INSTRUCTIONS, MEDICAL_INTAKE_INSTRUCTIONS_NEW } from './constants.js';
+import { BaseProvider } from './providers/BaseProvider.js';
+import ProviderFactory from './providers/ProviderFactory.js';
 
 interface RealtimeConfig {
   sessionId: string;
@@ -13,6 +15,7 @@ interface RealtimeConfig {
 }
 
 class RealtimeSessionManager {
+  private provider: BaseProvider = ProviderFactory.getProvider('openai'); // Default to OpenAI
   public connections: Map<string, any> = new Map();
   private frontendSockets: Map<string, any> = new Map(); // Track frontend WebSocket for each session
   private agentTextBuffers: Map<string, string> = new Map(); // Accumulate full agent responses
@@ -29,6 +32,10 @@ class RealtimeSessionManager {
  private lastPatientTranscript: Map<string, string> = new Map(); // Tracks last processed patient transcript to prevent duplicates
  private AGENT_DEFER_MS = 800; // how long to wait for patient transcript before saving agent (tune as needed)
  private RECENT_PATIENT_WINDOW_MS = 1000; // how recent is considered 'patient activity'
+
+ setProvider(provider: BaseProvider) {
+   this.provider = provider;
+ }
 
 private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: string) {
   try {
@@ -79,6 +86,11 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 
   async createRealtimeSession(config: RealtimeConfig): Promise<WebSocket | null> {
+    return this.provider.createRealtimeSession(config);
+  }
+
+  // Keep the old implementation as fallback or remove it
+  async _createRealtimeSessionOld(config: RealtimeConfig): Promise<WebSocket | null> {
     return new Promise((resolve, reject) => {
       try {
         // Check if API key is available
@@ -696,6 +708,10 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
   // Link a frontend WebSocket to a session for bidirectional communication
   linkFrontendSocket(sessionId: string, frontendWs: any) {
+    return this.provider.linkFrontendSocket(sessionId, frontendWs);
+  }
+
+  _linkFrontendSocketOld(sessionId: string, frontendWs: any) {
     this.frontendSockets.set(sessionId, frontendWs);
 
     // Log system message for session join
@@ -733,12 +749,21 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
   // Unlink frontend WebSocket when disconnected
   unlinkFrontendSocket(sessionId: string) {
+    return this.provider.unlinkFrontendSocket(sessionId);
+  }
+
+  _unlinkFrontendSocketOld(sessionId: string) {
     this.frontendSockets.delete(sessionId);
     console.log(`Frontend WebSocket unlinked for session ${sessionId}`);
   }
 
-  // Send audio data from frontend to OpenAI Realtime API
+  // Send audio data from frontend to provider
   sendAudioData(sessionId: string, audioDataObject: any) {
+    return this.provider.sendAudioData(sessionId, audioDataObject);
+  }
+
+  // Old implementation
+  _sendAudioDataOld(sessionId: string, audioDataObject: any) {
     const realtimeWs = this.connections.get(sessionId);
     if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
       try {
@@ -927,6 +952,10 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 
   async endSession(sessionId: string) {
+    return this.provider.endSession(sessionId);
+  }
+
+  async _endSessionOld(sessionId: string) {
     // Update database status to 'completed' when session ends
     try {
       db.updateSessionStatus(sessionId, 'completed');
@@ -961,7 +990,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 
   getSession(sessionId: string) {
-    return this.connections.get(sessionId);
+    return this.provider.getSession ? this.provider.getSession(sessionId) : null;
   }
 
   // Deduplication helper method
