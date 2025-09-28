@@ -1024,57 +1024,37 @@ const Session: React.FC = () => {
                     </div>
                     <div className="card-body">
                       <div className="d-grid gap-3">
-
-
-                      {sessionStatus === 'active' && (
-                        <>
-                          {provider === 'retellai' ? (
-                            // Retell AI controls - simpler, just end call
-                            <button className="btn btn-danger btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
-                              <i className="fas fa-phone-slash fa-2x flex-shrink-0"></i>
-                              <div className="text-start flex-grow-1">
-                                <div className="fw-bold">End Call</div>
-                                <small className="opacity-75">Terminate voice call</small>
-                              </div>
-                            </button>
-                          ) : (
-                            // OpenAI controls - recording controls
-                            <>
-                              <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
-                                <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
-                                <div className="text-start flex-grow-1">
-                                  <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
-                                  <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
-                                </div>
-                              </button>
                         {sessionStatus === 'active' && (
                           <>
-                            <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
-                              <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
-                              <div className="text-start flex-grow-1">
-                                <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
-                                <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
-                              </div>
-                            </button>
-
-                              <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
-                                <i className="fas fa-stop fa-lg flex-shrink-0"></i>
+                            {provider === 'retellai' ? (
+                              // Retell AI controls - simpler, just end call
+                              <button className="btn btn-danger btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                                <i className="fas fa-phone-slash fa-2x flex-shrink-0"></i>
                                 <div className="text-start flex-grow-1">
-                                  <div className="fw-bold">End Session</div>
-                                  <small className="opacity-75">Terminate conversation</small>
+                                  <div className="fw-bold">End Call</div>
+                                  <small className="opacity-75">Terminate voice call</small>
                                 </div>
                               </button>
-                            </>
-                          )}
-                        </>
-                      )}
-                            <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
-                              <i className="fas fa-stop fa-lg flex-shrink-0"></i>
-                              <div className="text-start flex-grow-1">
-                                <div className="fw-bold">End Session</div>
-                                <small className="opacity-75">Terminate conversation</small>
-                              </div>
-                            </button>
+                            ) : (
+                              // OpenAI controls - recording controls
+                              <>
+                                <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
+                                  <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
+                                  <div className="text-start flex-grow-1">
+                                    <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
+                                    <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
+                                  </div>
+                                </button>
+
+                                <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                                  <i className="fas fa-stop fa-lg flex-shrink-0"></i>
+                                  <div className="text-start flex-grow-1">
+                                    <div className="fw-bold">End Session</div>
+                                    <small className="opacity-75">Terminate conversation</small>
+                                  </div>
+                                </button>
+                              </>
+                            )}
                           </>
                         )}
 
