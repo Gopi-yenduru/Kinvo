@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+import React from 'react';
 import { NavLink } from 'react-router-dom';
 
 interface SidebarProps {
@@ -7,12 +7,6 @@ interface SidebarProps {
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
-  const [userName, setUserName] = useState<string | null>(null);
-    // Load user from localStorage or token
-    useEffect(() => {
-      const storedName = localStorage.getItem('user_name') || 'User';
-      if (storedName) setUserName(storedName);
-    }, []);
 
   const menuItems = [
     {
