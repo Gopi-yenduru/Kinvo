@@ -204,8 +204,7 @@ const Settings: React.FC = () => {
 
   const providerOptions = [
     { value: 'openai', label: 'OpenAI Realtime' },
-    { value: 'retellai', label: 'RetellAI' },
-    { value: 'vapi', label: 'VAPI' }
+    { value: 'retellai', label: 'RetellAI' }
   ];
 
   const voiceOptions = [
