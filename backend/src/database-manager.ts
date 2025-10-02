@@ -33,7 +33,7 @@ export interface Setting {
 export interface ConversationLog {
     id: number;
     session_id: string;
-    timestamp: Date;
+    timestamp?: Date; // Made optional for backward compatibility with existing code
     speaker: string;
     message: string;
     audio_data?: string | null;
@@ -407,7 +407,7 @@ export class DataService {
         cacheService.invalidateByPattern(CACHE_PATTERNS.SETTINGS);
     }
 
-    // --------------------- CONVERSATION LOGS ---------------------    
+    // --------------------- CONVERSATION LOGS ---------------------
     public async getSessionConversationLogs(sessionId: string): Promise<ConversationLog[]> {
         const cacheKey = `${CACHE_PATTERNS.LOGS}:${sessionId}`;
 
@@ -440,15 +440,20 @@ export class DataService {
     `);
     }
 
-    public async saveConversationLog(log: Omit<ConversationLog, 'id' | 'timestamp'>): Promise<void> {
+    // FIXED: Now accepts optional timestamp parameter to preserve chronological ordering (backward compatible)
+    public async saveConversationLog(log: Omit<ConversationLog, 'id'>): Promise<void> {
+        // Use provided timestamp or current time for backward compatibility
+        const timestampToUse = log.timestamp ?? new Date();
+
         await this.runQueryWithInput(
             `INSERT INTO conversation_logs (session_id, speaker, message, audio_data, timestamp)
-        VALUES (@session_id, @speaker, @message, CONVERT(varbinary(max), @audio_data), GETDATE())`,
+        VALUES (@session_id, @speaker, @message, CONVERT(varbinary(max), @audio_data), @timestamp)`,
             [
                 { name: 'session_id', type: sql.VarChar, value: log.session_id },
                 { name: 'speaker', type: sql.VarChar(250), value: log.speaker },
                 { name: 'message', type: sql.VarChar(sql.MAX), value: log.message },
-                { name: 'audio_data', type: sql.VarChar(sql.MAX), value: log.audio_data || null }, // Store audio_data as text when provided (JSON strings), convert to varbinary
+                { name: 'audio_data', type: sql.VarChar(sql.MAX), value: log.audio_data || null },
+                { name: 'timestamp', type: sql.DateTime, value: timestampToUse } // ✅ Uses provided timestamp or defaults to current time
             ]
         );
 
@@ -840,14 +845,17 @@ export class DataService {
         const patientMessages = conversationLogs.filter(log => log.speaker === 'patient').length;
         const alerts = conversationLogs.filter(log => log.speaker === 'alert').length;
 
+        const lastLog = conversationLogs[conversationLogs.length - 1];
+        const firstLog = conversationLogs[0];
+        const lastTimestamp = lastLog?.timestamp ? Number(new Date(lastLog.timestamp)) : null;
+        const firstTimestamp = firstLog?.timestamp ? Number(new Date(firstLog.timestamp)) : null;
+
         return {
             totalExchanges: conversationLogs.length,
             agentStatements: agentMessages,
             patientStatements: patientMessages,
             alertsGenerated: alerts,
-            duration: conversationLogs.length > 0 ?
-                Number(new Date(conversationLogs[conversationLogs.length - 1].timestamp)) - Number(new Date(conversationLogs[0].timestamp))
-                : 0
+            duration: (firstTimestamp && lastTimestamp) ? lastTimestamp - firstTimestamp : 0
         };
     }
 

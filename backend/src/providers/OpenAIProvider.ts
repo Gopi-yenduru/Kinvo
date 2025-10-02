@@ -14,6 +14,8 @@ class OpenAIProvider implements BaseProvider {
   private patientTurnTimestamp: Map<string, number> = new Map();
   private responseInProgress: Map<string, boolean> = new Map();
   private lastPatientTranscript: Map<string, string> = new Map();
+  private patientSpeechStopTimestamp: Map<string, number> = new Map(); // Records when patient actually stopped speaking for proper sequencing
+  private lastInterruptionTime: Map<string, number> = new Map(); // Tracks interruption timestamps to cancel old responses
   private AGENT_DEFER_MS = 800;
   private RECENT_PATIENT_WINDOW_MS = 1000;
 
@@ -112,7 +114,13 @@ class OpenAIProvider implements BaseProvider {
       const nowMs = Date.now();
 
       function queueAgentSave(self: OpenAIProvider, sid: string, transcript: string) {
-        const ts = new Date().toISOString();
+        // FIXED: Get speech timestamp ONCE when queued, not when timer fires
+        // Prevents timestamp drift that causes chronological ordering bugs
+        const speechStopTime = self.patientSpeechStopTimestamp.get(sid) || 0;
+        const ts = new Date(speechStopTime + 100).toISOString(); // Agent response comes after patient stops
+
+        console.log(`⏰ Queuing agent save for ${sid} with speech stop time: ${speechStopTime}, timestamp: ${ts}`);
+
         const arr = self.pendingAgentSaves.get(sid) || [];
         const timer = setTimeout(() => {
           const pending = self.pendingAgentSaves.get(sid) || [];
@@ -125,7 +133,7 @@ class OpenAIProvider implements BaseProvider {
             if (pending.length > 0) self.pendingAgentSaves.set(sid, pending);
             else self.pendingAgentSaves.delete(sid);
             try {
-              console.log(`🕒 Agent defer timeout reached — saving agent for ${sid}`);
+              console.log(`🕒 Agent defer timeout reached — saving agent for ${sid} with timestamp: ${item.ts}`);
               self.saveAgentTranscriptImmediate(sid, item.transcript, item.ts);
             } catch (err) {
               console.error('Error flushing deferred agent save:', err);
@@ -180,78 +188,86 @@ class OpenAIProvider implements BaseProvider {
           if (!this.patientTurnTimestamp.has(sessionId)) {
             this.patientTurnTimestamp.set(sessionId, nowMs);
           }
+
+          // 🔄 DETECT INTERRUPTION: If agent was speaking and patient starts again quickly
+          const lastAgentActivity = this.lastAgentResponse.get(sessionId);
+          if (lastAgentActivity) {
+            const timeSinceLastAgent = nowMs - (this.patientSpeechStopTimestamp.get(sessionId) || 0);
+            if (timeSinceLastAgent < 2000) { // Within 2 seconds of agent finishing = potential interruption
+              console.log(`⚡ INTERRUPTION DETECTED: Patient interrupting agent speech (${timeSinceLastAgent}ms ago)`);
+              this.cancelQueuedResponses(sessionId);
+              this.lastInterruptionTime.set(sessionId, nowMs);
+            }
+          }
           break;
 
         case 'input_audio_buffer.speech_stopped':
-          console.log(`🛑 Patient stopped speaking (${sessionId})`);
           this.recentPatientActivity.set(sessionId, nowMs);
+          // 🕒 RECORD the exact time patient stopped speaking for transcript sequencing
+          this.patientSpeechStopTimestamp.set(sessionId, nowMs);
+          console.log(`🛑 Patient stopped speaking (${sessionId}) - Recording stop time for proper sequencing. Timestamp: ${this.patientSpeechStopTimestamp.get(sessionId)}`);
           break;
 
         case 'conversation.item.input_audio_transcription.delta':
         case 'input_audio_transcription.delta':
           this.recentPatientActivity.set(sessionId, nowMs);
+          // Send real-time transcription to frontend with our calculated patient timestamp
+          if ((event.delta || event.text) && frontendWs) {
+            const deltaText = event.delta || event.text;
+            const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
+            const patientTs = new Date(speechStopTime).toISOString();
+            frontendWs.send(JSON.stringify({
+              type: 'conversation.item.input_audio_transcription.delta',
+              delta: deltaText,
+              timestamp: patientTs // Include calculated timestamp for sequencing
+            }));
+          }
           break;
 
         case 'conversation.item.input_audio_transcription.completed':
         case 'input_audio_transcription.completed':
-          if (this.responseInProgress.get(sessionId)) {
-            console.log(`⏳ Response already in progress for ${sessionId}, skipping transcription processing`);
-            return;
-          }
-
+          // Process transcription for logging only - OpenAI handles response triggering via create_response: true
           if (event.transcript || event.text) {
             const transcript = event.transcript || event.text;
 
             if (!transcript.trim() || transcript.trim().length < 3) {
               console.log(`⚠️ Skipping empty/short transcript for ${sessionId}`);
-              return;
-            }
+            } else {
+              const lastTranscript = this.lastPatientTranscript.get(sessionId);
+              if (lastTranscript === transcript.trim()) {
+                console.log(`🔄 Duplicate transcript detected for ${sessionId}, skipping transcription processing`);
+              } else {
+                // Save transcript - use speech STOP time for correct sequencing (not speech start time)
+                this.lastPatientTranscript.set(sessionId, transcript.trim());
 
-            const lastTranscript = this.lastPatientTranscript.get(sessionId);
-            if (lastTranscript === transcript.trim()) {
-              console.log(`🔄 Duplicate transcript detected for ${sessionId}, skipping`);
-              return;
-            }
-            this.lastPatientTranscript.set(sessionId, transcript.trim());
+                const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
+                const ts = new Date(speechStopTime).toISOString(); // Patient timestamp = when they stopped speaking
+                console.log(`👤 Patient said (final): "${transcript}" - timestamp: ${ts} (speechStop: ${speechStopTime})`);
 
-            const storedTs = this.patientTurnTimestamp.get(sessionId);
-            const ts = storedTs ? new Date(storedTs).toISOString() : new Date().toISOString();
-            console.log(`👤 Patient said (final): "${transcript}"`);
-
-            const realtimeWs = this.connections.get(sessionId);
-            if (realtimeWs) {
-              this.responseInProgress.set(sessionId, true);
-              console.log('▶️ Triggering model response after patient transcript');
-              realtimeWs.send(JSON.stringify({
-                type: "response.create",
-                response: {
-                  modalities: ["audio","text"]
+                try {
+                  db.saveConversationLog({
+                    session_id: sessionId,
+                    speaker: 'patient',
+                    message: transcript,
+                    audio_data: JSON.stringify({ type: 'speech_transcript' }),
+                    timestamp: new Date(speechStopTime) // Patient timestamp = when they stopped speaking
+                  });
+                  db.insertAuditLog({
+                    action: 'patient_speech',
+                    details: JSON.stringify({ transcript }),
+                    session_id: sessionId
+                  });
+                } catch (dbErr) {
+                  console.error(`Failed to save patient transcript for ${sessionId}:`, dbErr);
                 }
-              }));
+
+                this.recentPatientActivity.set(sessionId, nowMs);
+                flushPendingAgents(sessionId);
+              }
             }
 
-            try {
-              db.saveConversationLog({
-                session_id: sessionId,
-                speaker: 'patient',
-                message: transcript,
-                audio_data: JSON.stringify({ type: 'speech_transcript' })
-              });
-              db.insertAuditLog({
-                action: 'patient_speech',
-                details: JSON.stringify({ transcript }),
-                session_id: sessionId
-              });
-            } catch (dbErr) {
-              console.error(`Failed to save patient transcript for ${sessionId}:`, dbErr);
-            }
-
-            this.recentPatientActivity.set(sessionId, nowMs);
-            flushPendingAgents(sessionId);
-
+            // Clean up timing data
             this.patientTurnTimestamp.delete(sessionId);
-            this.lastPatientTranscript.delete(sessionId);
-            this.responseInProgress.delete(sessionId);
           }
           break;
 
@@ -282,7 +298,7 @@ class OpenAIProvider implements BaseProvider {
             timestamp: new Date().toISOString()
           }));
 
-          try {
+/*           try {
             const fullAgentResponse = this.agentTextBuffers.get(sessionId) || '';
             if (fullAgentResponse.trim() && !this.isDuplicateAgentResponse(sessionId, fullAgentResponse)) {
               console.log(`📝 Backup agent response (audio.done): "${fullAgentResponse}"`);
@@ -300,7 +316,7 @@ class OpenAIProvider implements BaseProvider {
             }
           } catch (err) {
             console.error('Error in audio.done backup logic:', err);
-          }
+          } */
 
           this.responseInProgress.set(sessionId, false);
           break;
@@ -311,7 +327,10 @@ class OpenAIProvider implements BaseProvider {
         case 'response.audio_transcript.done':
           if (event.transcript && !this.isDuplicateAgentResponse(sessionId, event.transcript)) {
             const agentTranscript = event.transcript;
-            const agentTs = new Date().toISOString();
+            // Use speech stop time + 100ms buffer for proper sequencing
+            const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || 0;
+            const agentTs = new Date(speechStopTime + 100).toISOString(); // Agent response comes after patient stops
+            console.log(`🤖 Agent responding for ${sessionId}: "${agentTranscript}" - timestamp: ${agentTs} (speechStop: ${speechStopTime})`);
 
             const lastPatientActivity = this.recentPatientActivity.get(sessionId) || 0;
             const ageSincePatientMs = nowMs - lastPatientActivity;
@@ -322,7 +341,7 @@ class OpenAIProvider implements BaseProvider {
               frontendWs.send(JSON.stringify({
                 type: 'agent_transcript_complete',
                 transcript: agentTranscript,
-                timestamp: agentTs
+                timestamp: agentTs // Explicitly send our calculated timestamp
               }));
               if (agentTranscript.includes("Your provider will review")) {
                 console.log(`🏁 Ending session ${sessionId} due to provider review response`);
@@ -339,7 +358,7 @@ class OpenAIProvider implements BaseProvider {
               frontendWs.send(JSON.stringify({
                 type: 'agent_transcript_complete',
                 transcript: agentTranscript,
-                timestamp: agentTs
+                timestamp: agentTs // Explicitly send our calculated timestamp
               }));
               if (agentTranscript.includes("Your provider will review") || agentTranscript.includes("critical alert")) {
                 console.log(`🏁 Ending session ${sessionId} due to provider review response`);
@@ -505,14 +524,16 @@ class OpenAIProvider implements BaseProvider {
         db.saveConversationLog({
           session_id: sessionId,
           speaker: 'agent',
-          message: args.question
+          message: args.question,
+          timestamp: new Date()
         });
       }
       if (args.answer) {
         db.saveConversationLog({
           session_id: sessionId,
           speaker: 'patient',
-          message: args.answer
+          message: args.answer,
+          timestamp: new Date()
         });
       }
     } catch (error) {
@@ -528,10 +549,23 @@ class OpenAIProvider implements BaseProvider {
       db.saveConversationLog({
         session_id: sessionId,
         speaker: args.speaker || 'unknown',
-        message: args.message || args.details || ''
+        message: args.message || args.details || '',
+        timestamp: new Date()
       });
     } catch (error) {
       console.error('Failed to log conversation:', error);
+    }
+  }
+
+  private cancelQueuedResponses(sessionId: string): void {
+    // Cancel all pending agent saves for this session
+    const pending = this.pendingAgentSaves.get(sessionId);
+    if (pending && pending.length > 0) {
+      console.log(`🛑 Canceling ${pending.length} queued agent responses for session ${sessionId} due to interruption`);
+      for (const item of pending) {
+        clearTimeout(item.timer);
+      }
+      this.pendingAgentSaves.delete(sessionId);
     }
   }
 
@@ -542,7 +576,8 @@ class OpenAIProvider implements BaseProvider {
         session_id: sessionId,
         speaker: 'agent',
         message: transcript,
-        audio_data: JSON.stringify({ source: 'response.audio_transcript.done' })
+        audio_data: JSON.stringify({ source: 'response.audio_transcript.done' }),
+        timestamp: new Date(ts) // Use the provided timestamp for chronological ordering
       });
       this.lastAgentResponse.set(sessionId, transcript);
     } catch (err) {
@@ -615,7 +650,7 @@ class OpenAIProvider implements BaseProvider {
                 type: "server_vad",
                 prefix_padding_ms: 300,
                 silence_duration_ms: 500,
-                create_response: false
+                create_response: true
               },
               tools: this.getFunctionTools(),
               temperature: config.temperature || 0.1,
@@ -693,7 +728,7 @@ class OpenAIProvider implements BaseProvider {
         }
 
         const pcmSamples = audioDataObject.pcm16;
-        console.log(`🎵 Received ${pcmSamples.length} 16-bit PCM16 samples from frontend`);
+        //console.log(`🎵 Received ${pcmSamples.length} 16-bit PCM16 samples from frontend`);
 
         const bytesNeeded = pcmSamples.length * 2;
         const pcmBytes = new Uint8Array(bytesNeeded);
@@ -723,7 +758,7 @@ class OpenAIProvider implements BaseProvider {
 
         const sampleCount = pcmSamples.length;
         const estimatedDuration = (sampleCount / 24000).toFixed(2);
-        console.log(`✅ Sent ${sampleCount} PCM16 samples (${bytesNeeded} bytes) to OpenAI (${estimatedDuration}s at 24kHz)`);
+        //console.log(`✅ Sent ${sampleCount} PCM16 samples (${bytesNeeded} bytes) to OpenAI (${estimatedDuration}s at 24kHz)`);
 
       } catch (error: any) {
         console.error(`❌ Error sending audio data for session ${sessionId}:`, error.message);
@@ -741,7 +776,8 @@ class OpenAIProvider implements BaseProvider {
       session_id: sessionId,
       speaker: 'system',
       message: 'Voice agent session initialized and ready to begin intake',
-      audio_data: JSON.stringify({ type: 'session_join' })
+      audio_data: JSON.stringify({ type: 'session_join' }),
+      timestamp: new Date()
     });
     db.insertAuditLog({
       action: 'session_joined',
@@ -800,6 +836,8 @@ class OpenAIProvider implements BaseProvider {
     this.patientTurnTimestamp.delete(sessionId);
     this.responseInProgress.delete(sessionId);
     this.lastPatientTranscript.delete(sessionId);
+    this.patientSpeechStopTimestamp.delete(sessionId);
+    this.lastInterruptionTime.delete(sessionId);
   }
 
   handleMessage(sessionId: string, data: Buffer): void {

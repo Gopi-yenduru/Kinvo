@@ -19,6 +19,9 @@ const Session: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [sessionDuration, setSessionDuration] = useState(0);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [transcriptData, setTranscriptData] = useState<Message[] | null>(null);
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [pendingSentence, setPendingSentence] = useState<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
   const [speaker, setSpeaker] = useState<string>(''); // Current speaker indicator
   const [provider, setProvider] = useState<string>('openai'); // AI provider type
@@ -827,6 +830,62 @@ const Session: React.FC = () => {
     setErrorMessage('');
   };
 
+  // Fetch transcript from database when modal opens
+  const fetchTranscriptData = async () => {
+    if (!sessionId) return;
+
+    setTranscriptLoading(true);
+    setTranscriptError(null);
+    setTranscriptData(null);
+
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/transcript`, {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Transform API response to Message[] format
+      // API returns: { transcript: Array<{timestamp, speaker, message}> }
+      // We need: Message[] with speaker: 'Agent' | 'You' | 'System'
+      const transformedTranscript: Message[] = data.transcript?.map((item: any) => ({
+        timestamp: new Date(item.timestamp).toLocaleTimeString(),
+        speaker: item.speaker === 'agent' ? 'Agent' :
+                item.speaker === 'patient' ? 'You' : 'System',
+        message: item.message,
+        type: item.type === 'audio_with_text' ? 'audio' :
+              item.speaker === 'system' ? 'system' : 'text'
+      })) || [];
+
+      setTranscriptData(transformedTranscript);
+    } catch (error: any) {
+      console.error('Failed to fetch transcript:', error);
+      setTranscriptError(error.message || 'Failed to load transcript');
+    } finally {
+      setTranscriptLoading(false);
+    }
+  };
+
+  // Handle transcript modal opening/closing
+  const handleTranscriptModalToggle = (show: boolean) => {
+    if (show) {
+      setShowTranscript(true);
+      fetchTranscriptData();
+    } else {
+      setShowTranscript(false);
+      // Clear state when closing
+      setTranscriptData(null);
+      setTranscriptError(null);
+    }
+  };
+
   return (
     <div className="session-page-container w-100">
       {/* Page Header */}
@@ -1068,7 +1127,7 @@ const Session: React.FC = () => {
                               </div>
                             </button>
 
-                            <button className="btn btn-outline-secondary d-flex align-items-center gap-3 p-3 w-100" onClick={() => setShowTranscript(true)}>
+                            <button className="btn btn-outline-secondary d-flex align-items-center gap-3 p-3 w-100" onClick={() => handleTranscriptModalToggle(true)}>
                               <i className="fas fa-file-alt fa-lg flex-shrink-0"></i>
                               <div className="text-start flex-grow-1">
                                 <div className="fw-bold">View Transcript</div>
@@ -1123,22 +1182,34 @@ const Session: React.FC = () => {
 
       {/* Transcript Modal */}
       {showTranscript && (
-        <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }} onClick={() => setShowTranscript(false)}>
+        <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }} onClick={() => handleTranscriptModalToggle(false)}>
           <div className="modal-dialog modal-lg modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
             <div className="modal-content border-0 shadow">
               <div className="modal-header bg-light">
                 <h5 className="modal-title fw-semibold">Session Transcript</h5>
-                <button type="button" className="btn-close" onClick={() => setShowTranscript(false)}></button>
+                <button type="button" className="btn-close" onClick={() => handleTranscriptModalToggle(false)}></button>
               </div>
               <div className="modal-body" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-                {conversationLog.length === 0 ? (
+                {transcriptLoading ? (
+                  <div className="text-center py-5">
+                    <i className="fas fa-spinner fa-spin fa-3x text-primary mb-3"></i>
+                    <h5 className="text-primary">Loading Transcript...</h5>
+                    <p className="text-muted">Retrieving conversation data from database</p>
+                  </div>
+                ) : transcriptError ? (
+                  <div className="text-center py-5 bg-danger-subtle border border-danger rounded">
+                    <i className="fas fa-exclamation-triangle fa-3x text-danger mb-3"></i>
+                    <h5 className="text-danger">Failed to Load Transcript</h5>
+                    <p className="text-muted mb-0">{transcriptError}</p>
+                  </div>
+                ) : !transcriptData || transcriptData.length === 0 ? (
                   <div className="text-center text-muted py-5">
                     <i className="fas fa-file-alt fa-3x mb-3 opacity-50"></i>
                     <p className="mb-0">No conversation recorded yet.</p>
                   </div>
                 ) : (
                   <div className="d-flex flex-column gap-3">
-                    {conversationLog.map((entry, index) => (
+                    {transcriptData.map((entry, index) => (
                       <div key={index} className={`p-3 rounded border-start border-4 ${entry.type === 'system' ? 'bg-warning-subtle border-warning' :
                           entry.type === 'alert' ? 'bg-danger-subtle border-danger' :
                             'bg-light border-primary'
@@ -1158,16 +1229,21 @@ const Session: React.FC = () => {
                 )}
               </div>
               <div className="modal-footer bg-light">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowTranscript(false)}>
+                <button type="button" className="btn btn-secondary" onClick={() => handleTranscriptModalToggle(false)}>
                   Close
                 </button>
-                <button type="button" className="btn btn-primary d-flex align-items-center gap-2" onClick={() => {
-                  const transcript = conversationLog.map(entry =>
-                    `[${entry.timestamp}] ${entry.speaker}: ${entry.message}`
-                  ).join('\n\n');
-                  navigator.clipboard.writeText(transcript);
-                  alert('Transcript copied to clipboard!');
-                }}>
+                <button
+                  type="button"
+                  className="btn btn-primary d-flex align-items-center gap-2"
+                  onClick={() => {
+                    const transcript = (transcriptData || conversationLog).map(entry =>
+                      `[${entry.timestamp}] ${entry.speaker}: ${entry.message}`
+                    ).join('\n\n');
+                    navigator.clipboard.writeText(transcript);
+                    alert('Transcript copied to clipboard!');
+                  }}
+                  disabled={!transcriptData && !conversationLog.length}
+                >
                   <i className="fas fa-copy"></i>
                   Copy Transcript
                 </button>
