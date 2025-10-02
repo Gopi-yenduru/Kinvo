@@ -25,6 +25,8 @@ const Session: React.FC = () => {
   const [pendingSentence, setPendingSentence] = useState<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
   const [speaker, setSpeaker] = useState<string>(''); // Current speaker indicator
   const [provider, setProvider] = useState<string>('openai'); // AI provider type
+  const [isSpeakingAgent, setIsSpeakingAgent] = useState<boolean>(false); // Track when agent is actively speaking
+
 
   // New state for patient name input
   const [patientName, setPatientName] = useState<string>('');
@@ -204,16 +206,17 @@ const Session: React.FC = () => {
             // }
             break;
           case 'agent_transcript_delta':
-            // Handle agent transcript deltas from backend
-            console.log('🎵 Frontend received agent_transcript_delta:', message.text);
-            if (message.text && message.text.trim()) {
-              console.log('📝 Processing agent delta:', message.text);
-              // For agent deltas, always accumulate - don't check immediate sentence first
-              // The backend will tell us when the response is complete
-              setSpeaker('Patient');
-              processTranscriptDelta('Agent', message.text, message.timestamp);
-            } else {
-              console.log('⚠️ Agent transcript delta is empty or null:', message);
+              // Handle agent transcript deltas from backend
+              console.log('🎵 Frontend received agent_transcript_delta:', message.text);
+              if (message.text && message.text.trim()) {
+                console.log('📝 Processing agent delta:', message.text);
+                // Preemptively show agent is speaking when text starts streaming
+                setSpeaker('Agent');
+                // For agent deltas, always accumulate - don't check immediate sentence first
+                // The backend will tell us when the response is complete
+                processTranscriptDelta('Agent', message.text, message.timestamp);
+              } else {
+                console.log('⚠️ Agent transcript delta is empty or null:', message);
             }
             break;
           case 'response.audio_transcript.delta':
@@ -237,13 +240,35 @@ const Session: React.FC = () => {
             }
             break;
           case 'conversation.item.input_audio_transcription.delta':
-            if (message.delta) {
-              setSpeaker('');
-              // Handle patient transcript deltas
-              if (!checkImmediateSentence('You', message.delta) && message.delta.trim()) {
-                processTranscriptDelta('You', message.delta);
+              if (message.delta) {
+                // **INTERRUPTION DETECTION**: If agent is talking and patient starts speaking
+                if (isSpeakingAgent) {
+                  console.log('🔄 INTERRUPTION DETECTED: Patient interrupting agent - stopping agent audio');
+                  // Stop any playing agent audio immediately
+                  stopAgentAudio();
+                  // Clear speaker state
+                  setSpeaker(''); // Clear "Agent" speaker indicator immediately
+                  setIsSpeakingAgent(false);
+                  // Clear audio buffer to prevent queued audio
+                  audioBufferRef.current = '';
+                  // Clear any pending agent sentences
+                  if (pendingSentence && pendingSentence.speaker === 'Agent') {
+                    clearTimeout(pendingSentence.timeoutId);
+                    setPendingSentence(null);
+                  }
+                  finalizePendingSentences(); // Finalize what agent said before interruption
+                }
+  
+                // Set patient as active speaker
+                if (!isSpeakingAgent) { // Only set patient if agent is not speaking
+                  setSpeaker('Patient');
+                }
+  
+                // Process patient transcript deltas
+                if (!checkImmediateSentence('You', message.delta) && message.delta.trim()) {
+                  processTranscriptDelta('You', message.delta);
+                }
               }
-            }
             break;
           case 'response.content_part.done':
             setSpeaker('');
@@ -268,17 +293,23 @@ const Session: React.FC = () => {
             }
             break;
           case 'agent_audio_chunk':
-            // Handle incoming audio chunks from the AI agent
-            if (message.audio) {
-              handleIncomingAudioChunk(message.audio);
-            }
+              // Handle incoming audio chunks from the AI agent
+              if (message.audio) {
+                handleIncomingAudioChunk(message.audio);
+              }
+              // Set speaker to Agent when we start receiving audio (agent is speaking)
+              if (!isSpeakingAgent) {
+                setSpeaker('Agent');
+                setIsSpeakingAgent(true);
+              }
             break;
           case 'agent_response_complete':
-            setSpeaker('');
-            // Play accumulated audio when response is complete
-            playAccumulatedAudio();
-            // Finalize any pending sentence
-            finalizePendingSentences();
+              setSpeaker('');
+              setIsSpeakingAgent(false);
+              // Play accumulated audio when response is complete
+              playAccumulatedAudio();
+              // Finalize any pending sentence
+              finalizePendingSentences();
             break;
           case 'patient_transcript':
             if (message.transcript) {
@@ -529,6 +560,13 @@ const Session: React.FC = () => {
     }
   };
 
+  const getDynamicTimeout = (speaker: string, text: string): number => {
+    if (text.includes('.') || text.includes('?') || text.includes('!')) return 300; // Faster for complete sentences
+    if (text.length > 20) return 500; // Longer for substantial responses
+    if (speaker === 'Agent') return 400; // Agents speak more deliberately
+    return 600; // Patient default
+  };
+
   const processTranscriptDelta = (speaker: string, delta: string, timestamp?: string) => {
     if (delta.includes('[DONE]')) return;
 
@@ -558,8 +596,8 @@ const Session: React.FC = () => {
       return;
     }
 
-    // Start new timeout for finalization
-    const timeoutId = setTimeout(() => finalizeSentence(speaker, fullText, finalTimestamp), 800);
+    // Start new timeout for finalization with dynamic timeout
+    const timeoutId = setTimeout(() => finalizeSentence(speaker, fullText, finalTimestamp), getDynamicTimeout(speaker, fullText));
     const pending = { speaker, text: fullText, timeoutId, timestamp: finalTimestamp };
     pendingSentenceRef.current = pending;
     setPendingSentence(pending);
@@ -789,6 +827,19 @@ const Session: React.FC = () => {
       // Clear buffer on error to prevent accumulation
       audioBufferRef.current = '';
     }
+  };
+
+  const stopAgentAudio = () => {
+    // Immediately mute/stop any agent audio that's currently playing
+    if (gainNodeRef.current) {
+      console.log('Muting agent audio gain node');
+      gainNodeRef.current.gain.setValueAtTime(0, audioContextRef.current?.currentTime || 0);
+    }
+
+    // Mark audio as no longer playing to prevent new audio from starting
+    isPlayingRef.current = false;
+
+    console.log('Agent audio stopped/inactivated');
   };
 
   const resetSession = () => {
