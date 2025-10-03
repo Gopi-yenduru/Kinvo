@@ -1162,7 +1162,7 @@ wss.on('connection', (ws: any, req: any) => {
   ws.on('message', async (data: Buffer) => {
     try {
       const message = JSON.parse(data.toString());
-      console.log('WS received message:', message.type);
+      //console.log('WS received message:', message.type);
 
       switch (message.type) {
         case 'join_session':
@@ -1208,7 +1208,7 @@ wss.on('connection', (ws: any, req: any) => {
                 message: 'Agent is speaking'
               }));
               realtimeManager.sendAudioData(sessionIdForAudio, message.data);
-              console.log(`📡 Audio data forwarded for session ${sessionIdForAudio}`);
+              //console.log(`📡 Audio data forwarded for session ${sessionIdForAudio}`);
             } catch (error: any) {
               console.error('Error forwarding audio data:', error.message);
               ws.send(JSON.stringify({

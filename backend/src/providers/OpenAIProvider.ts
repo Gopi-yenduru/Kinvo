@@ -103,7 +103,7 @@ class OpenAIProvider implements BaseProvider {
   private handleRealtimeResponse(sessionId: string, data: Buffer): void {
     try {
       const event = JSON.parse(data.toString());
-      console.log(`Realtime event for ${sessionId}:`, event.type);
+      //console.log(`Realtime event for ${sessionId}:`, event.type);
 
       const frontendWs = this.frontendSockets.get(sessionId);
       if (!frontendWs) {
@@ -216,11 +216,11 @@ class OpenAIProvider implements BaseProvider {
             const deltaText = event.delta || event.text;
             const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
             const patientTs = new Date(speechStopTime).toISOString();
-            frontendWs.send(JSON.stringify({
-              type: 'conversation.item.input_audio_transcription.delta',
-              delta: deltaText,
-              timestamp: patientTs // Include calculated timestamp for sequencing
-            }));
+            // frontendWs.send(JSON.stringify({
+            //   type: 'conversation.item.input_audio_transcription.delta',
+            //   delta: deltaText,
+            //   timestamp: patientTs // Include calculated timestamp for sequencing
+            // }));
           }
           break;
 
@@ -428,7 +428,7 @@ class OpenAIProvider implements BaseProvider {
           break;
 
         default:
-          console.log(`Unhandled realtime event ${event.type} for ${sessionId}`, event);
+          //console.log(`Unhandled realtime event ${event.type} for ${sessionId}`, event);
           break;
       }
     } catch (err) {
@@ -636,6 +636,8 @@ class OpenAIProvider implements BaseProvider {
 
           const validatedInstructions = this.validateInstructions(config.instructions);
           console.log(`📝 Using validated instructions (${validatedInstructions.length} chars)`);
+          console.log('temparature:', config.temperature);
+          console.log('voice:', config.voice);
 
           const sessionConfig = {
             type: 'session.update',
@@ -653,8 +655,8 @@ class OpenAIProvider implements BaseProvider {
                 create_response: true
               },
               tools: this.getFunctionTools(),
-              temperature: config.temperature || 0.1,
-              max_response_output_tokens: 'inf'
+              temperature: config.temperature,
+              max_response_output_tokens: 1000
             }
           };
 
