@@ -651,7 +651,7 @@ class OpenAIProvider implements BaseProvider {
               turn_detection: {
                 type: "server_vad",
                 prefix_padding_ms: 300,
-                silence_duration_ms: 500,
+                silence_duration_ms: 800, // Increased from 500ms to be more conservative and reduce rapid response accumulation
                 create_response: true
               },
               tools: this.getFunctionTools(),
