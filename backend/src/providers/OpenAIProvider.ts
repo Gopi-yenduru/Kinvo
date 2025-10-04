@@ -381,16 +381,16 @@ class OpenAIProvider implements BaseProvider {
             this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
           }
 
-          const realtimeWs = this.connections.get(sessionId);
-          if (realtimeWs) {
-            console.log('▶️ Triggering model response after triggering red flag');
-            realtimeWs.send(JSON.stringify({
-              type: "response.create",
-              response: {
-                modalities: ["audio","text"]
-              }
-            }));
-          }
+          // const realtimeWs = this.connections.get(sessionId);
+          // if (realtimeWs) {
+          //   console.log('▶️ Triggering model response after triggering red flag');
+          //   realtimeWs.send(JSON.stringify({
+          //     type: "response.create",
+          //     response: {
+          //       modalities: ["audio","text"]
+          //     }
+          //   }));``
+          // }
           break;
 
         case 'function_call':
@@ -428,7 +428,7 @@ class OpenAIProvider implements BaseProvider {
           break;
 
         default:
-          //console.log(`Unhandled realtime event ${event.type} for ${sessionId}`, event);
+          console.log(`Unhandled realtime event ${event.type} for ${sessionId}`);
           break;
       }
     } catch (err) {
@@ -546,12 +546,12 @@ class OpenAIProvider implements BaseProvider {
 
     try {
       const sessionId = args.sessionId;
-      db.saveConversationLog({
-        session_id: sessionId,
-        speaker: args.speaker || 'unknown',
-        message: args.message || args.details || '',
-        timestamp: new Date()
-      });
+      // db.saveConversationLog({
+      //   session_id: sessionId,
+      //   speaker: args.speaker || 'unknown',
+      //   message: args.message || args.details || '',
+      //   timestamp: new Date()
+      // });
     } catch (error) {
       console.error('Failed to log conversation:', error);
     }
@@ -647,7 +647,7 @@ class OpenAIProvider implements BaseProvider {
               voice: config.voice || 'alloy',
               input_audio_format: 'pcm16',
               output_audio_format: 'pcm16',
-              input_audio_transcription: { model: 'whisper-1' },
+              input_audio_transcription: { model: 'gpt-4o-transcribe' },
               turn_detection: {
                 type: "server_vad",
                 prefix_padding_ms: 300,
