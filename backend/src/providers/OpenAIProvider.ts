@@ -2,6 +2,8 @@ import WebSocket from 'ws';
 import { BaseProvider, RealtimeConfig } from './BaseProvider.js';
 import db from '../database-manager.js';
 import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY } from '../constants.js';
+import crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 
 class OpenAIProvider implements BaseProvider {
   private connections: Map<string, WebSocket> = new Map();
@@ -10,7 +12,7 @@ class OpenAIProvider implements BaseProvider {
   private agentFrontendBuffers: Map<string, string> = new Map();
   private lastAgentResponse: Map<string, string> = new Map();
   private recentPatientActivity: Map<string, number> = new Map();
-  private pendingAgentSaves: Map<string, Array<{ transcript: string; ts: string; timer: any }>> = new Map();
+  private pendingAgentSaves: Map<string, Array<{ id: string; transcript: string; ts: string; timer: any }>> = new Map();
   private patientTurnTimestamp: Map<string, number> = new Map();
   private responseInProgress: Map<string, boolean> = new Map();
   private lastPatientTranscript: Map<string, string> = new Map();
@@ -18,6 +20,17 @@ class OpenAIProvider implements BaseProvider {
   private lastInterruptionTime: Map<string, number> = new Map(); // Tracks interruption timestamps to cancel old responses
   private AGENT_DEFER_MS = 800;
   private RECENT_PATIENT_WINDOW_MS = 1000;
+
+  // New maps for deterministic handling
+  private sessionLocks: Map<string, Promise<void>> = new Map();
+  private lastUserItemId: Map<string, string> = new Map();
+  private lastAssistantItemId: Map<string, string> = new Map();
+  private responseTextBuffers: Map<string, string> = new Map();
+  private responseAudioTranscriptBuffers: Map<string, string> = new Map();
+  private processingTimeouts: Map<string, NodeJS.Timeout> = new Map();
+
+  // Configurable processing timeout (fallback quick ack)
+  private PROCESSING_TIMEOUT_MS = 5000;
 
   private validateInstructions(instructions: string): string {
     if (!instructions || instructions.trim().length === 0) {
@@ -100,74 +113,91 @@ class OpenAIProvider implements BaseProvider {
     ];
   }
 
+  // --- Session lock helper (serialize per-session work) ---
+  private async withSessionLock(sessionId: string, fn: () => Promise<void>) {
+    const prev = this.sessionLocks.get(sessionId) || Promise.resolve();
+    let release: () => void;
+    const next = new Promise<void>(res => (release = res));
+    this.sessionLocks.set(sessionId, prev.then(() => next));
+    try {
+      await prev; // wait for prior
+      await fn();
+    } finally {
+      release!();
+      // cleanup if no one waiting
+      if (this.sessionLocks.get(sessionId) === next) this.sessionLocks.delete(sessionId);
+    }
+  }
+
+  private queueAgentSave(sid: string, transcript: string) {
+    // FIXED: Get speech timestamp ONCE when queued, not when timer fires
+    const speechStopTime = this.patientSpeechStopTimestamp.get(sid) || 0;
+    const ts = new Date(speechStopTime + 100).toISOString(); // Agent response comes after patient stops
+
+    console.log(`⏰ Queuing agent save for ${sid} with speech stop time: ${speechStopTime}, timestamp: ${ts}`);
+
+    const arr = this.pendingAgentSaves.get(sid) || [];
+    const id = uuidv4();
+    const timer = setTimeout(() => {
+      const pending = this.pendingAgentSaves.get(sid) || [];
+      const idx = pending.findIndex((p: { id: string; transcript: string; ts: string; timer?: any }) => p.id === id);
+
+      if (idx !== -1) {
+        const item = pending.splice(idx, 1)[0];
+        if (pending.length > 0) this.pendingAgentSaves.set(sid, pending);
+        else this.pendingAgentSaves.delete(sid);
+        try {
+          console.log(`🕒 Agent defer timeout reached — saving agent for ${sid} with timestamp: ${item.ts}`);
+          this.saveAgentTranscriptImmediate(sid, item.transcript, item.ts);
+        } catch (err) {
+          console.error('Error flushing deferred agent save:', err);
+        }
+      }
+    }, this.AGENT_DEFER_MS);
+
+    arr.push({ id, transcript, ts, timer });
+    this.pendingAgentSaves.set(sid, arr);
+  }
+
+  private flushPendingAgents = (sid: string) => {
+    const pending = this.pendingAgentSaves.get(sid);
+    if (!pending || pending.length === 0) return;
+    for (const item of pending) {
+      try {
+        clearTimeout(item.timer);
+        this.saveAgentTranscriptImmediate(sid, item.transcript, item.ts);
+      } catch (err) {
+        console.error('Error saving deferred agent transcript during flush:', err);
+      }
+    }
+    this.pendingAgentSaves.delete(sid);
+  };
+
+  private normalizeEventType(type: string) {
+    // strip "conversation.item." prefix to ease matching
+    if (!type) return '';
+    return type.replace(/^conversation\.item\./, '');
+  }
+
   private handleRealtimeResponse(sessionId: string, data: Buffer): void {
     try {
       const event = JSON.parse(data.toString());
-      //console.log(`Realtime event for ${sessionId}:`, event.type);
+      const eventType = this.normalizeEventType(event.type);
+      //console.log(`Realtime event for ${sessionId}:`, eventType);
 
       const frontendWs = this.frontendSockets.get(sessionId);
-      if (!frontendWs) {
+      if (!frontendWs && eventType !== 'session.updated' && eventType !== 'session.update') {
         console.warn(`No frontend WebSocket found for session ${sessionId}`);
-        return;
+        // continue though: we still want to keep DB/audit etc.
       }
 
       const nowMs = Date.now();
 
-      function queueAgentSave(self: OpenAIProvider, sid: string, transcript: string) {
-        // FIXED: Get speech timestamp ONCE when queued, not when timer fires
-        // Prevents timestamp drift that causes chronological ordering bugs
-        const speechStopTime = self.patientSpeechStopTimestamp.get(sid) || 0;
-        const ts = new Date(speechStopTime + 100).toISOString(); // Agent response comes after patient stops
-
-        console.log(`⏰ Queuing agent save for ${sid} with speech stop time: ${speechStopTime}, timestamp: ${ts}`);
-
-        const arr = self.pendingAgentSaves.get(sid) || [];
-        const timer = setTimeout(() => {
-          const pending = self.pendingAgentSaves.get(sid) || [];
-          const idx = pending.findIndex((p: { transcript: string; ts: string; timer?: any }) =>
-            p.transcript === transcript && p.ts === ts
-          );
-
-          if (idx !== -1) {
-            const item = pending.splice(idx, 1)[0];
-            if (pending.length > 0) self.pendingAgentSaves.set(sid, pending);
-            else self.pendingAgentSaves.delete(sid);
-            try {
-              console.log(`🕒 Agent defer timeout reached — saving agent for ${sid} with timestamp: ${item.ts}`);
-              self.saveAgentTranscriptImmediate(sid, item.transcript, item.ts);
-            } catch (err) {
-              console.error('Error flushing deferred agent save:', err);
-            }
-          }
-        }, self.AGENT_DEFER_MS);
-
-        arr.push({ transcript, ts, timer });
-        self.pendingAgentSaves.set(sid, arr);
-      }
-
-      const flushPendingAgents = (sid: string) => {
-        const pending = this.pendingAgentSaves.get(sid);
-        if (!pending || pending.length === 0) return;
-        for (const item of pending) {
-          try {
-            clearTimeout(item.timer);
-            this.saveAgentTranscriptImmediate(sid, item.transcript, item.ts);
-          } catch (err) {
-            console.error('Error saving deferred agent transcript during flush:', err);
-          }
-        }
-        this.pendingAgentSaves.delete(sid);
-      };
-
-      switch (event.type) {
+      switch (eventType) {
         case 'session.updated':
-          console.log(`✅ Session updated successfully for ${sessionId} - AI is ready to respond`);
-          frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
-          break;
-
         case 'session.update':
-          console.log(`📝 Session update event received for ${sessionId} - AI is ready to respond`);
-          frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
+          console.log(`✅ Session updated successfully for ${sessionId} - AI is ready to respond`);
+          if (frontendWs) frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
           break;
 
         case 'error':
@@ -175,11 +205,13 @@ class OpenAIProvider implements BaseProvider {
           if (event.error?.message) {
             console.error(`Error message: ${event.error.message}`);
           }
-          frontendWs.send(JSON.stringify({
-            type: 'error',
-            message: event.error?.message || 'OpenAI API error',
-            timestamp: new Date().toISOString()
-          }));
+          if (frontendWs) {
+            frontendWs.send(JSON.stringify({
+              type: 'error',
+              message: event.error?.message || 'OpenAI API error',
+              timestamp: new Date().toISOString()
+            }));
+          }
           break;
 
         case 'input_audio_buffer.speech_started':
@@ -189,7 +221,7 @@ class OpenAIProvider implements BaseProvider {
             this.patientTurnTimestamp.set(sessionId, nowMs);
           }
 
-          // 🔄 DETECT INTERRUPTION: If agent was speaking and patient starts again quickly
+          // DETECT INTERRUPTION: If agent was speaking and patient starts again quickly
           const lastAgentActivity = this.lastAgentResponse.get(sessionId);
           if (lastAgentActivity) {
             const timeSinceLastAgent = nowMs - (this.patientSpeechStopTimestamp.get(sessionId) || 0);
@@ -197,238 +229,254 @@ class OpenAIProvider implements BaseProvider {
               console.log(`⚡ INTERRUPTION DETECTED: Patient interrupting agent speech (${timeSinceLastAgent}ms ago)`);
               this.cancelQueuedResponses(sessionId);
               this.lastInterruptionTime.set(sessionId, nowMs);
+              // if assistant item id exists, consider truncating via conversation.item.truncate (not shown)
             }
           }
           break;
 
         case 'input_audio_buffer.speech_stopped':
           this.recentPatientActivity.set(sessionId, nowMs);
-          // 🕒 RECORD the exact time patient stopped speaking for transcript sequencing
           this.patientSpeechStopTimestamp.set(sessionId, nowMs);
           console.log(`🛑 Patient stopped speaking (${sessionId}) - Recording stop time for proper sequencing. Timestamp: ${this.patientSpeechStopTimestamp.get(sessionId)}`);
           break;
 
-        case 'conversation.item.input_audio_transcription.delta':
         case 'input_audio_transcription.delta':
+        case 'conversation.item.input_audio_transcription.delta':
           this.recentPatientActivity.set(sessionId, nowMs);
-          // Send real-time transcription to frontend with our calculated patient timestamp
+          // you were sending realtime deltas to frontend - keep that
           if ((event.delta || event.text) && frontendWs) {
             const deltaText = event.delta || event.text;
             const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
             const patientTs = new Date(speechStopTime).toISOString();
-            // frontendWs.send(JSON.stringify({
-            //   type: 'conversation.item.input_audio_transcription.delta',
-            //   delta: deltaText,
-            //   timestamp: patientTs // Include calculated timestamp for sequencing
-            // }));
+            frontendWs.send(JSON.stringify({
+              type: 'conversation.item.input_audio_transcription.delta',
+              delta: deltaText,
+              timestamp: patientTs // Include calculated timestamp for sequencing
+            }));
           }
           break;
 
-        case 'conversation.item.input_audio_transcription.completed':
         case 'input_audio_transcription.completed':
-          // Process transcription for logging only - OpenAI handles response triggering via create_response: true
+        case 'conversation.item.input_audio_transcription.completed':
+          // Process transcription for logging + trigger explicit response.create (manual)
           if (event.transcript || event.text) {
-            const transcript = event.transcript || event.text;
+            const transcript = (event.transcript || event.text).toString();
 
-            if (!transcript.trim() || transcript.trim().length < 3) {
-              console.log(`⚠️ Skipping empty/short transcript for ${sessionId}`);
-            } else {
+            // run everything under session lock to avoid races
+            this.withSessionLock(sessionId, async () => {
+              if (!transcript.trim() || transcript.trim().length < 3) {
+                console.log(`⚠️ Skipping empty/short transcript for ${sessionId}`);
+                return;
+              }
+
               const lastTranscript = this.lastPatientTranscript.get(sessionId);
               if (lastTranscript === transcript.trim()) {
                 console.log(`🔄 Duplicate transcript detected for ${sessionId}, skipping transcription processing`);
-              } else {
-                // Save transcript - use speech STOP time for correct sequencing (not speech start time)
-                this.lastPatientTranscript.set(sessionId, transcript.trim());
+                return;
+              }
 
-                const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
-                const ts = new Date(speechStopTime).toISOString(); // Patient timestamp = when they stopped speaking
-                console.log(`👤 Patient said (final): "${transcript}" - timestamp: ${ts} (speechStop: ${speechStopTime})`);
+              // Save transcript - use speech STOP time for correct sequencing (not speech start time)
+              this.lastPatientTranscript.set(sessionId, transcript.trim());
 
-                try {
-                  db.saveConversationLog({
-                    session_id: sessionId,
-                    speaker: 'patient',
-                    message: transcript,
-                    audio_data: JSON.stringify({ type: 'speech_transcript' }),
-                    timestamp: new Date(speechStopTime) // Patient timestamp = when they stopped speaking
-                  });
-                  db.insertAuditLog({
-                    action: 'patient_speech',
-                    details: JSON.stringify({ transcript }),
-                    session_id: sessionId
-                  });
-                } catch (dbErr) {
-                  console.error(`Failed to save patient transcript for ${sessionId}:`, dbErr);
+              const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
+              const ts = new Date(speechStopTime).toISOString(); // Patient timestamp = when they stopped speaking
+              console.log(`👤 Patient said (final): "${transcript}" - timestamp: ${ts} (speechStop: ${speechStopTime})`);
+
+              try {
+                // save patient message in DB immediately
+                const saved = await db.saveConversationLog({
+                  session_id: sessionId,
+                  speaker: 'patient',
+                  message: transcript,
+                  audio_data: JSON.stringify({ type: 'speech_transcript' }),
+                  timestamp: new Date(speechStopTime)
+                });
+                db.insertAuditLog({
+                  action: 'patient_speech',
+                  details: JSON.stringify({ transcript }),
+                  session_id: sessionId
+                });
+
+                // If OpenAI returned a conversation.item.created with id, capture it
+                if (event.item && event.item.id) {
+                  this.lastUserItemId.set(sessionId, event.item.id);
                 }
 
-                this.recentPatientActivity.set(sessionId, nowMs);
-                flushPendingAgents(sessionId);
-              }
-            }
+                // schedule/trigger explicit response flow (manual)
+                const createdUserItemId = this.lastUserItemId.get(sessionId) || undefined;
+                // set processing state and create timeout fallback
+                this.responseInProgress.set(sessionId, true);
+                if (this.processingTimeouts.has(sessionId)) {
+                  clearTimeout(this.processingTimeouts.get(sessionId)!);
+                }
+                const to = setTimeout(() => {
+                  // fallback quick ack if no response starts within PROCESSING_TIMEOUT_MS
+                  if (this.responseInProgress.get(sessionId)) {
+                    console.warn(`Processing stuck for ${sessionId}; sending short fallback acknowledgement`);
+                    this.callQuickAck(sessionId, createdUserItemId);
+                    this.responseInProgress.set(sessionId, false);
+                  }
+                }, this.PROCESSING_TIMEOUT_MS);
+                this.processingTimeouts.set(sessionId, to);
 
-            // Clean up timing data
-            this.patientTurnTimestamp.delete(sessionId);
+                // invoke your explicit handler to decide whether to call response.create
+                await this.handleFinalPatientTranscript(sessionId, transcript.trim(), createdUserItemId);
+              } catch (dbErr) {
+                console.error(`Failed to save patient transcript for ${sessionId}:`, dbErr);
+              } finally {
+                // Clean up per-turn state
+                this.patientTurnTimestamp.delete(sessionId);
+              }
+            }).catch(err => {
+              console.error('Error in session lock for final transcript:', err);
+            });
           }
           break;
 
         case 'response.text.delta':
           if (event.delta) {
-            frontendWs.send(JSON.stringify({
-              type: 'agent_text_stream',
-              text: event.delta,
-              timestamp: new Date().toISOString()
-            }));
+            // assemble into buffer
+            const existing = this.responseTextBuffers.get(sessionId) || '';
+            this.responseTextBuffers.set(sessionId, existing + event.delta);
+            const wsToFront = this.frontendSockets.get(sessionId);
+            if (wsToFront) {
+              wsToFront.send(JSON.stringify({
+                type: 'agent_text_stream',
+                text: event.delta,
+                timestamp: new Date().toISOString()
+              }));
+            }
           }
+          break;
+
+        case 'response.text.done':
+          // final text assembled; keep in buffer for later if needed
+          // we don't persist here; wait for audio_transcript.done or response.done
           break;
 
         case 'response.audio.delta':
           if (event.delta) {
-            frontendWs.send(JSON.stringify({
-              type: 'agent_audio_chunk',
-              audio: event.delta,
-              timestamp: new Date().toISOString()
-            }));
+            const wsToFront = this.frontendSockets.get(sessionId);
+            if (wsToFront) {
+              wsToFront.send(JSON.stringify({
+                type: 'agent_audio_chunk',
+                audio: event.delta,
+                timestamp: new Date().toISOString()
+              }));
+            }
           }
           break;
 
         case 'response.audio.done':
           console.log(`🔊 Agent audio completed for ${sessionId}`);
-          frontendWs.send(JSON.stringify({
-            type: 'agent_response_complete',
-            timestamp: new Date().toISOString()
-          }));
-
-/*           try {
-            const fullAgentResponse = this.agentTextBuffers.get(sessionId) || '';
-            if (fullAgentResponse.trim() && !this.isDuplicateAgentResponse(sessionId, fullAgentResponse)) {
-              console.log(`📝 Backup agent response (audio.done): "${fullAgentResponse}"`);
-              db.saveConversationLog({
-                session_id: sessionId,
-                speaker: 'agent',
-                message: fullAgentResponse,
-                audio_data: JSON.stringify({ source: 'response.audio.done (backup)' })
-              });
-              frontendWs.send(JSON.stringify({
-                type: 'agent_transcript_complete',
-                transcript: fullAgentResponse,
-                timestamp: new Date().toISOString()
-              }));
-            }
-          } catch (err) {
-            console.error('Error in audio.done backup logic:', err);
-          } */
-
+          if (this.frontendSockets.get(sessionId)) {
+            this.frontendSockets.get(sessionId)!.send(JSON.stringify({
+              type: 'agent_response_complete',
+              timestamp: new Date().toISOString()
+            }));
+          }
+          // clear processing timeout if set
+          if (this.processingTimeouts.has(sessionId)) {
+            clearTimeout(this.processingTimeouts.get(sessionId)!);
+            this.processingTimeouts.delete(sessionId);
+          }
           this.responseInProgress.set(sessionId, false);
           break;
 
         case 'response.audio_transcript.delta':
+          {
+            const existing = this.responseAudioTranscriptBuffers.get(sessionId) || '';
+            this.responseAudioTranscriptBuffers.set(sessionId, existing + (event.delta || ''));
+          }
           break;
 
         case 'response.audio_transcript.done':
-          if (event.transcript && !this.isDuplicateAgentResponse(sessionId, event.transcript)) {
-            const agentTranscript = event.transcript;
-            // Use speech stop time + 100ms buffer for proper sequencing
-            const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || 0;
-            const agentTs = new Date(speechStopTime + 100).toISOString(); // Agent response comes after patient stops
-            console.log(`🤖 Agent responding for ${sessionId}: "${agentTranscript}" - timestamp: ${agentTs} (speechStop: ${speechStopTime})`);
+          if (event.transcript) {
+            const assembled = (this.responseAudioTranscriptBuffers.get(sessionId) || event.transcript).trim();
+            this.responseAudioTranscriptBuffers.delete(sessionId);
 
-            const lastPatientActivity = this.recentPatientActivity.get(sessionId) || 0;
-            const ageSincePatientMs = nowMs - lastPatientActivity;
+            if (!this.isDuplicateAgentResponse(sessionId, assembled)) {
+              const agentTranscript = assembled;
+              const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || 0;
+              const agentTs = new Date(speechStopTime + 100).toISOString();
+              console.log(`🤖 Agent responding for ${sessionId}: "${agentTranscript}" - timestamp: ${agentTs} (speechStop: ${speechStopTime})`);
 
-            if (lastPatientActivity && ageSincePatientMs < this.RECENT_PATIENT_WINDOW_MS) {
-              console.log(`⚖️ Deferring agent save for ${sessionId} (recent patient activity ${ageSincePatientMs}ms ago)`);
-              queueAgentSave(this, sessionId, agentTranscript);
-              frontendWs.send(JSON.stringify({
-                type: 'agent_transcript_complete',
-                transcript: agentTranscript,
-                timestamp: agentTs // Explicitly send our calculated timestamp
-              }));
-              if (agentTranscript.includes("Your provider will review")) {
-                console.log(`🏁 Ending session ${sessionId} due to provider review response`);
-                frontendWs.send(JSON.stringify({
-                  type: 'request_session_end',
-                  timestamp: agentTs
-                }));
-                setTimeout(() => {
-                  this.endSession(sessionId);
-                }, 3000);
+              const lastPatientActivity = this.recentPatientActivity.get(sessionId) || 0;
+              const ageSincePatientMs = nowMs - lastPatientActivity;
+
+              if (lastPatientActivity && ageSincePatientMs < this.RECENT_PATIENT_WINDOW_MS) {
+                console.log(`⚖️ Deferring agent save for ${sessionId} (recent patient activity ${ageSincePatientMs}ms ago)`);
+                this.queueAgentSave(sessionId, agentTranscript);
+                if (this.frontendSockets.get(sessionId)) {
+                  this.frontendSockets.get(sessionId)!.send(JSON.stringify({
+                    type: 'agent_transcript_complete',
+                    transcript: agentTranscript,
+                    timestamp: agentTs
+                  }));
+                }
+              } else {
+                this.saveAgentTranscriptImmediate(sessionId, agentTranscript, agentTs);
+                if (this.frontendSockets.get(sessionId)) {
+                  this.frontendSockets.get(sessionId)!.send(JSON.stringify({
+                    type: 'agent_transcript_complete',
+                    transcript: agentTranscript,
+                    timestamp: agentTs
+                  }));
+                }
               }
-            } else {
-              this.saveAgentTranscriptImmediate(sessionId, agentTranscript, agentTs);
-              frontendWs.send(JSON.stringify({
-                type: 'agent_transcript_complete',
-                transcript: agentTranscript,
-                timestamp: agentTs // Explicitly send our calculated timestamp
-              }));
-              if (agentTranscript.includes("Your provider will review") || agentTranscript.includes("critical alert")) {
-                console.log(`🏁 Ending session ${sessionId} due to provider review response`);
-                frontendWs.send(JSON.stringify({
-                  type: 'request_session_end',
-                  timestamp: agentTs
-                }));
-                setTimeout(() => {
-                  this.endSession(sessionId);
-                }, 10000);
+
+              // cleanup processing timeout if set
+              if (this.processingTimeouts.has(sessionId)) {
+                clearTimeout(this.processingTimeouts.get(sessionId)!);
+                this.processingTimeouts.delete(sessionId);
               }
+              this.responseInProgress.set(sessionId, false);
             }
           }
           break;
 
         case 'response.function_call_arguments.done':
-          console.log(`🔧 Function call received for ${sessionId}:`, event);
-          if (event.arguments && event.name) {
-            console.log('Calling handleRealtimeFunctionCall');
-            this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
-          }
-
-          // const realtimeWs = this.connections.get(sessionId);
-          // if (realtimeWs) {
-          //   console.log('▶️ Triggering model response after triggering red flag');
-          //   realtimeWs.send(JSON.stringify({
-          //     type: "response.create",
-          //     response: {
-          //       modalities: ["audio","text"]
-          //     }
-          //   }));``
-          // }
-          break;
-
         case 'function_call':
-          console.log(`🔧 Alternative function call for ${sessionId}:`, event);
+        case 'conversation.item.function_call':
+        case 'tool_call':
+        case 'function_call_response':
+          console.log(`🔧 Function call related event for ${sessionId}:`, eventType);
+          // reuse existing handler to parse and handle function calls
           if (event.arguments && event.name) {
             this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
-          }
-          break;
-
-        case 'conversation.item.function_call':
-          console.log(`🔧 Conversation function call for ${sessionId}:`, event);
-          if (event.item && event.item.function_call) {
+          } else if (event.item && event.item.function_call) {
             const functionCall = event.item.function_call;
             if (functionCall.arguments && functionCall.name) {
               this.handleRealtimeFunctionCall(sessionId, functionCall.name, functionCall.arguments);
             }
-          }
-          break;
-
-        case 'tool_call':
-          console.log(`🔧 Tool call for ${sessionId}:`, event);
-          if (event.tool_call && event.tool_call.function) {
+            // capture function-call item id if present
+            if (event.item && event.item.id) {
+              // optionally store for linking outputs
+            }
+          } else if (event.tool_call && event.tool_call.function) {
             const toolFunction = event.tool_call.function;
             if (toolFunction.arguments && toolFunction.name) {
-              this.handleRealtimeFunctionCall(sessionId,  toolFunction.name, toolFunction.arguments);
+              this.handleRealtimeFunctionCall(sessionId, toolFunction.name, toolFunction.arguments);
             }
           }
           break;
 
-        case 'function_call_response':
-          console.log(`🔧 Function call response for ${sessionId}:`, event);
-          if (event.name && event.arguments) {
-            this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
+        case 'conversation.item.created':
+          // authoritative server item created; capture item ids for ordering
+          if (event.item && event.item.id) {
+            const created = event.item;
+            if (created.role === 'user') {
+              this.lastUserItemId.set(sessionId, created.id);
+            } else if (created.role === 'assistant') {
+              this.lastAssistantItemId.set(sessionId, created.id);
+            }
+            // persist if needed (some created items arrive after you saved them locally)
+            // You can also reconcile DB rows here using created.id
           }
           break;
 
         default:
-          console.log(`Unhandled realtime event ${event.type} for ${sessionId}`);
+          console.log(`Unhandled realtime event ${event.type} (normalized ${eventType}) for ${sessionId}`);
           break;
       }
     } catch (err) {
@@ -436,7 +484,7 @@ class OpenAIProvider implements BaseProvider {
     }
   }
 
-  private handleRealtimeFunctionCall(sessionId: string, name: string, argumentsJson: string): void {
+  private async handleRealtimeFunctionCall(sessionId: string, name: string, argumentsJson: string): Promise<void> {
     try {
       console.log(`🔧 RAW FUNCTION CALL DATA:`, {
         sessionId,
@@ -587,8 +635,12 @@ class OpenAIProvider implements BaseProvider {
 
   private isDuplicateAgentResponse(sessionId: string, message: string): boolean {
     const lastResponse = this.lastAgentResponse.get(sessionId);
-    if (lastResponse === message.trim()) {
-      console.log(`⚠️ Skipping duplicate agent response: "${message.trim().substring(0, 50)}..."`);
+    if (!message) return true;
+    const normalize = (s: string) => s.replace(/\s+/g, ' ').replace(/[^\w\s]/g, '').toLowerCase().trim();
+    const msgHash = crypto.createHash('sha256').update(normalize(message)).digest('hex').slice(0, 12);
+    const lastHash = lastResponse ? crypto.createHash('sha256').update(normalize(lastResponse)).digest('hex').slice(0, 12) : null;
+    if (lastHash === msgHash) {
+      console.log(`⚠️ Skipping duplicate agent response (hash match) for session ${sessionId}`);
       return true;
     }
     this.lastAgentResponse.set(sessionId, message.trim());
@@ -634,25 +686,31 @@ class OpenAIProvider implements BaseProvider {
           clearTimeout(connectionTimeout);
           console.log(`✅ OpenAI Realtime WebSocket connected for session ${config.sessionId}`);
 
-          const validatedInstructions = this.validateInstructions(config.instructions);
+          const sessionSystemPrefix = `SYSTEM: You MUST respond only in English. If the user speaks another language, always reply in English. Do not switch languages mid-conversation. Keep replies concise and clear. Ask only one question at a time.`;
+
+          // keep the user's provided instructions but make English mandatory
+          const validatedInstructions = this.validateInstructions(config.instructions || '');
+          const enforcedInstructions = `${sessionSystemPrefix}\n\n${validatedInstructions}`;
+
           console.log(`📝 Using validated instructions (${validatedInstructions.length} chars)`);
           console.log('temparature:', config.temperature);
           console.log('voice:', config.voice);
 
+          // NOTE: switched create_response to false for manual control
           const sessionConfig = {
             type: 'session.update',
             session: {
               modalities: ['text', 'audio'],
-              instructions: validatedInstructions,
+              instructions: enforcedInstructions,
               voice: config.voice || 'alloy',
               input_audio_format: 'pcm16',
               output_audio_format: 'pcm16',
-              input_audio_transcription: { model: 'gpt-4o-transcribe' },
+              input_audio_transcription: { model: 'gpt-4o-transcribe',language: 'en' },
               turn_detection: {
                 type: "server_vad",
-                prefix_padding_ms: 300,
-                silence_duration_ms: 800, // Increased from 500ms to be more conservative and reduce rapid response accumulation
-                create_response: true
+                prefix_padding_ms: 400,
+                silence_duration_ms: 800,
+                create_response: false // manual by default
               },
               tools: this.getFunctionTools(),
               temperature: config.temperature,
@@ -720,6 +778,70 @@ class OpenAIProvider implements BaseProvider {
     });
   }
 
+  // helper to send an explicit response.create anchored to previous_item_id
+  private sendExplicitResponseCreate(sessionId: string, previousItemId: string | undefined, instructions: string, modalities = ['audio', 'text'], max_output_tokens = 800) {
+    const realtimeWs = this.connections.get(sessionId);
+    if (!realtimeWs || realtimeWs.readyState !== WebSocket.OPEN) {
+      console.warn(`Cannot create explicit response: no Realtime WS for ${sessionId}`);
+      return;
+    }
+    const engPrefix = `You MUST respond only in English. Keep replies concise and clear. Ask only one question at a time.`;
+    instructions = engPrefix + instructions;
+    const payload: any = {
+      type: 'response.create',
+      response: {
+        modalities,
+        instructions
+      }
+    };
+    if (previousItemId) {
+      payload.response.previous_item_id = previousItemId;
+    }
+    try {
+      realtimeWs.send(JSON.stringify(payload));
+    } catch (err) {
+      console.error('Failed to send explicit response.create:', err);
+    }
+  }
+
+  // quick low-risk acknowledgement helper (explicit manual ack)
+  private callQuickAck(sessionId: string, previousItemId?: string) {
+    // Explicit small ack
+    this.sendExplicitResponseCreate(sessionId, previousItemId, 'Provide a short acknowledgement such as "Okay" or "Got it" (<= 1s). Do not ask questions.', ['audio','text'], 30);
+  }
+
+  // Handler to decide if/when to call response.create
+  private async handleFinalPatientTranscript(sessionId: string, transcript: string, userItemId?: string) : Promise<void> {
+    try {
+      // quick rules (example) - customize for your intake flow
+/*       const shortAck = transcript.split(/\s+/).length <= 2 && transcript.length < 20;
+      if (shortAck) {
+        // short interjection - send small ack
+        this.callQuickAck(sessionId, userItemId);
+        return;
+      } */
+
+      // quick red flag scan (example using constants you had)
+      for (const pattern of RED_FLAG_PATTERNS) {
+        const re = new RegExp(pattern, 'i');
+        if (re.test(transcript)) {
+          // escalate: explicitly create a response that triggers the red_flag_detected function
+          // instruct the model to call the function (or rely on model function call)
+          this.sendExplicitResponseCreate(sessionId, userItemId, 'You are a physician. If the user mentions critical symptoms, call the red_flag_detected function with symptoms and severity. Otherwise continue intake.', ['audio','text'], 400);
+          return;
+        }
+      }
+
+      // default: normal intake flow - ask next question via explicit response
+      // you may craft context-specific instructions here
+      this.sendExplicitResponseCreate(sessionId, userItemId, 'You are the intake doctor. Ask the next clarifying question focusing on onset, duration, associated symptoms, and red flags as appropriate.', ['audio','text'], 600);
+    } catch (err) {
+      console.error('Error in handleFinalPatientTranscript:', err);
+      // fallback quick ack
+      this.callQuickAck(sessionId, userItemId);
+    }
+  }
+
   sendAudioData(sessionId: string, audioDataObject: any): void {
     const realtimeWs = this.connections.get(sessionId);
     if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
@@ -730,7 +852,6 @@ class OpenAIProvider implements BaseProvider {
         }
 
         const pcmSamples = audioDataObject.pcm16;
-        //console.log(`🎵 Received ${pcmSamples.length} 16-bit PCM16 samples from frontend`);
 
         const bytesNeeded = pcmSamples.length * 2;
         const pcmBytes = new Uint8Array(bytesNeeded);
@@ -760,8 +881,6 @@ class OpenAIProvider implements BaseProvider {
 
         const sampleCount = pcmSamples.length;
         const estimatedDuration = (sampleCount / 24000).toFixed(2);
-        //console.log(`✅ Sent ${sampleCount} PCM16 samples (${bytesNeeded} bytes) to OpenAI (${estimatedDuration}s at 24kHz)`);
-
       } catch (error: any) {
         console.error(`❌ Error sending audio data for session ${sessionId}:`, error.message);
       }
@@ -793,12 +912,8 @@ class OpenAIProvider implements BaseProvider {
     if (realtimeWs) {
       setTimeout(() => {
         console.log('▶️ Triggering initial agent response after frontend link');
-          realtimeWs.send(JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio","text"]
-          }
-        }));
+        // Use explicit response.create (manual) to avoid auto responses
+        this.sendExplicitResponseCreate(sessionId, undefined, 'You are a medical intake assistant. Greet the patient briefly and begin with Chief Concern like “What brings you in today?” ', ['audio','text'], 200);
       }, 500);
     }
   }
@@ -840,6 +955,14 @@ class OpenAIProvider implements BaseProvider {
     this.lastPatientTranscript.delete(sessionId);
     this.patientSpeechStopTimestamp.delete(sessionId);
     this.lastInterruptionTime.delete(sessionId);
+    this.responseTextBuffers.delete(sessionId);
+    this.responseAudioTranscriptBuffers.delete(sessionId);
+    this.lastUserItemId.delete(sessionId);
+    this.lastAssistantItemId.delete(sessionId);
+    if (this.processingTimeouts.has(sessionId)) {
+      clearTimeout(this.processingTimeouts.get(sessionId)!);
+      this.processingTimeouts.delete(sessionId);
+    }
   }
 
   handleMessage(sessionId: string, data: Buffer): void {
