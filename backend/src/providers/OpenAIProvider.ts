@@ -29,8 +29,56 @@ class OpenAIProvider implements BaseProvider {
   private responseAudioTranscriptBuffers: Map<string, string> = new Map();
   private processingTimeouts: Map<string, NodeJS.Timeout> = new Map();
 
+  // single-slot response queue (keep latest), and in-flight marker
+  private responseQueue: Map<string, { instructions: string; previousItemId?: string; modalities?: string[]; max_output_tokens?: number }> = new Map();
+  private inFlightResponseId: Map<string, string> = new Map();
+
+  // Track server-side active response id (prevents creating when server already has one)
+  private activeServerResponseId: Map<string, string> = new Map();
+
+  // retry counters for queued creates
+  private createRetryCounts: Map<string, number> = new Map();
+  private MAX_CREATE_RETRIES = 3;
+  private CREATE_RETRY_DELAY_MS = 400;
+
   // Configurable processing timeout (fallback quick ack)
   private PROCESSING_TIMEOUT_MS = 5000;
+
+
+  // --- Auto-prune conversation history to keep latency stable ---
+private maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCount: number) {
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const PRUNE_INTERVAL = 10;   // every 10 patient turns
+    const KEEP_LAST_N = 20;      // keep last 20 conversation items
+
+    // run only every PRUNE_INTERVAL turns
+    if (turnCount % PRUNE_INTERVAL !== 0) return;
+
+    console.log(`🧹 Pruning conversation history for ${sessionId} (keeping last ${KEEP_LAST_N} items)`);
+
+    const payload = {
+      type: "conversation.item.truncate",
+      conversation: { last_n: KEEP_LAST_N }
+    };
+
+    ws.send(JSON.stringify(payload));
+
+    // optional audit log
+    try {
+      db.insertAuditLog({
+        action: 'conversation_truncated',
+        details: JSON.stringify({ keep_last_n: KEEP_LAST_N, turn_count: turnCount }),
+        session_id: sessionId
+      });
+    } catch (err) {
+      console.warn('Failed to record truncate audit:', err);
+    }
+  } catch (err) {
+    console.error('maybePruneConversation error:', err);
+  }
+}
+
 
   private validateInstructions(instructions: string): string {
     if (!instructions || instructions.trim().length === 0) {
@@ -82,7 +130,7 @@ class OpenAIProvider implements BaseProvider {
           },
           required: ['symptoms', 'severity']
         }
-      },
+      }/* ,
       {
         type: 'function',
         name: 'save_response',
@@ -109,7 +157,7 @@ class OpenAIProvider implements BaseProvider {
           },
           required: ['speaker', 'message']
         }
-      }
+      } */
     ];
   }
 
@@ -179,6 +227,18 @@ class OpenAIProvider implements BaseProvider {
     return type.replace(/^conversation\.item\./, '');
   }
 
+  // flush queued single-slot response (latest wins)
+  private flushQueuedResponse(sessionId: string) {
+    const queued = this.responseQueue.get(sessionId);
+    if (!queued) return;
+    // pop it and send (only the latest)
+    this.responseQueue.delete(sessionId);
+    console.log(`Flushing queued response for ${sessionId}`);
+    // reset retry count
+    this.createRetryCounts.delete(sessionId);
+    this.sendExplicitResponseCreate(sessionId, queued.previousItemId, queued.instructions || '', queued.modalities, queued.max_output_tokens);
+  }
+
   private handleRealtimeResponse(sessionId: string, data: Buffer): void {
     try {
       const event = JSON.parse(data.toString());
@@ -205,6 +265,24 @@ class OpenAIProvider implements BaseProvider {
           if (event.error?.message) {
             console.error(`Error message: ${event.error.message}`);
           }
+          // If API says conversation already has an active response, schedule a retry flush
+          if (event.error?.code === 'conversation_already_has_active_response') {
+            console.warn(`API reports active response for ${sessionId}. Will retry queued response after delay.`);
+            const retry = (this.createRetryCounts.get(sessionId) || 0) + 1;
+            this.createRetryCounts.set(sessionId, retry);
+
+            if (retry <= this.MAX_CREATE_RETRIES) {
+              setTimeout(() => {
+                // flush queued response when server is likely done (or will be after the current response finishes)
+                this.flushQueuedResponse(sessionId);
+              }, this.CREATE_RETRY_DELAY_MS);
+            } else {
+              console.warn(`Max create retries reached for ${sessionId}. Dropping queued response.`);
+              this.responseQueue.delete(sessionId);
+              this.createRetryCounts.delete(sessionId);
+            }
+          }
+
           if (frontendWs) {
             frontendWs.send(JSON.stringify({
               type: 'error',
@@ -227,9 +305,39 @@ class OpenAIProvider implements BaseProvider {
             const timeSinceLastAgent = nowMs - (this.patientSpeechStopTimestamp.get(sessionId) || 0);
             if (timeSinceLastAgent < 2000) { // Within 2 seconds of agent finishing = potential interruption
               console.log(`⚡ INTERRUPTION DETECTED: Patient interrupting agent speech (${timeSinceLastAgent}ms ago)`);
+
+              // send truncate for currently playing assistant audio (if available)
+              const assistantItemId = this.lastAssistantItemId.get(sessionId);
+              if (assistantItemId) {
+                const truncateMsg = {
+                  type: 'conversation.item.truncate',
+                  item_id: assistantItemId,
+                  content_index: 0,
+                  audio_end_ms: 0
+                };
+                try {
+                  const realtimeWs = this.connections.get(sessionId);
+                  realtimeWs?.send(JSON.stringify(truncateMsg));
+                  console.log(`Sent conversation.item.truncate for assistant item ${assistantItemId} due to interruption`);
+                } catch (err) {
+                  console.error('Error sending conversation.item.truncate:', err);
+                }
+              }
+
+              // Cancel any queued agent saves and queued responses, clear in-flight flags & timers
               this.cancelQueuedResponses(sessionId);
               this.lastInterruptionTime.set(sessionId, nowMs);
-              // if assistant item id exists, consider truncating via conversation.item.truncate (not shown)
+
+              if (this.responseInProgress.get(sessionId)) {
+                this.responseInProgress.set(sessionId, false);
+              }
+              if (this.inFlightResponseId.has(sessionId)) {
+                this.inFlightResponseId.delete(sessionId);
+              }
+              if (this.processingTimeouts.has(sessionId)) {
+                clearTimeout(this.processingTimeouts.get(sessionId)!);
+                this.processingTimeouts.delete(sessionId);
+              }
             }
           }
           break;
@@ -248,11 +356,11 @@ class OpenAIProvider implements BaseProvider {
             const deltaText = event.delta || event.text;
             const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
             const patientTs = new Date(speechStopTime).toISOString();
-            frontendWs.send(JSON.stringify({
-              type: 'conversation.item.input_audio_transcription.delta',
-              delta: deltaText,
-              timestamp: patientTs // Include calculated timestamp for sequencing
-            }));
+            // frontendWs.send(JSON.stringify({
+            //   type: 'conversation.item.input_audio_transcription.delta',
+            //   delta: deltaText,
+            //   timestamp: patientTs // Include calculated timestamp for sequencing
+            // }));
           }
           break;
 
@@ -279,23 +387,23 @@ class OpenAIProvider implements BaseProvider {
               this.lastPatientTranscript.set(sessionId, transcript.trim());
 
               const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
-              const ts = new Date(speechStopTime).toISOString(); // Patient timestamp = when they stopped speaking
+              const ts = new Date(speechStopTime).toISOString(); // Patient timestamp = when they stopped speaking (fallback to now)
               console.log(`👤 Patient said (final): "${transcript}" - timestamp: ${ts} (speechStop: ${speechStopTime})`);
 
               try {
                 // save patient message in DB immediately
-                const saved = await db.saveConversationLog({
+                await db.saveConversationLog({
                   session_id: sessionId,
                   speaker: 'patient',
                   message: transcript,
                   audio_data: JSON.stringify({ type: 'speech_transcript' }),
                   timestamp: new Date(speechStopTime)
                 });
-                db.insertAuditLog({
+/*                 await db.insertAuditLog({
                   action: 'patient_speech',
                   details: JSON.stringify({ transcript }),
                   session_id: sessionId
-                });
+                }); */
 
                 // If OpenAI returned a conversation.item.created with id, capture it
                 if (event.item && event.item.id) {
@@ -304,21 +412,8 @@ class OpenAIProvider implements BaseProvider {
 
                 // schedule/trigger explicit response flow (manual)
                 const createdUserItemId = this.lastUserItemId.get(sessionId) || undefined;
-                // set processing state and create timeout fallback
-                this.responseInProgress.set(sessionId, true);
-                if (this.processingTimeouts.has(sessionId)) {
-                  clearTimeout(this.processingTimeouts.get(sessionId)!);
-                }
-                const to = setTimeout(() => {
-                  // fallback quick ack if no response starts within PROCESSING_TIMEOUT_MS
-                  if (this.responseInProgress.get(sessionId)) {
-                    console.warn(`Processing stuck for ${sessionId}; sending short fallback acknowledgement`);
-                    this.callQuickAck(sessionId, createdUserItemId);
-                    this.responseInProgress.set(sessionId, false);
-                  }
-                }, this.PROCESSING_TIMEOUT_MS);
-                this.processingTimeouts.set(sessionId, to);
 
+                // DO NOT set responseInProgress here — only set it when you're actually sending response.create
                 // invoke your explicit handler to decide whether to call response.create
                 await this.handleFinalPatientTranscript(sessionId, transcript.trim(), createdUserItemId);
               } catch (dbErr) {
@@ -333,25 +428,31 @@ class OpenAIProvider implements BaseProvider {
           }
           break;
 
-        case 'response.text.delta':
-          if (event.delta) {
-            // assemble into buffer
-            const existing = this.responseTextBuffers.get(sessionId) || '';
-            this.responseTextBuffers.set(sessionId, existing + event.delta);
-            const wsToFront = this.frontendSockets.get(sessionId);
-            if (wsToFront) {
-              wsToFront.send(JSON.stringify({
-                type: 'agent_text_stream',
-                text: event.delta,
-                timestamp: new Date().toISOString()
-              }));
+        case 'response.created':
+          // Server acknowledges a response create — capture id and mark in-progress
+          try {
+            const respId = event.response?.id || event.id || (event.response && (event.response.response_id || event.response.responseId));
+            if (respId) {
+              this.activeServerResponseId.set(sessionId, respId);
+              this.responseInProgress.set(sessionId, true);
+              console.log(`✅ Server started response ${respId} for ${sessionId}`);
+            } else {
+              console.log(`✅ response.created received for ${sessionId} but no id found in payload`);
             }
+          } catch (err) {
+            console.warn('Error parsing response.created event:', err);
           }
           break;
 
-        case 'response.text.done':
-          // final text assembled; keep in buffer for later if needed
-          // we don't persist here; wait for audio_transcript.done or response.done
+        case 'response.output_item.added':
+          // often used for partial output; we don't need to do anything special yet
+          break;
+
+        case 'response.output_item.done':
+        case 'response.content_part.done':
+        case 'response.content_part.added':
+        case 'response.content_part.added': // keep idempotent
+          // these are intermediate; do nothing special unless you want more instrumentation
           break;
 
         case 'response.audio.delta':
@@ -380,7 +481,17 @@ class OpenAIProvider implements BaseProvider {
             clearTimeout(this.processingTimeouts.get(sessionId)!);
             this.processingTimeouts.delete(sessionId);
           }
+
+          // If server had an active response id, clear it now
+          if (this.activeServerResponseId.has(sessionId)) {
+            console.log(`Clearing server active response for ${sessionId} after audio.done`);
+            this.activeServerResponseId.delete(sessionId);
+          }
           this.responseInProgress.set(sessionId, false);
+
+          // clear in-flight marker and flush queued response (if any)
+          if (this.inFlightResponseId.has(sessionId)) this.inFlightResponseId.delete(sessionId);
+          this.flushQueuedResponse(sessionId);
           break;
 
         case 'response.audio_transcript.delta':
@@ -397,7 +508,7 @@ class OpenAIProvider implements BaseProvider {
 
             if (!this.isDuplicateAgentResponse(sessionId, assembled)) {
               const agentTranscript = assembled;
-              const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || 0;
+              const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || Date.now();
               const agentTs = new Date(speechStopTime + 100).toISOString();
               console.log(`🤖 Agent responding for ${sessionId}: "${agentTranscript}" - timestamp: ${agentTs} (speechStop: ${speechStopTime})`);
 
@@ -430,6 +541,11 @@ class OpenAIProvider implements BaseProvider {
                 clearTimeout(this.processingTimeouts.get(sessionId)!);
                 this.processingTimeouts.delete(sessionId);
               }
+
+              // clear in-flight marker and flush queued response (if any)
+              if (this.inFlightResponseId.has(sessionId)) this.inFlightResponseId.delete(sessionId);
+              this.flushQueuedResponse(sessionId);
+
               this.responseInProgress.set(sessionId, false);
             }
           }
@@ -475,6 +591,23 @@ class OpenAIProvider implements BaseProvider {
           }
           break;
 
+        case 'response.output_item.done':
+        case 'response.done':
+          // server finished response — clear server active marker and flush queued
+          if (this.activeServerResponseId.has(sessionId)) {
+            console.log(`Clearing server active response for ${sessionId} after response.done`);
+            this.activeServerResponseId.delete(sessionId);
+          }
+          this.responseInProgress.set(sessionId, false);
+          // clear any processing timeouts
+          if (this.processingTimeouts.has(sessionId)) {
+            clearTimeout(this.processingTimeouts.get(sessionId)!);
+            this.processingTimeouts.delete(sessionId);
+          }
+          // flush queued response
+          this.flushQueuedResponse(sessionId);
+          break;
+
         default:
           console.log(`Unhandled realtime event ${event.type} (normalized ${eventType}) for ${sessionId}`);
           break;
@@ -512,13 +645,13 @@ class OpenAIProvider implements BaseProvider {
           }
           break;
 
-        case 'save_response':
-          this.handleSaveResponse({ ...args, sessionId });
-          break;
+        // case 'save_response':
+        //   this.handleSaveResponse({ ...args, sessionId });
+        //   break;
 
-        case 'log_conversation':
-          this.handleLogConversation({ ...args, sessionId });
-          break;
+        // case 'log_conversation':
+        //   this.handleLogConversation({ ...args, sessionId });
+        //   break;
 
         default:
           console.warn(`Unknown function call: ${functionName}`);
@@ -526,6 +659,7 @@ class OpenAIProvider implements BaseProvider {
     } catch (error) {
       console.error(`Error handling function call: ${error}`);
     }
+    
   }
 
   private handleRedFlagDetection(args: any, sessionId: string): void {
@@ -606,7 +740,7 @@ class OpenAIProvider implements BaseProvider {
   }
 
   private cancelQueuedResponses(sessionId: string): void {
-    // Cancel all pending agent saves for this session
+    // Cancel all pending agent saves for this session (deferred saves)
     const pending = this.pendingAgentSaves.get(sessionId);
     if (pending && pending.length > 0) {
       console.log(`🛑 Canceling ${pending.length} queued agent responses for session ${sessionId} due to interruption`);
@@ -615,6 +749,15 @@ class OpenAIProvider implements BaseProvider {
       }
       this.pendingAgentSaves.delete(sessionId);
     }
+
+    // Clear the single-slot response queue if present
+    if (this.responseQueue.has(sessionId)) {
+      console.log(`🧹 Dropping queued response for session ${sessionId} due to interruption`);
+      this.responseQueue.delete(sessionId);
+    }
+
+    // Reset retry counter
+    if (this.createRetryCounts.has(sessionId)) this.createRetryCounts.delete(sessionId);
   }
 
   private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: string): void {
@@ -686,7 +829,35 @@ class OpenAIProvider implements BaseProvider {
           clearTimeout(connectionTimeout);
           console.log(`✅ OpenAI Realtime WebSocket connected for session ${config.sessionId}`);
 
-          const sessionSystemPrefix = `SYSTEM: You MUST respond only in English. If the user speaks another language, always reply in English. Do not switch languages mid-conversation. Keep replies concise and clear. Ask only one question at a time.`;
+          const sessionSystemPrefix = `
+SYSTEM RULES (READ CAREFULLY):
+1) For every discrete intake question the assistant asks, when the patient answers you MUST call the function save_response exactly once with a JSON object:
+   save_response({"question":"<the assistant's last question>","answer":"<the patient's exact answer>","category":"<optional: symptoms|medications|history|general>"})
+   Do NOT output the patient's answer as plain text. Use the function call instead.
+
+2) For non-structured notes, debug messages, or internal assistant notes call:
+   log_conversation({"speaker":"assistant","message":"<freeform note>"})
+
+3) If you detect an urgent symptom, call the red_flag_detected(...) function immediately.
+
+4) Always respond in English, keep replies concise, and ask one question at a time.
+
+EXAMPLES (few-shot):
+Example 1 - Simple intake:
+  Assistant asks: "Do you have chest pain?"
+  Patient: "Yes — for two days, worse on exertion."
+  Assistant must call:
+    save_response({"question":"Do you have chest pain?","answer":"Yes — for two days, worse on exertion.","category":"symptoms"})
+
+Example 2 - Non-structured note:
+  Assistant internal note: "Patient seemed hesitant describing family history."
+  Assistant should call:
+    log_conversation({"speaker":"assistant","message":"Patient hesitated when describing family history"})
+
+Example 3 - Red flag:
+  If patient says "I can't breathe" call:
+    red_flag_detected({"symptoms":["shortness of breath"], "severity":"critical"})
+`.trim();
 
           // keep the user's provided instructions but make English mandatory
           const validatedInstructions = this.validateInstructions(config.instructions || '');
@@ -696,12 +867,14 @@ class OpenAIProvider implements BaseProvider {
           console.log('temparature:', config.temperature);
           console.log('voice:', config.voice);
 
+          console.log('Final session instructions:', enforcedInstructions);
+
           // NOTE: switched create_response to false for manual control
           const sessionConfig = {
             type: 'session.update',
             session: {
               modalities: ['text', 'audio'],
-              instructions: enforcedInstructions,
+              instructions: validatedInstructions,
               voice: config.voice || 'alloy',
               input_audio_format: 'pcm16',
               output_audio_format: 'pcm16',
@@ -779,14 +952,38 @@ class OpenAIProvider implements BaseProvider {
   }
 
   // helper to send an explicit response.create anchored to previous_item_id
-  private sendExplicitResponseCreate(sessionId: string, previousItemId: string | undefined, instructions: string, modalities = ['audio', 'text'], max_output_tokens = 800) {
+  // NOTE: now accepts optional temperature and will automatically use lastUserItemId if previousItemId is not provided
+  private sendExplicitResponseCreate(sessionId: string, previousItemId: string | undefined, instructions: string, modalities = ['audio', 'text'], max_output_tokens = 800, temperature?: number) {
     const realtimeWs = this.connections.get(sessionId);
     if (!realtimeWs || realtimeWs.readyState !== WebSocket.OPEN) {
       console.warn(`Cannot create explicit response: no Realtime WS for ${sessionId}`);
       return;
     }
-    const engPrefix = `You MUST respond only in English. Keep replies concise and clear. Ask only one question at a time.`;
-    instructions = engPrefix + instructions;
+
+    // Prepend English enforcement
+    const engPrefix = `You MUST respond only in English. Keep replies concise and clear. Ask only one question at a time. `;
+    instructions = engPrefix + (instructions || '');
+
+    // If server already has an active response for this session, enqueue the create instead of trying to send
+    if (this.activeServerResponseId.has(sessionId)) {
+      console.log(`Server already has active response for ${sessionId} (${this.activeServerResponseId.get(sessionId)}). Enqueueing response and will flush when server clears.`);
+      this.responseQueue.set(sessionId, { instructions, previousItemId, modalities, max_output_tokens });
+      return;
+    }
+
+    // If a local response is already in progress according to our marker, keep only the latest queued response (single-slot)
+    if (this.responseInProgress.get(sessionId)) {
+      console.log(`Response in progress for ${sessionId} — enqueueing latest response and dropping previous queued response`);
+      this.responseQueue.set(sessionId, { instructions, previousItemId, modalities, max_output_tokens });
+      return;
+    }
+
+    // No response in progress: create and mark in-flight
+    const reqId = uuidv4();
+    this.inFlightResponseId.set(sessionId, reqId);
+    // Note: don't set activeServerResponseId yet — wait for server's response.created event.
+    this.responseInProgress.set(sessionId, true);
+
     const payload: any = {
       type: 'response.create',
       response: {
@@ -794,13 +991,34 @@ class OpenAIProvider implements BaseProvider {
         instructions
       }
     };
-    if (previousItemId) {
-      payload.response.previous_item_id = previousItemId;
+
+    // Use the provided previousItemId, or fall back to the lastUserItemId captured from conversation.item.created
+    const prevId = previousItemId || this.lastUserItemId.get(sessionId);
+    if (prevId) payload.response.previous_item_id = prevId;
+
+    // Add temperature only if provided (so we don't override session default unless caller wants to)
+    if (typeof temperature === 'number') {
+      payload.response.temperature = temperature;
     }
+
     try {
       realtimeWs.send(JSON.stringify(payload));
+      console.log(`📤 response.create sent for ${sessionId} (reqId=${reqId})`);
+      // set a processing timeout fallback
+      if (this.processingTimeouts.has(sessionId)) clearTimeout(this.processingTimeouts.get(sessionId)!);
+      const to = setTimeout(() => {
+        if (this.responseInProgress.get(sessionId)) {
+          console.warn(`Processing timeout for response ${reqId} on ${sessionId}. Clearing in-flight and flushing queue.`);
+          this.responseInProgress.set(sessionId, false);
+          this.inFlightResponseId.delete(sessionId);
+          this.flushQueuedResponse(sessionId);
+        }
+      }, this.PROCESSING_TIMEOUT_MS);
+      this.processingTimeouts.set(sessionId, to);
     } catch (err) {
       console.error('Failed to send explicit response.create:', err);
+      this.responseInProgress.set(sessionId, false);
+      this.inFlightResponseId.delete(sessionId);
     }
   }
 
@@ -835,6 +1053,15 @@ class OpenAIProvider implements BaseProvider {
       // default: normal intake flow - ask next question via explicit response
       // you may craft context-specific instructions here
       this.sendExplicitResponseCreate(sessionId, userItemId, 'You are the intake doctor. Ask the next clarifying question focusing on onset, duration, associated symptoms, and red flags as appropriate.', ['audio','text'], 600);
+      /* this.sendExplicitResponseCreate(sessionId, userItemId,
+        `When the user answered the previous question, DO NOT print the answer as text.
+         Instead CALL the function save_response exactly once with JSON:
+         save_response({"question":"<the assistant's last question>", "answer":"<the patient's answer>", "category":"<symptoms|medications|history|general>"})
+         If unsure, ask a brief clarifying question. Do not add extra commentary.`,
+        ['audio','text'],
+        600,
+        0.6 // temperature set to zero
+      ); */
     } catch (err) {
       console.error('Error in handleFinalPatientTranscript:', err);
       // fallback quick ack
@@ -962,6 +1189,18 @@ class OpenAIProvider implements BaseProvider {
     if (this.processingTimeouts.has(sessionId)) {
       clearTimeout(this.processingTimeouts.get(sessionId)!);
       this.processingTimeouts.delete(sessionId);
+    }
+    if (this.responseQueue.has(sessionId)) {
+      this.responseQueue.delete(sessionId);
+    }
+    if (this.inFlightResponseId.has(sessionId)) {
+      this.inFlightResponseId.delete(sessionId);
+    }
+    if (this.activeServerResponseId.has(sessionId)) {
+      this.activeServerResponseId.delete(sessionId);
+    }
+    if (this.createRetryCounts.has(sessionId)) {
+      this.createRetryCounts.delete(sessionId);
     }
   }
 
