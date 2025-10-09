@@ -199,7 +199,8 @@ const Settings: React.FC = () => {
 
   const modelOptions = [
     { value: 'gpt-4o-realtime-preview', label: 'GPT-4o Realtime Preview' },
-    { value: 'gpt-realtime', label: 'GPT Realtime' }
+    { value: 'gpt-realtime', label: 'GPT Realtime' },
+    { value: 'gpt-realtime-mini', label: 'GPT Realtime Mini' }
   ];
 
   const providerOptions = [

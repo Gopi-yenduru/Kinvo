@@ -18,7 +18,7 @@ class OpenAIProvider implements BaseProvider {
   private lastPatientTranscript: Map<string, string> = new Map();
   private patientSpeechStopTimestamp: Map<string, number> = new Map(); // Records when patient actually stopped speaking for proper sequencing
   private lastInterruptionTime: Map<string, number> = new Map(); // Tracks interruption timestamps to cancel old responses
-  private AGENT_DEFER_MS = 800;
+  private AGENT_DEFER_MS = 1200;
   private RECENT_PATIENT_WINDOW_MS = 1000;
 
   // New maps for deterministic handling
@@ -42,41 +42,161 @@ class OpenAIProvider implements BaseProvider {
   private CREATE_RETRY_DELAY_MS = 400;
 
   // Configurable processing timeout (fallback quick ack)
-  private PROCESSING_TIMEOUT_MS = 5000;
+  private PROCESSING_TIMEOUT_MS = 10000;
+
+  // Turn count tracking for conversation pruning
+  private turnCounts: Map<string, number> = new Map();
 
 
   // --- Auto-prune conversation history to keep latency stable ---
-private maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCount: number) {
+private async maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCount: number) {
   try {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const PRUNE_INTERVAL = 10;   // every 10 patient turns
-    const KEEP_LAST_N = 20;      // keep last 20 conversation items
 
     // run only every PRUNE_INTERVAL turns
     if (turnCount % PRUNE_INTERVAL !== 0) return;
 
-    console.log(`🧹 Pruning conversation history for ${sessionId} (keeping last ${KEEP_LAST_N} items)`);
+    console.log(`🧹 Summarizing and pruning conversation history for ${sessionId} (turn ${turnCount})`);
 
-    const payload = {
+    // Create a summary of the conversation so far
+    const summaryMessage = await this.generateConversationSummary(sessionId, turnCount);
+
+    // Step 1: Inject summary as a system message to preserve context
+    const summaryPayload = {
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "system",
+        content: summaryMessage
+      }
+    };
+
+    console.log(`📝 Injecting conversation summary for ${sessionId}`);
+    ws.send(JSON.stringify(summaryPayload));
+
+    // Short delay to ensure summary is processed
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Step 2: Prune old items (keeping summary + recent turns)
+    const KEEP_LAST_N = 15; // Keep summary + recent interactions
+    const prunePayload = {
       type: "conversation.item.truncate",
       conversation: { last_n: KEEP_LAST_N }
     };
 
-    ws.send(JSON.stringify(payload));
+    ws.send(JSON.stringify(prunePayload));
 
-    // optional audit log
+    // Audit log
     try {
       db.insertAuditLog({
-        action: 'conversation_truncated',
-        details: JSON.stringify({ keep_last_n: KEEP_LAST_N, turn_count: turnCount }),
+        action: 'conversation_summarized_and_truncated',
+        details: JSON.stringify({
+          turn_count: turnCount,
+          summary_length: summaryMessage.length,
+          keep_last_n: KEEP_LAST_N
+        }),
         session_id: sessionId
       });
     } catch (err) {
-      console.warn('Failed to record truncate audit:', err);
+      console.warn('Failed to record summarize audit:', err);
     }
+
+    console.log(`✅ Conversation summarized and pruned for ${sessionId} (summary: ${summaryMessage.length} chars)`);
+
   } catch (err) {
     console.error('maybePruneConversation error:', err);
   }
+}
+
+private generateConversationSummary(sessionId: string, turnCount: number): string {
+  try {
+    // Collect context from our data structures
+    const patientTranscripts = Array.from(this.lastPatientTranscript.entries())
+      .filter(([sid]) => sid === sessionId)
+      .map(([_, transcript]) => transcript);
+
+    const agentResponses = Array.from(this.lastAgentResponse.entries())
+      .filter(([sid]) => sid === sessionId)
+      .map(([_, response]) => response);
+
+    // Extract key medical information
+    const keySymptoms = this.extractKeySymptoms(patientTranscripts);
+    const keyHistory = this.extractMedicalHistory(patientTranscripts);
+    const intakeProgress = this.estimateIntakeProgress(turnCount);
+
+    // Build summary
+    const summaryParts = [];
+
+    if (keySymptoms.length > 0) {
+      summaryParts.push(`Patient symptoms: ${keySymptoms.join(', ')}`);
+    }
+
+    if (keyHistory.length > 0) {
+      summaryParts.push(`Medical history: ${keyHistory.join(', ')}`);
+    }
+
+    summaryParts.push(`Intake progress: ${intakeProgress}`);
+
+    if (agentResponses.length > 0) {
+      summaryParts.push(`Had ${agentResponses.length} conversations`);
+    }
+
+    const summary = summaryParts.join('. ') + '.';
+
+    console.log(`📋 Generated summary for ${sessionId}: ${summary}`);
+    return `CONVERSATION SUMMARY (turns 1-${turnCount}): ${summary} Continue with medically appropriate questions.`;
+
+  } catch (err) {
+    console.error('Error generating conversation summary:', err);
+    // Fallback summary
+    return `CONVERSATION SUMMARY: Patient has been describing their medical concerns through ${turnCount} interactions. Continue with appropriate medical intake questions.`;
+  }
+}
+
+private extractKeySymptoms(transcripts: string[]): string[] {
+  const symptoms: string[] = [];
+  const symptomKeywords = [
+    'pain', 'headache', 'nausea', 'dizziness', 'chest pain', 'back pain',
+    'stomach pain', 'fever', 'cough', 'shortness of breath', 'fatigue',
+    'anxiety', 'depression', 'insomnia', 'rash', 'swelling'
+  ];
+
+  transcripts.forEach(transcript => {
+    symptomKeywords.forEach(keyword => {
+      if (transcript.toLowerCase().includes(keyword) && !symptoms.includes(keyword)) {
+        symptoms.push(keyword);
+      }
+    });
+  });
+
+  return symptoms;
+}
+
+private extractMedicalHistory(transcripts: string[]): string[] {
+  const history: string[] = [];
+  const historyKeywords = [
+    'diabetes', 'hypertension', 'heart disease', 'asthma', 'cancer',
+    'surgery', 'medication', 'allergy', 'pregnant', 'smoking', 'drinking'
+  ];
+
+  transcripts.forEach(transcript => {
+    historyKeywords.forEach(keyword => {
+      if (transcript.toLowerCase().includes(keyword) && !history.includes(keyword)) {
+        history.push(keyword);
+      }
+    });
+  });
+
+  return history;
+}
+
+private estimateIntakeProgress(turnCount: number): string {
+  if (turnCount < 5) return 'chief complaint gathered';
+  if (turnCount < 10) return 'symptom details collected';
+  if (turnCount < 15) return 'medical history in progress';
+  if (turnCount < 20) return 'social history gathering';
+  return 'comprehensive intake nearly complete';
 }
 
 
@@ -345,7 +465,7 @@ private maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCoun
         case 'input_audio_buffer.speech_stopped':
           this.recentPatientActivity.set(sessionId, nowMs);
           this.patientSpeechStopTimestamp.set(sessionId, nowMs);
-          console.log(`🛑 Patient stopped speaking (${sessionId}) - Recording stop time for proper sequencing. Timestamp: ${this.patientSpeechStopTimestamp.get(sessionId)}`);
+          console.log(`🛑 Patient stopped speaking (${sessionId}) - OpenAI will create response automatically with create_response: true`);
           break;
 
         case 'input_audio_transcription.delta':
@@ -366,7 +486,8 @@ private maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCoun
 
         case 'input_audio_transcription.completed':
         case 'conversation.item.input_audio_transcription.completed':
-          // Process transcription for logging + trigger explicit response.create (manual)
+          // Process transcription for logging only - response is already triggered by speech_stopped
+          console.log(`📝 Processing transcription for ${sessionId}: ${eventType}`);
           if (event.transcript || event.text) {
             const transcript = (event.transcript || event.text).toString();
 
@@ -383,15 +504,20 @@ private maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCoun
                 return;
               }
 
-              // Save transcript - use speech STOP time for correct sequencing (not speech start time)
+              // Increment turn count and trigger conversation pruning if needed (moved from speech_stopped because response already triggered)
+              const currentTurn = (this.turnCounts.get(sessionId) || 0) + 1;
+              this.turnCounts.set(sessionId, currentTurn);
+              this.maybePruneConversation(sessionId, this.connections.get(sessionId) || null, currentTurn);
+
+              // Save transcript - use speech STOP time for correct sequencing (response already triggered)
               this.lastPatientTranscript.set(sessionId, transcript.trim());
 
               const speechStopTime = this.patientSpeechStopTimestamp.get(sessionId) || nowMs;
-              const ts = new Date(speechStopTime).toISOString(); // Patient timestamp = when they stopped speaking (fallback to now)
-              console.log(`👤 Patient said (final): "${transcript}" - timestamp: ${ts} (speechStop: ${speechStopTime})`);
+              const ts = new Date(speechStopTime).toISOString();
+              console.log(`👤 Patient transcript saved (response already triggered): "${transcript}" - timestamp: ${ts}`);
 
               try {
-                // save patient message in DB immediately
+                // save patient message in DB for logging/analytics
                 await db.saveConversationLog({
                   session_id: sessionId,
                   speaker: 'patient',
@@ -399,31 +525,17 @@ private maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCoun
                   audio_data: JSON.stringify({ type: 'speech_transcript' }),
                   timestamp: new Date(speechStopTime)
                 });
-/*                 await db.insertAuditLog({
-                  action: 'patient_speech',
-                  details: JSON.stringify({ transcript }),
-                  session_id: sessionId
-                }); */
 
-                // If OpenAI returned a conversation.item.created with id, capture it
+                // Capture user item id for future responses
                 if (event.item && event.item.id) {
                   this.lastUserItemId.set(sessionId, event.item.id);
                 }
 
-                // schedule/trigger explicit response flow (manual)
-                const createdUserItemId = this.lastUserItemId.get(sessionId) || undefined;
-
-                // DO NOT set responseInProgress here — only set it when you're actually sending response.create
-                // invoke your explicit handler to decide whether to call response.create
-                await this.handleFinalPatientTranscript(sessionId, transcript.trim(), createdUserItemId);
               } catch (dbErr) {
                 console.error(`Failed to save patient transcript for ${sessionId}:`, dbErr);
-              } finally {
-                // Clean up per-turn state
-                this.patientTurnTimestamp.delete(sessionId);
               }
             }).catch(err => {
-              console.error('Error in session lock for final transcript:', err);
+              console.error(`Error saving transcription for ${sessionId}:`, err);
             });
           }
           break;
@@ -802,7 +914,9 @@ private maybePruneConversation(sessionId: string, ws: WebSocket | null, turnCoun
 
         console.log(`Creating Realtime session for ${config.sessionId}...`);
 
-        const modelName = config.model || 'gpt-realtime';
+        //const modelName = config.model || 'gpt-realtime';
+        const modelName = 'gpt-realtime-mini';
+
         const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
 
         if (!apiKey || apiKey === 'your_openai_api_key_here') {
@@ -869,7 +983,7 @@ Example 3 - Red flag:
 
           console.log('Final session instructions:', enforcedInstructions);
 
-          // NOTE: switched create_response to false for manual control
+          // NOTE: Switched to automatic responses with Server VAD for cleaner interaction
           const sessionConfig = {
             type: 'session.update',
             session: {
@@ -883,7 +997,7 @@ Example 3 - Red flag:
                 type: "server_vad",
                 prefix_padding_ms: 400,
                 silence_duration_ms: 800,
-                create_response: false // manual by default
+                create_response: true // Let OpenAI handle automatic responses
               },
               tools: this.getFunctionTools(),
               temperature: config.temperature,
@@ -987,8 +1101,7 @@ Example 3 - Red flag:
     const payload: any = {
       type: 'response.create',
       response: {
-        modalities,
-        instructions
+        modalities
       }
     };
 
@@ -1052,7 +1165,7 @@ Example 3 - Red flag:
 
       // default: normal intake flow - ask next question via explicit response
       // you may craft context-specific instructions here
-      this.sendExplicitResponseCreate(sessionId, userItemId, 'You are the intake doctor. Ask the next clarifying question focusing on onset, duration, associated symptoms, and red flags as appropriate.', ['audio','text'], 600);
+      this.sendExplicitResponseCreate(sessionId, userItemId, '', ['audio','text'], 600);
       /* this.sendExplicitResponseCreate(sessionId, userItemId,
         `When the user answered the previous question, DO NOT print the answer as text.
          Instead CALL the function save_response exactly once with JSON:
@@ -1201,6 +1314,9 @@ Example 3 - Red flag:
     }
     if (this.createRetryCounts.has(sessionId)) {
       this.createRetryCounts.delete(sessionId);
+    }
+    if (this.turnCounts.has(sessionId)) {
+      this.turnCounts.delete(sessionId);
     }
   }
 
