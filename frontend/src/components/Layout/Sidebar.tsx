@@ -103,10 +103,11 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
                     </div>
                   </NavLink>
                 ) : (
-                  // Disabled nav item - no click handler to prevent blocking alerts
+                  // Disabled nav item - no click handler or tooltips to prevent blocking
                   <span
                     className="sidebar-nav-link disabled"
-                    title="Please end your current medical session to access navigation"
+                    role="button"
+                    aria-disabled="true"
                   >
                     <div className="d-flex align-items-center gap-3 w-100">
                       <i className={`${item.icon} sidebar-nav-icon disabled-nav ${isCollapsed ? 'fa-lg' : ''}`}></i>
