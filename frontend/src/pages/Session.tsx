@@ -855,6 +855,9 @@ const Session: React.FC = () => {
   const endSession = async () => {
     console.log('endSession called');
 
+    // Update global session context first
+    contextEndSession();
+
     // Handle provider-specific cleanup
     if (provider === 'retellai') {
       // End Retell AI call
@@ -1024,32 +1027,79 @@ const Session: React.FC = () => {
   };
 
   const resetSession = () => {
-    // Update global session context
+    console.log('resetSession: Starting complete session reset');
+
+    // FIRST: Update global session context
     contextEndSession();
 
+    // CLEANUP: Stop and clean up any existing connections
+    if (wsRef.current) {
+      console.log('resetSession: Closing existing WebSocket');
+      wsRef.current.close(1000, 'Session reset');
+      wsRef.current = null;
+    }
+
+    if (retellWebClientRef.current) {
+      console.log('resetSession: Cleaning up Retell Web Client');
+      retellWebClientRef.current.stopCall();
+      retellWebClientRef.current = null;
+    }
+
+    // CLEANUP: Stop audio processing
+    if (isRecordingRef.current) {
+      isRecordingRef.current = false;
+    }
+
+    if (streamRef.current) {
+      console.log('resetSession: Stopping media stream');
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+
+    // CLEANUP: Audio context cleanup
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      console.log('resetSession: Cleaning up audio context');
+      try {
+        audioContextRef.current.close();
+      } catch (error) {
+        console.error('Error closing audio context during reset:', error);
+      }
+      audioContextRef.current = null;
+      gainNodeRef.current = null;
+    }
+
+    // RESET: All state variables
     setSessionStatus('idle');
     setSessionId(null);
+    setConnectionStatus('Disconnected');
     setConversationLog([]);
     setPendingSentence(null);
     pendingSentenceRef.current = null;
+    setIsRecording(false);
+    setIsSpeakingAgent(false);
     setErrorMessage('');
     setSessionDuration(0);
     sessionStartTime.current = null;
     setProvider('openai'); // Reset to default provider
-    // Clear audio buffers
+    setSpeaker('');
+    setTranscriptData(null);
+    setShowTranscript(false);
+
+    // RESET: All audio-related buffers and trackers
     audioBufferRef.current = '';
     audioResponseTrackerRef.current = {
       currentBufferResponseStart: undefined,
       lastPlayedResponseStart: undefined,
       freshAudioBuffer: ''
     };
-    // Clear transcript trackers
+
+    // RESET: Transcript trackers
     transcriptTrackerRef.current = {};
+
+    // RESET: Playback states
     isPlayingRef.current = false;
-    // Clean up Retell Web Client if exists
-    if (retellWebClientRef.current) {
-      retellWebClientRef.current = null;
-    }
+
+    console.log('resetSession: Complete session reset finished');
   };
 
   const handlePatientFormSubmit = (e: React.FormEvent) => {
