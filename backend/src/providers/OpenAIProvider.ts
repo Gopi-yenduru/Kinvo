@@ -1219,7 +1219,7 @@ CONVERSATION PHASES (follow strictly in order):
               turn_detection: {
                 type: "server_vad",
                 prefix_padding_ms: 400,
-                silence_duration_ms: 800,
+                silence_duration_ms: 500,
                 create_response: true // Let OpenAI handle automatic responses
               },
               tools: this.getFunctionTools(),
