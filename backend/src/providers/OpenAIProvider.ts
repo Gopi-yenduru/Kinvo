@@ -1013,6 +1013,7 @@ private estimateIntakeProgress(turnCount: number): string {
           // }
 
           try {
+            await new Promise(resolve => setTimeout(resolve, 200));
             await this.endSession(sessionId);
           } catch (error) {
             console.error(`❌ Failed to auto-end session ${sessionId} after critical red flag:`, error);
