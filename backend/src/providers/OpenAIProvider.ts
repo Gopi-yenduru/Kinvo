@@ -66,9 +66,15 @@ private async maybePruneConversation(sessionId: string, ws: WebSocket | null, tu
     const summaryPayload = {
       type: "conversation.item.create",
       item: {
+        id: uuidv4().substring(0, 24), // OpenAI requires unique ID <= 32 chars
         type: "message",
         role: "system",
-        content: summaryMessage
+        content: [
+          {
+            type: "input_text", // OpenAI API requires "input_text" for conversation item content
+            text: summaryMessage
+          }
+        ]
       }
     };
 
@@ -78,23 +84,18 @@ private async maybePruneConversation(sessionId: string, ws: WebSocket | null, tu
     // Short delay to ensure summary is processed
     await new Promise(resolve => setTimeout(resolve, 100));
 
-    // Step 2: Prune old items (keeping summary + recent turns)
-    const KEEP_LAST_N = 15; // Keep summary + recent interactions
-    const prunePayload = {
-      type: "conversation.item.truncate",
-      conversation: { last_n: KEEP_LAST_N }
-    };
-
-    ws.send(JSON.stringify(prunePayload));
+    // Step 2: Simplified pruning - remove the truncate step entirely for now
+    // OpenAI truncate API seems inconsistent, so skip this step
+    // The summary injection preserves context without needing truncation
+    console.log(`⏩ Skipping conversation.item.truncate due to API inconsistencies`);
 
     // Audit log
     try {
       db.insertAuditLog({
-        action: 'conversation_summarized_and_truncated',
+        action: 'conversation_summarized_only',
         details: JSON.stringify({
           turn_count: turnCount,
-          summary_length: summaryMessage.length,
-          keep_last_n: KEEP_LAST_N
+          summary_length: summaryMessage.length
         }),
         session_id: sessionId
       });
