@@ -870,12 +870,10 @@ const Session: React.FC = () => {
         }
       }
     } else {
-      // Handle OpenAI/WebSocket cleanup
-      if (isRecording) {
-        console.log('Stopping recording');
-        setIsRecording(false);
-        isRecordingRef.current = false;
-      }
+
+      console.log('Stopping recording');
+      setIsRecording(false);
+      isRecordingRef.current = false;
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -895,7 +893,7 @@ const Session: React.FC = () => {
         wsRef.current.send(JSON.stringify({ type: 'end_session' }));
       }
     }
-
+    
     setSessionStatus('completed');
     setIsRecording(false);
   };

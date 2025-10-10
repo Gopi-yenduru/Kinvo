@@ -886,7 +886,6 @@ private estimateIntakeProgress(turnCount: number): string {
 
       switch (functionName) {
         case 'red_flag_detected':
-          this.handleRedFlagDetection(args, sessionId);
           if (frontendWs) {
             frontendWs.send(JSON.stringify({
               type: 'red_flag_detected',
@@ -895,6 +894,7 @@ private estimateIntakeProgress(turnCount: number): string {
               timestamp: new Date().toISOString()
             }));
           }
+          this.handleRedFlagDetection(args, sessionId);
           break;
 
         case 'end_session':
@@ -968,15 +968,57 @@ private estimateIntakeProgress(turnCount: number): string {
         symptoms: JSON.stringify(args.symptoms || []),
         severity: args.severity || 'medium',
         resolved: false,
-        clinician_notified: false
+        clinician_notified: true // Auto-mark as clinician notified since we're ending session
       });
       db.insertAuditLog({
-        action: 'red_flag_detected',
-        details: JSON.stringify(args),
+        action: 'red_flag_detected_session_ended',
+        details: JSON.stringify({
+          ...args,
+          session_automatically_ended: args.severity === 'critical'
+        }),
         session_id: sessionId
       });
 
       console.log(`🚨 CLINICIAN ESCALATION REQUIRED: Session ${sessionId} has red flag: ${args.severity}`);
+
+      // MEDICAL SAFETY: Automatically end session for CRITICAL symptoms
+      // Patient needs immediate human medical intervention
+      if (args.severity === 'critical') {
+        console.log(`🏥 CRITICAL SYMPTOMS DETECTED - Automatically ending session for patient safety: ${args.symptoms}`);
+
+        // End session after brief delay to allow frontend alert to process
+        setTimeout(async () => {
+          console.log(`🏁 Automatic session end due to critical red flag for ${sessionId}`);
+
+          // SEND FRONTEND NOTIFICATION - essential for UI to update
+          const frontendWs = this.frontendSockets.get(sessionId);
+          if (frontendWs) {
+            console.log(`Notifying frontend of automatic session end for ${sessionId}`);
+            frontendWs.send(JSON.stringify({
+              type: 'request_session_end',
+              consent_given: false, // Not patient consent - medical emergency
+              reason: 'critical_symptoms_detected',
+              summary_needed: false,
+              timestamp: new Date().toISOString()
+            }));
+          }
+
+          // Add system message to conversation log
+          // if (this.frontendSockets.get(sessionId)) {
+          //   this.frontendSockets.get(sessionId)!.send(JSON.stringify({
+          //     type: 'system_message',
+          //     message: 'Session automatically ended due to critical symptoms detected. A clinician will contact you shortly for immediate assistance.',
+          //     timestamp: new Date().toISOString()
+          //   }));
+          // }
+
+          try {
+            await this.endSession(sessionId);
+          } catch (error) {
+            console.error(`❌ Failed to auto-end session ${sessionId} after critical red flag:`, error);
+          }
+        }, 1500); // 1.5 second delay for frontend alert processing
+      }
     } catch (error) {
       console.error('Failed to save red flag event:', error);
     }
