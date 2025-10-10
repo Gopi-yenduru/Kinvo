@@ -88,7 +88,7 @@ const Session: React.FC = () => {
         setConversationLog([{
           timestamp: new Date().toLocaleTimeString(),
           speaker: 'System',
-          message: 'Welcome to the Medical Intake Voice Agent. Please speak clearly and provide detailed information about your medical concerns.',
+          message: 'Connecting to HealthYoda voice agent...please wait',
           type: 'system'
         }]);
 

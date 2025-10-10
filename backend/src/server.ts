@@ -1287,7 +1287,7 @@ wss.on('connection', (ws: any, req: any) => {
             ws.send(JSON.stringify({
               type: 'session_joined',
               sessionId: currentSessionId,
-              message: 'Connecting to HealthYoda voice agent...please wait'
+              message: 'Getting Ready...'
             }));
 
             ws.send(JSON.stringify({
