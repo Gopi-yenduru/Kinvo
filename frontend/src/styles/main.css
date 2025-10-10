@@ -566,6 +566,42 @@ h3, .h3 {
   }
 }
 
+/* Sidebar Navigation Styles */
+/* Disabled Navigation States */
+.sidebar-nav-link.disabled {
+  pointer-events: none;
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.sidebar-nav-icon.disabled-nav {
+  color: #6c757d !important;
+  opacity: 0.5;
+}
+
+.sidebar-nav-label.text-muted {
+  color: #6c757d !important;
+}
+
+.sidebar-nav-description.text-muted {
+  color: #9ca3af !important;
+}
+
+.sidebar-nav-description.small {
+  font-size: 0.75rem !important;
+}
+
+/* Active Session Indicator Styles */
+.sidebar-nav-icon.session-active {
+  color: var(--color-success) !important;
+  animation: pulse-session 2s infinite;
+}
+
+@keyframes pulse-session {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
   .medical-hero {

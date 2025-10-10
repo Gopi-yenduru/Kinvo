@@ -8,6 +8,7 @@ import Settings from './pages/Settings';
 import Transcript from './pages/Transcript';
 import Login from './pages/Login';
 import authService from './services/authService';
+import { SessionProvider } from './contexts/SessionContext';
 import './App.css';
 
 // Global fetch interceptor for authentication
@@ -61,37 +62,39 @@ function App() {
   };
 
   return (
-    <Router>
-      <Routes>
-        {/* Login route */}
-        <Route path="/login" element={<Login onLoginSuccess={handleLoginSuccess} />} />
+    <SessionProvider>
+      <Router>
+        <Routes>
+          {/* Login route */}
+          <Route path="/login" element={<Login onLoginSuccess={handleLoginSuccess} />} />
 
-        {/* Protected routes */}
-        {authState.token ? (
-          <Route path="/" element={<Layout onLogout={handleLogout} />}>
-            <Route index element={<Dashboard />} />
-            <Route path="session" element={<Session />} />
-            <Route path="sessions" element={<Sessions />} />
-            <Route path="sessions/:sessionId/transcript" element={<Transcript />} />
-            <Route
-              path="analytics"
-              element={
-                <div className="page-placeholder">
-                  <div className="placeholder-content">
-                    <h1>📊 Analytics</h1>
-                    <p>Advanced analytics and reporting dashboard coming soon...</p>
+          {/* Protected routes */}
+          {authState.token ? (
+            <Route path="/" element={<Layout onLogout={handleLogout} />}>
+              <Route index element={<Dashboard />} />
+              <Route path="session" element={<Session />} />
+              <Route path="sessions" element={<Sessions />} />
+              <Route path="sessions/:sessionId/transcript" element={<Transcript />} />
+              <Route
+                path="analytics"
+                element={
+                  <div className="page-placeholder">
+                    <div className="placeholder-content">
+                      <h1>📊 Analytics</h1>
+                      <p>Advanced analytics and reporting dashboard coming soon...</p>
+                    </div>
                   </div>
-                </div>
-              }
-            />
-            <Route path="settings" element={<Settings />} />
-          </Route>
-        ) : (
-          // Redirect to login if not authenticated
-          <Route path="*" element={<Navigate to="/login" replace />} />
-        )}
-      </Routes>
-    </Router>
+                }
+              />
+              <Route path="settings" element={<Settings />} />
+            </Route>
+          ) : (
+            // Redirect to login if not authenticated
+            <Route path="*" element={<Navigate to="/login" replace />} />
+          )}
+        </Routes>
+      </Router>
+    </SessionProvider>
   );
 }
 

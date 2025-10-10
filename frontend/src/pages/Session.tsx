@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { RetellWebClient } from 'retell-client-js-sdk';
+import { useSession } from '../contexts/SessionContext';
 
 type SessionStatus = 'idle' | 'connecting' | 'active' | 'completed' | 'error';
 
@@ -32,6 +33,9 @@ const Session: React.FC = () => {
   const [patientName, setPatientName] = useState<string>('');
   const [showPatientForm, setShowPatientForm] = useState<boolean>(false);
   const pendingSentenceRef = useRef<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
+
+  // Use SessionContext
+  const { startSession: contextStartSession, endSession: contextEndSession } = useSession();
 
   const conversationMessagesRef = useRef<HTMLDivElement>(null);
   const token = localStorage.getItem("jwt_token");
@@ -101,6 +105,9 @@ const Session: React.FC = () => {
       const data = await response.json();
 
       if (data.sessionId) {
+        // Update global session context
+        contextStartSession(data.provider || 'openai');
+
         setSessionId(data.sessionId);
         setProvider(data.provider || 'openai');
         setSessionStatus('active');
@@ -434,6 +441,8 @@ const Session: React.FC = () => {
               // Automatically end the session after a brief delay for natural flow
               setTimeout(() => {
                 console.log('⏰ Auto-ending session after 2-second delay');
+                // Update global session context
+                contextEndSession();
                 // Avoid calling full endSession() which might send another WebSocket message
                 // Just update UI state directly
                 setSessionStatus('completed');
@@ -1015,6 +1024,9 @@ const Session: React.FC = () => {
   };
 
   const resetSession = () => {
+    // Update global session context
+    contextEndSession();
+
     setSessionStatus('idle');
     setSessionId(null);
     setConversationLog([]);

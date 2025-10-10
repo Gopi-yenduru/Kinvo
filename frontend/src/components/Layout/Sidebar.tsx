@@ -1,5 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
+import { useSession } from '../../contexts/SessionContext';
 
 interface SidebarProps {
   isCollapsed: boolean;
@@ -7,6 +8,7 @@ interface SidebarProps {
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
+  const { hasActiveSession, currentSessionProvider } = useSession();
 
   const menuItems = [
     {
@@ -41,6 +43,14 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
     }
   ];
 
+  const handleNavClick = (e: React.MouseEvent, path: string) => {
+    if (hasActiveSession && path !== '/session') {
+      e.preventDefault();
+      alert('Please end your current medical session before navigating to other pages.');
+      return false;
+    }
+  };
+
   return (
     <aside className={`medical-sidebar ${isCollapsed ? 'sidebar-collapsed' : ''}`}>
       {/* Header */}
@@ -71,24 +81,71 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
         <ul className="list-unstyled mb-0">
           {menuItems.map((item) => (
             <li key={item.path} className="sidebar-nav-item">
-              <NavLink
-                to={item.path}
-                className={({ isActive }) =>
-                  `sidebar-nav-link ${isActive ? 'active' : ''}`
-                }
-              >
-                <div className="d-flex align-items-center gap-3 w-100">
-                  <i className={`${item.icon} sidebar-nav-icon ${isCollapsed ? 'fa-lg' : ''}`}></i>
-                  {!isCollapsed && (
-                    <div className="sidebar-nav-content">
-                      <div className="sidebar-nav-label">{item.label}</div>
-                      <div className="sidebar-nav-description">
-                        {item.description}
-                      </div>
+              {hasActiveSession ? (
+                // Disable navigation during active session (except for session page)
+                item.path === '/session' ? (
+                  <NavLink
+                    to={item.path}
+                    className={({ isActive }) =>
+                      `sidebar-nav-link ${isActive ? 'active' : ''}`
+                    }
+                    onClick={(e) => handleNavClick(e, item.path)}
+                  >
+                    <div className="d-flex align-items-center gap-3 w-100">
+                      <i className={`${item.icon} sidebar-nav-icon session-active ${isCollapsed ? 'fa-lg' : ''}`}></i>
+                      {!isCollapsed && (
+                        <div className="sidebar-nav-content">
+                          <div className="sidebar-nav-label">{item.label}</div>
+                          <div className="sidebar-nav-description">
+                            Active Session
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              </NavLink>
+                  </NavLink>
+                ) : (
+                  // Disabled nav item with tooltip
+                  <a
+                    href="#"
+                    className="sidebar-nav-link disabled"
+                    title="Please end your current medical session to access navigation"
+                    onClick={() => alert('Please end your current medical session before navigating to other pages.')}
+                  >
+                    <div className="d-flex align-items-center gap-3 w-100">
+                      <i className={`${item.icon} sidebar-nav-icon disabled-nav ${isCollapsed ? 'fa-lg' : ''}`}></i>
+                      {!isCollapsed && (
+                        <div className="sidebar-nav-content">
+                          <div className="sidebar-nav-label text-muted">{item.label}</div>
+                          <div className="sidebar-nav-description text-muted small">
+                            Session in progress...
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </a>
+                )
+              ) : (
+                // Normal navigation when no active session
+                <NavLink
+                  to={item.path}
+                  className={({ isActive }) =>
+                    `sidebar-nav-link ${isActive ? 'active' : ''}`
+                  }
+                  onClick={(e) => handleNavClick(e, item.path)}
+                >
+                  <div className="d-flex align-items-center gap-3 w-100">
+                    <i className={`${item.icon} sidebar-nav-icon ${isCollapsed ? 'fa-lg' : ''}`}></i>
+                    {!isCollapsed && (
+                      <div className="sidebar-nav-content">
+                        <div className="sidebar-nav-label">{item.label}</div>
+                        <div className="sidebar-nav-description">
+                          {item.description}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </NavLink>
+              )}
             </li>
           ))}
         </ul>
@@ -96,7 +153,21 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
 
       {/* Footer */}
       <div className="sidebar-footer">
-        
+        {hasActiveSession && (
+          <div className="d-flex align-items-center gap-2 p-2 bg-primary bg-opacity-10 text-primary border-top border-primary border-opacity-25">
+            <i className="fas fa-circle text-success" style={{ fontSize: '8px' }}></i>
+            {!isCollapsed && (
+              <span className="fw-semibold small">
+                Session Active
+                {currentSessionProvider && (
+                  <span className="text-muted ms-1">
+                    ({currentSessionProvider})
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </aside>
   );
