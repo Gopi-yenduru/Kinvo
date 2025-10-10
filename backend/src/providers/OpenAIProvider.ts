@@ -753,7 +753,21 @@ private estimateIntakeProgress(turnCount: number): string {
               const lastPatientActivity = this.recentPatientActivity.get(sessionId) || 0;
               const ageSincePatientMs = nowMs - lastPatientActivity;
 
-              if (lastPatientActivity && ageSincePatientMs < this.RECENT_PATIENT_WINDOW_MS) {
+              // FIX: Check if audio for this response has already completed (responseStartTime cleared in response.audio.done)
+              const audioAlreadyCompleted = !this.responseStartTime.has(sessionId);
+
+              if (audioAlreadyCompleted) {
+                // Audio completed - send transcript immediately regardless of patient activity timing
+                console.log(`⚡ Audio already completed for ${sessionId} - skipping deferral, sending transcript immediately`);
+                this.saveAgentTranscriptImmediate(sessionId, agentTranscript, agentTs);
+                if (this.frontendSockets.get(sessionId)) {
+                  this.frontendSockets.get(sessionId)!.send(JSON.stringify({
+                    type: 'agent_transcript_complete',
+                    transcript: agentTranscript,
+                    timestamp: agentTs
+                  }));
+                }
+              } else if (lastPatientActivity && ageSincePatientMs < this.RECENT_PATIENT_WINDOW_MS) {
                 console.log(`⚖️ Deferring agent save for ${sessionId} (recent patient activity ${ageSincePatientMs}ms ago)`);
                 this.queueAgentSave(sessionId, agentTranscript);
                 if (this.frontendSockets.get(sessionId)) {
