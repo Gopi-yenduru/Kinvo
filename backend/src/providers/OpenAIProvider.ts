@@ -35,6 +35,9 @@ class OpenAIProvider implements BaseProvider {
   // Track response start times for accurate duration calculation
   private responseStartTime: Map<string, number> = new Map();
 
+  // Track when waiting for initial agent greeting completion to discard early user audio
+  private waitingForAgentGreetingComplete: Map<string, boolean> = new Map();
+
   // Token rates for different models (costs per 1000 tokens direct)
   private TOKEN_RATES: { [key: string]: {
     audioInput: number;
@@ -600,6 +603,13 @@ private estimateIntakeProgress(turnCount: number): string {
               this.responseInProgress.set(sessionId, true);
               // Track when the response started for accurate duration calculation
               this.responseStartTime.set(sessionId, Date.now());
+
+              // Set flag for initial greeting if no agent has responded yet
+              if (!this.lastAgentResponse.has(sessionId)) {
+                console.log(`🎭 Initial agent greeting started - discarding audio until complete`);
+                this.waitingForAgentGreetingComplete.set(sessionId, true);
+              }
+
               console.log(`✅ Server started response ${respId} for ${sessionId}`);
             } else {
               console.log(`✅ response.created received for ${sessionId} but no id found in payload`);
@@ -627,7 +637,9 @@ private estimateIntakeProgress(turnCount: number): string {
               wsToFront.send(JSON.stringify({
                 type: 'agent_audio_chunk',
                 audio: event.delta,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
+                // Include response start time to track which response this belongs to
+                responseStartTime: this.responseStartTime.get(sessionId)
               }));
             }
           }
@@ -646,6 +658,13 @@ private estimateIntakeProgress(turnCount: number): string {
           if (tracker) {
             tracker.outputAudioDuration += outputDuration;
             this.sessionUsageTracker.set(sessionId, tracker);
+          }
+
+          // Clear the waiting flag if agent greeting is complete
+          if (this.waitingForAgentGreetingComplete.get(sessionId)) {
+            console.log(`🎭 Agent greeting completed for ${sessionId} - now accepting user audio`);
+            this.waitingForAgentGreetingComplete.delete(sessionId);
+            this.lastAgentResponse.set(sessionId, 'greeting received'); // Track that agent has responded
           }
 
           // Clear the response start time
@@ -1302,6 +1321,12 @@ CONVERSATION PHASES (follow strictly in order):
   }
 
   sendAudioData(sessionId: string, audioDataObject: any): void {
+    // SMART AUDIO GATING: Discard audio during initial agent greeting to ensure clean model start
+    if (this.waitingForAgentGreetingComplete.get(sessionId)) {
+      console.log(`🔇 Discarding audio for ${sessionId} - still waiting for agent greeting to complete`);
+      return; // Don't send any audio data to AI during the initial greeting
+    }
+
     const realtimeWs = this.connections.get(sessionId);
     if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
       try {

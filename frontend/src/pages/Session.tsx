@@ -45,7 +45,17 @@ const Session: React.FC = () => {
   const isPlayingRef = useRef(false);
   const sessionStartTime = useRef<number | null>(null);
   const audioBufferRef = useRef<string>(''); // Buffer for incoming audio chunks
-  const playbackQueueRef = useRef<string[]>([]); // Queue for audio playback
+
+  // Track audio response freshness to prevent stale audio playback
+  const audioResponseTrackerRef = useRef<{
+    currentBufferResponseStart?: number;
+    lastPlayedResponseStart?: number;
+    freshAudioBuffer: string;
+  }>({
+    currentBufferResponseStart: undefined,
+    lastPlayedResponseStart: undefined,
+    freshAudioBuffer: ''
+  });
 
   // Timer effect
   useEffect(() => {
@@ -293,9 +303,9 @@ const Session: React.FC = () => {
             }
             break;
           case 'agent_audio_chunk':
-              // Handle incoming audio chunks from the AI agent
+              // Handle incoming audio chunks from the AI agent with response separation
               if (message.audio) {
-                handleIncomingAudioChunk(message.audio);
+                handleIncomingAudioChunk(message.audio, message.responseStartTime);
               }
               // Set speaker to Agent when we start receiving audio (agent is speaking)
               if (!isSpeakingAgent) {
@@ -306,8 +316,8 @@ const Session: React.FC = () => {
           case 'agent_response_complete':
               setSpeaker('');
               setIsSpeakingAgent(false);
-              // Play accumulated audio when response is complete
-              playAccumulatedAudio();
+              // Play only the freshest accumulated audio, discard stale ones
+              playAccumulatedAudio(message.timestamp);
               // Finalize any pending sentence
               finalizePendingSentences();
             break;
@@ -754,23 +764,59 @@ const Session: React.FC = () => {
     setIsRecording(false);
   };
 
-  const handleIncomingAudioChunk = (audioChunk: string) => {
-    // Accumulate audio chunks
-    audioBufferRef.current += audioChunk;
-    console.log(`Received audio chunk: ${audioChunk.length} characters`);
+  const handleIncomingAudioChunk = (audioChunk: string, responseStartTime?: number) => {
+    // Track which response these chunks belong to and only buffer if it's the latest response
+    if (responseStartTime) {
+      if (!audioResponseTrackerRef.current.currentBufferResponseStart) {
+        // First chunks of a new response
+        audioResponseTrackerRef.current.currentBufferResponseStart = responseStartTime;
+        audioResponseTrackerRef.current.freshAudioBuffer = audioChunk;
+        console.log(`🎵 Starting audio buffer for response starting at ${responseStartTime}`);
+      } else if (responseStartTime === audioResponseTrackerRef.current.currentBufferResponseStart) {
+        // Continuation of current response - add to buffer
+        audioResponseTrackerRef.current.freshAudioBuffer += audioChunk;
+        console.log(`🎵 Adding chunk to buffer (${audioResponseTrackerRef.current.freshAudioBuffer.length} total chars)`);
+      } else if (responseStartTime > audioResponseTrackerRef.current.currentBufferResponseStart!) {
+        // New response is starting - replace the buffer
+        console.log(`📹 Newer response starting ${responseStartTime} vs ${audioResponseTrackerRef.current.currentBufferResponseStart} - replacing buffer`);
+        audioResponseTrackerRef.current.currentBufferResponseStart = responseStartTime;
+        audioResponseTrackerRef.current.freshAudioBuffer = audioChunk;
+      } else {
+        // This is an older/delayed response - discard it
+        console.log(`🗑️ Discarding chunk from stale response (${responseStartTime} vs current ${audioResponseTrackerRef.current.currentBufferResponseStart})`);
+      }
+    } else {
+      // Legacy behavior for chunks without response start time
+      audioResponseTrackerRef.current.freshAudioBuffer += audioChunk;
+      console.log(`Received legacy audio chunk: ${audioChunk.length} characters`);
+    }
   };
 
-  const playAccumulatedAudio = async () => {
-    if (!audioBufferRef.current || isPlayingRef.current) {
+  const playAccumulatedAudio = async (responseTimestamp?: string) => {
+    // Check if this response would be stale compared to when the user last spoke
+    if (responseTimestamp && responseTimestamp.trim()) {
+      const responseTime = new Date(responseTimestamp).getTime();
+      const lastPlayedTime = audioResponseTrackerRef.current.lastPlayedResponseStart || 0;
+
+      // If we already played a newer response, skip this older one
+      if (lastPlayedTime >= responseTime) {
+        console.log(`🗑️ Skipping playback of stale audio response (${new Date(responseTime).toISOString()} vs last played ${new Date(lastPlayedTime).toISOString()})`);
+        // Clear the buffer and return without playing
+        audioResponseTrackerRef.current.freshAudioBuffer = '';
+        return;
+      }
+    }
+
+    if (!audioResponseTrackerRef.current.freshAudioBuffer || isPlayingRef.current) {
       return;
     }
 
     try {
       isPlayingRef.current = true;
-      console.log(`Playing accumulated audio: ${audioBufferRef.current.length} characters`);
+      console.log(`Playing accumulated audio: ${audioResponseTrackerRef.current.freshAudioBuffer.length} characters`);
 
-      // Decode base64 audio data
-      const audioData = atob(audioBufferRef.current);
+      // Decode base64 audio data from fresh buffer
+      const audioData = atob(audioResponseTrackerRef.current.freshAudioBuffer);
       const audioBytes = new Uint8Array(audioData.length);
       for (let i = 0; i < audioData.length; i++) {
         audioBytes[i] = audioData.charCodeAt(i);
@@ -818,14 +864,16 @@ const Session: React.FC = () => {
 
       source.start();
 
-      // Clear the buffer after playing
-      audioBufferRef.current = '';
+      // Update last played time and clear the buffer after playing
+      const responseTime = responseTimestamp ? new Date(responseTimestamp).getTime() : Date.now();
+      audioResponseTrackerRef.current.lastPlayedResponseStart = responseTime;
+      audioResponseTrackerRef.current.freshAudioBuffer = '';
 
     } catch (error) {
       console.error('Error playing audio:', error);
       isPlayingRef.current = false;
       // Clear buffer on error to prevent accumulation
-      audioBufferRef.current = '';
+      audioResponseTrackerRef.current.freshAudioBuffer = '';
     }
   };
 
@@ -854,7 +902,11 @@ const Session: React.FC = () => {
     setProvider('openai'); // Reset to default provider
     // Clear audio buffers
     audioBufferRef.current = '';
-    playbackQueueRef.current = [];
+    audioResponseTrackerRef.current = {
+      currentBufferResponseStart: undefined,
+      lastPlayedResponseStart: undefined,
+      freshAudioBuffer: ''
+    };
     isPlayingRef.current = false;
     // Clean up Retell Web Client if exists
     if (retellWebClientRef.current) {
