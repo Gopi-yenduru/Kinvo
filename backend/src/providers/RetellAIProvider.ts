@@ -218,6 +218,15 @@ class RetellAIProvider implements BaseProvider, WebCallProvider {
       // For Retell AI, endCall is the appropriate method
       return this.endCall(sessionId);
     }
+
+    getSessionTokenUsage(sessionId: string): any {
+      // RetellAI doesn't provide detailed token usage metrics
+      return {
+        message: 'Token usage tracking not available for RetellAI provider',
+        estimatedCost: 0,
+        lastUpdated: new Date().toISOString()
+      };
+    }
  }
 
 export default RetellAIProvider;

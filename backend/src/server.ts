@@ -788,7 +788,44 @@ app.get('/api/sessions', async (req: any, res: any) => {
   console.log('🔍 DEBUG: Getting all sessions');
   try {
     const sessions = await db.getAllSessions();
-    res.json({ sessions: sessions || [] });
+    console.log(`🔍 DEBUG: Found ${sessions?.length || 0} total sessions`);
+
+    // Enrich sessions with token usage data for completed sessions
+    const enrichedSessions = await Promise.all(
+      (sessions || []).map(async (session: any) => {
+        let estimatedCost = null;
+
+        // Only try to get cost for completed sessions
+        if (session.status === 'completed') {
+          try {
+            console.log(`🔍 DEBUG: Checking token usage for completed session ${session.id}`);
+            // Try to get token usage from database
+            const tokenUsageList = await db.getSessionTokenUsage(session.id);
+            console.log(`🔍 DEBUG: Found ${tokenUsageList?.length || 0} token usage records for session ${session.id}`);
+
+            // Get the latest token usage entry (in case multiple)
+            if (tokenUsageList && tokenUsageList.length > 0) {
+              const latestUsage = tokenUsageList[0]; // Already ordered by timestamp DESC
+              console.log(`🔍 DEBUG: Latest token usage for ${session.id}: estimated_cost=${latestUsage.estimated_cost}`);
+              if (latestUsage.estimated_cost > 0) {
+                estimatedCost = latestUsage.estimated_cost;
+              }
+            }
+          } catch (usageError: any) {
+            // If no token usage found, leave as null
+            console.log(`No token usage found for session ${session.id}:`, usageError.message);
+          }
+        }
+
+        return {
+          ...session,
+          estimated_cost: estimatedCost
+        };
+      })
+    );
+
+    console.log(`🔍 DEBUG: Returning ${enrichedSessions.length} enriched sessions`);
+    res.json({ sessions: enrichedSessions });
   } catch (error: any) {
     console.error('Failed to get sessions:', error);
     res.status(500).json({ error: 'Failed to retrieve sessions' });
@@ -1014,6 +1051,78 @@ app.get('/api/dashboard/summary', async (req: any, res: any) => {
   }
 });
 
+// Token Usage API endpoints
+app.get('/api/analytics/token-usage', async (req: any, res: any) => {
+  try {
+    const usage = await db.getTokenUsageSummary();
+    res.json({ usage });
+  } catch (error: any) {
+    console.error('Failed to get token usage summary:', error);
+    res.status(500).json({ error: 'Failed to retrieve token usage summary' });
+  }
+});
+
+app.get('/api/analytics/token-usage/:period', async (req: any, res: any) => {
+  try {
+    const { period } = req.params;
+    let startDate: Date;
+    const endDate = new Date();
+
+    // Parse period (days, weeks, months)
+    const periodMatch = period.match(/^(\d+)(day|week|month)s?$/);
+    if (!periodMatch) {
+      return res.status(400).json({ error: 'Invalid period format. Use format: 7days, 1month, etc.' });
+    }
+
+    const value = parseInt(periodMatch[1]);
+    const unit = periodMatch[2];
+
+    switch (unit) {
+      case 'day':
+        startDate = new Date();
+        startDate.setDate(endDate.getDate() - value);
+        break;
+      case 'week':
+        startDate = new Date();
+        startDate.setDate(endDate.getDate() - (value * 7));
+        break;
+      case 'month':
+        startDate = new Date();
+        startDate.setMonth(endDate.getMonth() - value);
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid period unit. Use: days, weeks, months' });
+    }
+
+    const usage = await db.getTokenUsageForPeriod(startDate, endDate);
+    res.json({ usage });
+  } catch (error: any) {
+    console.error('Failed to get token usage for period:', error);
+    res.status(500).json({ error: 'Failed to retrieve token usage for period' });
+  }
+});
+
+app.get('/api/sessions/:sessionId/token-usage', async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
+    const provider = realtimeManager.getProvider();
+
+    if (!provider || typeof provider.getSessionTokenUsage !== 'function') {
+      return res.status(400).json({ error: 'Token usage tracking not available for this provider' });
+    }
+
+    const usage = provider.getSessionTokenUsage(sessionId);
+    if (!usage) {
+      return res.status(404).json({ error: 'No token usage data found for this session' });
+    }
+
+    res.json({ usage });
+  } catch (error: any) {
+    console.error('Failed to get session token usage:', error);
+    res.status(500).json({ error: 'Failed to retrieve session token usage' });
+  }
+});
+
 // Settings configuration endpoint
 app.get('/api/settings/config', async (req: any, res: any) => {
   try {
@@ -1178,7 +1287,7 @@ wss.on('connection', (ws: any, req: any) => {
             ws.send(JSON.stringify({
               type: 'session_joined',
               sessionId: currentSessionId,
-              message: 'Connected to voice agent'
+              message: 'Connecting to HealthYoda voice agent...please wait'
             }));
 
             ws.send(JSON.stringify({

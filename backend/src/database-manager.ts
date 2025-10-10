@@ -79,6 +79,19 @@ export interface AuditLog {
     timestamp: Date;
 }
 
+export interface SessionTokenUsage {
+    session_id: string;
+    model: string;
+    input_audio_tokens: number;
+    output_audio_tokens: number;
+    text_input_tokens: number;
+    text_output_tokens: number;
+    input_audio_duration: number;
+    output_audio_duration: number;
+    estimated_cost: number;
+    timestamp: Date;
+}
+
 export interface User {
   id: string; // Actually uniqueidentifier/GUID in database
   username: string;
@@ -770,6 +783,131 @@ export class DataService {
                 { name: 'password_hash', type: sql.VarChar(500), value: passwordHash }
             ]
         );
+    }
+
+    // --------------------- SESSION TOKEN USAGE ---------------------
+
+    // Save session token usage when session ends
+    public async saveSessionTokenUsage(usage: Omit<SessionTokenUsage, 'timestamp'>): Promise<void> {
+        await this.runQueryWithInput(
+            `INSERT INTO session_token_usage (session_id, model, input_audio_tokens, output_audio_tokens,
+             text_input_tokens, text_output_tokens, input_audio_duration, output_audio_duration,
+             estimated_cost, timestamp)
+             VALUES (@session_id, @model, @input_audio_tokens, @output_audio_tokens,
+             @text_input_tokens, @text_output_tokens, @input_audio_duration, @output_audio_duration,
+             @estimated_cost, GETDATE())`,
+            [
+                { name: 'session_id', type: sql.VarChar, value: usage.session_id },
+                { name: 'model', type: sql.VarChar(250), value: usage.model },
+                { name: 'input_audio_tokens', type: sql.BigInt, value: usage.input_audio_tokens },
+                { name: 'output_audio_tokens', type: sql.BigInt, value: usage.output_audio_tokens },
+                { name: 'text_input_tokens', type: sql.BigInt, value: usage.text_input_tokens },
+                { name: 'text_output_tokens', type: sql.BigInt, value: usage.text_output_tokens },
+                { name: 'input_audio_duration', type: sql.Decimal(10, 2), value: usage.input_audio_duration },
+                { name: 'output_audio_duration', type: sql.Decimal(10, 2), value: usage.output_audio_duration },
+                { name: 'estimated_cost', type: sql.Decimal(18, 6), value: usage.estimated_cost }
+            ]
+        );
+    }
+
+    // Get all token usage records
+    public async getAllSessionTokenUsage(): Promise<SessionTokenUsage[]> {
+        return this.runQuery<SessionTokenUsage>(`SELECT * FROM session_token_usage ORDER BY timestamp DESC`);
+    }
+
+    // Get token usage for specific session
+    public async getSessionTokenUsage(sessionId: string): Promise<SessionTokenUsage[]> {
+        return this.runQueryWithInput<SessionTokenUsage>(
+            `SELECT * FROM session_token_usage WHERE session_id = @session_id ORDER BY timestamp DESC`,
+            [{ name: 'session_id', type: sql.VarChar, value: sessionId }]
+        );
+    }
+
+    // Get token usage summary statistics
+    public async getTokenUsageSummary(): Promise<{
+        totalSessions: number;
+        totalCost: number;
+        averageCostPerSession: number;
+        totalAudioTokens: number;
+        totalTextTokens: number;
+        costByModel: { model: string; cost: number }[];
+    }> {
+        const usage = await this.runQuery<{
+            total_sessions: number;
+            total_cost: number;
+            avg_cost_per_session: number;
+            total_audio_tokens: number;
+            total_text_tokens: number;
+        }>(`
+            SELECT
+                COUNT(DISTINCT session_id) as total_sessions,
+                SUM(estimated_cost) as total_cost,
+                AVG(estimated_cost) as avg_cost_per_session,
+                SUM(input_audio_tokens + output_audio_tokens) as total_audio_tokens,
+                SUM(text_input_tokens + text_output_tokens) as total_text_tokens
+            FROM session_token_usage
+        `);
+
+        const costByModel = await this.runQuery<{ model: string; cost: number }>(`
+            SELECT model, SUM(estimated_cost) as cost
+            FROM session_token_usage
+            GROUP BY model
+            ORDER BY cost DESC
+        `);
+
+        return {
+            totalSessions: usage[0]?.total_sessions || 0,
+            totalCost: Math.round((usage[0]?.total_cost || 0) * 10000) / 10000,
+            averageCostPerSession: Math.round((usage[0]?.avg_cost_per_session || 0) * 10000) / 10000,
+            totalAudioTokens: usage[0]?.total_audio_tokens || 0,
+            totalTextTokens: usage[0]?.total_text_tokens || 0,
+            costByModel
+        };
+    }
+
+    public async getTokenUsageForPeriod(startDate: Date, endDate: Date): Promise<{
+        periodUsage: SessionTokenUsage[];
+        periodSummary: {
+            totalSessions: number;
+            totalCost: number;
+            modelsUsed: string[];
+        };
+    }> {
+        const periodUsage = await this.runQueryWithInput<SessionTokenUsage>(
+            `SELECT * FROM session_token_usage
+             WHERE timestamp >= @start_date AND timestamp <= @end_date
+             ORDER BY timestamp DESC`,
+            [
+                { name: 'start_date', type: sql.DateTime, value: startDate },
+                { name: 'end_date', type: sql.DateTime, value: endDate }
+            ]
+        );
+
+        const summary = await this.runQueryWithInput<{
+            total_sessions: number;
+            total_cost: number;
+            models_used: string;
+        }>(
+            `SELECT
+                COUNT(DISTINCT session_id) as total_sessions,
+                SUM(estimated_cost) as total_cost,
+                STRING_AGG(DISTINCT model, ',') as models_used
+             FROM session_token_usage
+             WHERE timestamp >= @start_date AND timestamp <= @end_date`,
+            [
+                { name: 'start_date', type: sql.DateTime, value: startDate },
+                { name: 'end_date', type: sql.DateTime, value: endDate }
+            ]
+        );
+
+        return {
+            periodUsage,
+            periodSummary: {
+                totalSessions: summary[0]?.total_sessions || 0,
+                totalCost: Math.round((summary[0]?.total_cost || 0) * 10000) / 10000,
+                modelsUsed: summary[0]?.models_used ? summary[0].models_used.split(',') : []
+            }
+        };
     }
 
     // --------------------- USERS & AUTHENTICATION ---------------------

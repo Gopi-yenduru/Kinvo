@@ -8,6 +8,7 @@ interface Session {
   status: string;
   red_flags_detected: number;
   patient_name?: string;
+  estimated_cost?: number;
 }
 
 const Sessions: React.FC = () => {
@@ -221,6 +222,7 @@ const Sessions: React.FC = () => {
                   <th>Status</th>
                   <th>Start Time</th>
                   <th>Duration</th>
+                  <th>Cost</th>
                   <th>Red Flags</th>
                   <th>Actions</th>
                 </tr>
@@ -245,6 +247,13 @@ const Sessions: React.FC = () => {
                       })}
                     </td>
                     <td>{getSessionDuration(session)}</td>
+                    <td>
+                      {session.estimated_cost != null ? (
+                        <span className="cost-text">${session.estimated_cost.toFixed(4)}</span>
+                      ) : (
+                        <span className="no-flags">—</span>
+                      )}
+                    </td>
                     <td>
                       {session.red_flags_detected > 0 ? (
                         <span className="red-flag-text">⚠️ {session.red_flags_detected}</span>

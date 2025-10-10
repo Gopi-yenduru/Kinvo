@@ -37,6 +37,10 @@ class RealtimeSessionManager {
    this.provider = provider;
  }
 
+ getProvider(): BaseProvider {
+   return this.provider;
+ }
+
 private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: string) {
   try {
     console.log(`🤖 Saving agent transcript for ${sessionId}: "${transcript}"`);

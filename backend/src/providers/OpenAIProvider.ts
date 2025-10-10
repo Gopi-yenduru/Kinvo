@@ -21,6 +21,47 @@ class OpenAIProvider implements BaseProvider {
   private AGENT_DEFER_MS = 1200;
   private RECENT_PATIENT_WINDOW_MS = 1000;
 
+  // Token usage tracking properties
+  private sessionUsageTracker: Map<string, {
+    sessionId: string;
+    startTime: number;
+    model: string;
+    inputAudioDuration: number; // seconds
+    outputAudioDuration: number; // seconds
+    textInputChars: number;
+    textOutputChars: number;
+  }> = new Map();
+
+  // Track response start times for accurate duration calculation
+  private responseStartTime: Map<string, number> = new Map();
+
+  // Token rates for different models (costs per 1000 tokens direct)
+  private TOKEN_RATES: { [key: string]: {
+    audioInput: number;
+    audioOutput: number;
+    textInputRate: number;
+    textOutputRate: number;
+    audioInputRate: number;
+    audioOutputRate: number;
+  }} = {
+    'gpt-realtime-mini': {
+      audioInput: 85, // tokens per second
+      audioOutput: 85,
+      textInputRate: 0.00015,  // cost per 1000 tokens (already divided by 1000)
+      textOutputRate: 0.0006,   // cost per 1000 tokens
+      audioInputRate: 0.0006,   // cost per 1000 tokens
+      audioOutputRate: 0.0024   // cost per 1000 tokens
+    },
+    'gpt-realtime-preview': {
+      audioInput: 85,
+      audioOutput: 85,
+      textInputRate: 0.0015,    // cost per 1000 tokens
+      textOutputRate: 0.006,    // cost per 1000 tokens
+      audioInputRate: 0.06,     // cost per 1000 tokens
+      audioOutputRate: 0.24     // cost per 1000 tokens
+    }
+  };
+
   // New maps for deterministic handling
   private sessionLocks: Map<string, Promise<void>> = new Map();
   private lastUserItemId: Map<string, string> = new Map();
@@ -467,6 +508,15 @@ private estimateIntakeProgress(turnCount: number): string {
           this.recentPatientActivity.set(sessionId, nowMs);
           this.patientSpeechStopTimestamp.set(sessionId, nowMs);
           console.log(`🛑 Patient stopped speaking (${sessionId}) - OpenAI will create response automatically with create_response: true`);
+
+          // Track input audio duration for token usage
+          const inputStart = this.recentPatientActivity.get(sessionId) || nowMs;
+          const inputDuration = (nowMs - inputStart) / 1000;
+          const inputTracker = this.sessionUsageTracker.get(sessionId);
+          if (inputTracker) {
+            inputTracker.inputAudioDuration += inputDuration;
+            this.sessionUsageTracker.set(sessionId, inputTracker);
+          }
           break;
 
         case 'input_audio_transcription.delta':
@@ -548,6 +598,8 @@ private estimateIntakeProgress(turnCount: number): string {
             if (respId) {
               this.activeServerResponseId.set(sessionId, respId);
               this.responseInProgress.set(sessionId, true);
+              // Track when the response started for accurate duration calculation
+              this.responseStartTime.set(sessionId, Date.now());
               console.log(`✅ Server started response ${respId} for ${sessionId}`);
             } else {
               console.log(`✅ response.created received for ${sessionId} but no id found in payload`);
@@ -583,6 +635,22 @@ private estimateIntakeProgress(turnCount: number): string {
 
         case 'response.audio.done':
           console.log(`🔊 Agent audio completed for ${sessionId}`);
+
+          // Track output audio duration for token usage
+          const outputEnd = Date.now();
+          const responseStart = this.responseStartTime.get(sessionId) || (outputEnd - 1000); // Use tracked start time or fallback to 1 second
+          const outputDuration = (outputEnd - responseStart) / 1000;
+          console.log(`🔊 Response duration tracked: ${outputDuration.toFixed(2)} seconds (start: ${new Date(responseStart).toISOString()}, end: ${new Date(outputEnd).toISOString()})`);
+
+          const tracker = this.sessionUsageTracker.get(sessionId);
+          if (tracker) {
+            tracker.outputAudioDuration += outputDuration;
+            this.sessionUsageTracker.set(sessionId, tracker);
+          }
+
+          // Clear the response start time
+          this.responseStartTime.delete(sessionId);
+
           if (this.frontendSockets.get(sessionId)) {
             this.frontendSockets.get(sessionId)!.send(JSON.stringify({
               type: 'agent_response_complete',
@@ -944,6 +1012,17 @@ private estimateIntakeProgress(turnCount: number): string {
           clearTimeout(connectionTimeout);
           console.log(`✅ OpenAI Realtime WebSocket connected for session ${config.sessionId}`);
 
+          // Initialize token usage tracking
+          this.sessionUsageTracker.set(config.sessionId, {
+            sessionId: config.sessionId,
+            startTime: Date.now(),
+            model: config.model || 'gpt-realtime-mini',
+            inputAudioDuration: 0,
+            outputAudioDuration: 0,
+            textInputChars: 0,
+            textOutputChars: 0
+          });
+
           const sessionSystemPrefix = `
 SYSTEM RULES (READ CAREFULLY):
 1) For every discrete intake question the assistant asks, when the patient answers you MUST call the function save_response exactly once with a JSON object:
@@ -981,6 +1060,45 @@ Example 3 - Red flag:
           console.log(`📝 Using validated instructions (${validatedInstructions.length} chars)`);
           console.log('temparature:', config.temperature);
           console.log('voice:', config.voice);
+
+          const systemPrompt = `You are Healthyoda, a professional medical intake voice agent. Your role is to collect structured clinical information including History of Present Illness (HPI), Review of Systems (ROS), and Past Medical, Family, and Social History (PMFSH) to produce a complete, high-fidelity clinical note that supports Level 5 billing. You must NOT give medical advice, diagnosis, reassurance, or interpretation. Only collect and confirm information for the licensed provider.
+
+---
+
+PERSONALITY & TONE:
+- Professional, neutral, and empathetic.
+- Speak clearly, like a physician.
+- Ask only ONE short question at a time (≤ 20 words).
+- Maintain natural pace and vary phrasing (no repetition within 5 turns).
+- Use calm empathy if patient is distressed, but stay objective.
+
+---
+
+LANGUAGE & AUDIO RULES:
+- Language: English only. If patient speaks another language, say: "I'm sorry—we support English only. Your provider will discuss details."
+- If audio unclear: "I apologize, could you please repeat that?"
+- When repeating numbers: speak each digit individually (e.g., "four-one-five").
+
+---
+
+SAFETY & ESCALATION:
+- Never provide advice, diagnosis, or reassurance.
+- If asked a medical question, reply with: "Your provider will discuss this with you." or "I'm here only to collect information for your provider."
+- If patient mentions red-flag symptoms (chest pain, trouble breathing, severe bleeding, loss of consciousness, slurred speech, weakness, facial droop, suicidal thoughts):
+  1) Trigger red_flag_detected(patient_exact_words)
+  2) Say: "This seems a critical symptom. I am raising a critical alert to your provider immediately. Please stay where you are, and help will be with you shortly."
+  3) Stop intake until escalation logic resumes.
+
+---
+
+CONVERSATION PHASES (follow strictly in order):
+1) Chief Concern: Start with: "Hello, I am HealthYoda. I’ll be assisting you with a brief intake process for your provider. What brings you in today?"
+2) Extended HPI: Collect onset, duration, location, quality, severity (0–10), course, assoc. sx, aggravating/relieving, prior episodes, impact, patient perspective."
+3) System-specific follow-ups
+4) ROS: cover ≥10 systems
+5) PMFSH: chronic conditions, surgeries, meds, allergies, social, family history
+6) Summarize & Close: Confirm and close with: "Thank you. I’ve recorded this complete clinical information. Your provider will review it with you shortly."
+`;
 
           console.log('Final session instructions:', enforcedInstructions);
 
@@ -1251,11 +1369,9 @@ Example 3 - Red flag:
 
     const realtimeWs = this.connections.get(sessionId);
     if (realtimeWs) {
-      setTimeout(() => {
-        console.log('▶️ Triggering initial agent response after frontend link');
-        // Use explicit response.create (manual) to avoid auto responses
-        this.sendExplicitResponseCreate(sessionId, undefined, 'You are a medical intake assistant. Greet the patient briefly and begin with Chief Concern like “What brings you in today?” ', ['audio','text'], 200);
-      }, 500);
+      // Remove 500ms delay - trigger agent response immediately to prevent audio timing issues
+      console.log('▶️ Triggering initial agent response after frontend link');
+      this.sendExplicitResponseCreate(sessionId, undefined, 'You are a medical intake assistant. Greet the patient briefly and begin with Chief Concern like "What brings you in today?" ', ['audio','text'], 200);
     }
   }
 
@@ -1276,6 +1392,47 @@ Example 3 - Red flag:
       } catch (error: any) {
         console.error(`Error ending session ${sessionId}:`, error.message);
       }
+    }
+
+    // DEBUG: Log all tracked usage data
+    const usageTracker = this.sessionUsageTracker.get(sessionId);
+    if (usageTracker) {
+      console.log(`🔍 TOKEN USAGE DEBUG for ${sessionId}:`, {
+        inputAudioDuration: usageTracker.inputAudioDuration,
+        outputAudioDuration: usageTracker.outputAudioDuration,
+        textInputChars: usageTracker.textInputChars,
+        textOutputChars: usageTracker.textOutputChars,
+        model: usageTracker.model
+      });
+    } else {
+      console.log(`⚠️ No token usage tracker found for session ${sessionId}`);
+    }
+
+    // Save token usage data when session ends
+    const usageData = this.getSessionTokenUsage(sessionId);
+    console.log(`🔍 getSessionTokenUsage result for ${sessionId}:`, usageData);
+
+    // Force save even if cost is 0 - we want to track usage regardless
+    if (usageData) {
+      try {
+        console.log(`💰 Saving token usage for session ${sessionId}: cost=$${usageData.estimatedCost}, tokens=${usageData.inputAudioTokens + usageData.outputAudioTokens + usageData.textInputTokens + usageData.textOutputTokens}`);
+        await db.saveSessionTokenUsage({
+          session_id: usageData.sessionId,
+          model: usageData.model,
+          input_audio_tokens: usageData.inputAudioTokens,
+          output_audio_tokens: usageData.outputAudioTokens,
+          text_input_tokens: usageData.textInputTokens,
+          text_output_tokens: usageData.textOutputTokens,
+          input_audio_duration: usageData.inputAudioDuration,
+          output_audio_duration: usageData.outputAudioDuration,
+          estimated_cost: usageData.estimatedCost
+        });
+        console.log(`💰 ✅ Saved token usage for session ${sessionId}: $${usageData.estimatedCost}`);
+      } catch (usageError: any) {
+        console.error(`❌ Failed to save token usage for session ${sessionId}:`, usageError.message);
+      }
+    } else {
+      console.log(`⚠️ No token usage data to save for session ${sessionId} (usageData exists: ${!!usageData})`);
     }
 
     try {
@@ -1319,6 +1476,40 @@ Example 3 - Red flag:
     if (this.turnCounts.has(sessionId)) {
       this.turnCounts.delete(sessionId);
     }
+  }
+
+  // Get current session token usage estimation
+  public getSessionTokenUsage(sessionId: string): any {
+    const usageTracker = this.sessionUsageTracker.get(sessionId);
+    if (!usageTracker) return null;
+
+    const rates = this.TOKEN_RATES[usageTracker.model] || this.TOKEN_RATES['gpt-realtime-mini'];
+
+    // Calculate token estimates
+    const inputAudioTokens = Math.ceil(usageTracker.inputAudioDuration * rates.audioInput);
+    const outputAudioTokens = Math.ceil(usageTracker.outputAudioDuration * rates.audioOutput);
+    const textInputTokens = Math.ceil(usageTracker.textInputChars / 4); // ~4 chars per token
+    const textOutputTokens = Math.ceil(usageTracker.textOutputChars / 4);
+
+    // Calculate costs
+    const inputAudioCost = (inputAudioTokens / 1000) * rates.audioInputRate;
+    const outputAudioCost = (outputAudioTokens / 1000) * rates.audioOutputRate;
+    const textInputCost = (textInputTokens / 1000) * rates.textInputRate;
+    const textOutputCost = (textOutputTokens / 1000) * rates.textOutputRate;
+    const estimatedCost = inputAudioCost + outputAudioCost + textInputCost + textOutputCost;
+
+    return {
+      sessionId: usageTracker.sessionId,
+      model: usageTracker.model,
+      inputAudioTokens,
+      outputAudioTokens,
+      textInputTokens,
+      textOutputTokens,
+      inputAudioDuration: usageTracker.inputAudioDuration,
+      outputAudioDuration: usageTracker.outputAudioDuration,
+      estimatedCost: Math.round(estimatedCost * 10000) / 10000, // to 4 decimal places
+      lastUpdated: new Date().toISOString()
+    };
   }
 
   handleMessage(sessionId: string, data: Buffer): void {

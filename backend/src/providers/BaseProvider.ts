@@ -19,6 +19,7 @@ interface BaseProvider {
   handleMessage(sessionId: string, data: Buffer): void;
   getFunctionTools(): any[];
   getSession(sessionId: string): WebSocket | null;
+  getSessionTokenUsage(sessionId: string): any;
 }
 
 export type { BaseProvider, RealtimeConfig };
