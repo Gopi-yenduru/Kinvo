@@ -798,15 +798,15 @@ app.get('/api/sessions', async (req: any, res: any) => {
         // Only try to get cost for completed sessions
         if (session.status === 'completed') {
           try {
-            console.log(`🔍 DEBUG: Checking token usage for completed session ${session.id}`);
+            //console.log(`🔍 DEBUG: Checking token usage for completed session ${session.id}`);
             // Try to get token usage from database
             const tokenUsageList = await db.getSessionTokenUsage(session.id);
-            console.log(`🔍 DEBUG: Found ${tokenUsageList?.length || 0} token usage records for session ${session.id}`);
+            //console.log(`🔍 DEBUG: Found ${tokenUsageList?.length || 0} token usage records for session ${session.id}`);
 
             // Get the latest token usage entry (in case multiple)
             if (tokenUsageList && tokenUsageList.length > 0) {
               const latestUsage = tokenUsageList[0]; // Already ordered by timestamp DESC
-              console.log(`🔍 DEBUG: Latest token usage for ${session.id}: estimated_cost=${latestUsage.estimated_cost}`);
+              //console.log(`🔍 DEBUG: Latest token usage for ${session.id}: estimated_cost=${latestUsage.estimated_cost}`);
               if (latestUsage.estimated_cost > 0) {
                 estimatedCost = latestUsage.estimated_cost;
               }

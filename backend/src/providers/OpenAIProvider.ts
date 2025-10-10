@@ -295,6 +295,30 @@ private estimateIntakeProgress(turnCount: number): string {
           },
           required: ['symptoms', 'severity']
         }
+      },
+      {
+        type: 'function',
+        name: 'end_session',
+        description: 'End the medical intake session when patient expressly consents or when intake is naturally complete',
+        parameters: {
+          type: 'object',
+          properties: {
+            consent_given: {
+              type: 'boolean',
+              description: 'Must be true - patient explicitly confirmed they want to end session'
+            },
+            reason: {
+              type: 'string',
+              enum: ['intake_complete', 'patient_request', 'patient_uncomfortable', 'timeout'],
+              description: 'Reason for ending session'
+            },
+            summary_needed: {
+              type: 'boolean',
+              description: 'Whether to provide a summary before ending'
+            }
+          },
+          required: ['consent_given', 'reason']
+        }
       }/* ,
       {
         type: 'function',
@@ -696,6 +720,20 @@ private estimateIntakeProgress(turnCount: number): string {
 
         case 'response.audio_transcript.delta':
           {
+            // If we get transcript delta messages, send them to frontend if there's a new response starting
+            if (event.delta) {
+              const wsToFront = this.frontendSockets.get(sessionId);
+              if (wsToFront) {
+                wsToFront.send(JSON.stringify({
+                  type: 'agent_transcript_delta',
+                  text: event.delta,
+                  timestamp: new Date().toISOString(),
+                  // Include response start time to track which response this belongs to
+                  responseStartTime: this.responseStartTime.get(sessionId)
+                }));
+              }
+            }
+
             const existing = this.responseAudioTranscriptBuffers.get(sessionId) || '';
             this.responseAudioTranscriptBuffers.set(sessionId, existing + (event.delta || ''));
           }
@@ -845,6 +883,19 @@ private estimateIntakeProgress(turnCount: number): string {
           }
           break;
 
+        case 'end_session':
+          this.handleEndSession(args, sessionId);
+          if (frontendWs) {
+            frontendWs.send(JSON.stringify({
+              type: 'end_session',
+              consent_given: args.consent_given,
+              reason: args.reason,
+              summary_needed: args.summary_needed,
+              timestamp: new Date().toISOString()
+            }));
+          }
+          break;
+
         // case 'save_response':
         //   this.handleSaveResponse({ ...args, sessionId });
         //   break;
@@ -860,6 +911,38 @@ private estimateIntakeProgress(turnCount: number): string {
       console.error(`Error handling function call: ${error}`);
     }
     
+  }
+
+  private handleEndSession(args: any, sessionId: string): void {
+    console.log(`🏁 End Session requested for ${sessionId}:`, args);
+
+    if (!args.consent_given) {
+      console.log(`❌ End session request denied - no consent given for ${sessionId}`);
+      return;
+    }
+
+    try {
+      // Log the end session event
+      db.insertAuditLog({
+        action: 'session_ended_by_agent',
+        details: JSON.stringify({
+          reason: args.reason || 'unknown',
+          summary_needed: args.summary_needed || false,
+          consent_given: args.consent_given
+        }),
+        session_id: sessionId
+      });
+
+      // End the session after a short delay for natural flow
+      setTimeout(async () => {
+        console.log(`🏁 Automatically ending session ${sessionId} by agent request`);
+        await this.endSession(sessionId);
+      }, 2000); // 2 second delay
+
+      console.log(`✅ Session ${sessionId} will end automatically in 2 seconds`);
+    } catch (error) {
+      console.error(`Failed to handle end session request for ${sessionId}:`, error);
+    }
   }
 
   private handleRedFlagDetection(args: any, sessionId: string): void {
@@ -1053,7 +1136,9 @@ SYSTEM RULES (READ CAREFULLY):
 
 3) If you detect an urgent symptom, call the red_flag_detected(...) function immediately.
 
-4) Always respond in English, keep replies concise, and ask one question at a time.
+4) ENDING THE SESSION: Always get explicit patient consent before ending. When you have completed collecting all required information, summarize briefly and ask for confirmation. If patient says YES/CONFIRMS/OKAYS the summary, call end_session({"consent_given": true, "reason": "intake_complete"}). If patient says NO or asks to end early for any reason, call end_session({"consent_given": true, "reason": "patient_request"}). If they decline to end, continue asking questions.
+
+5) Always respond in English, keep replies concise, and ask one question at a time.
 
 EXAMPLES (few-shot):
 Example 1 - Simple intake:

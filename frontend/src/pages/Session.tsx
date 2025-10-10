@@ -57,6 +57,15 @@ const Session: React.FC = () => {
     freshAudioBuffer: ''
   });
 
+  // Track transcript response freshness to sync text with audio
+  const transcriptTrackerRef = useRef<{
+    [responseStartTime: string]: {
+      transcriptChunks: string;
+      hasBeenDisplayed: boolean;
+      finalTranscript?: string;
+    };
+  }>({});
+
   // Timer effect
   useEffect(() => {
     let interval: number;
@@ -216,18 +225,34 @@ const Session: React.FC = () => {
             // }
             break;
           case 'agent_transcript_delta':
-              // Handle agent transcript deltas from backend
-              console.log('🎵 Frontend received agent_transcript_delta:', message.text);
-              if (message.text && message.text.trim()) {
-                console.log('📝 Processing agent delta:', message.text);
-                // Preemptively show agent is speaking when text starts streaming
-                setSpeaker('Agent');
-                // For agent deltas, always accumulate - don't check immediate sentence first
-                // The backend will tell us when the response is complete
-                processTranscriptDelta('Agent', message.text, message.timestamp);
+              // Handle agent transcript deltas from backend with response syncing
+              console.log('🎵 Frontend received agent_transcript_delta:', message.text, 'responseStartTime:', message.responseStartTime);
+              if (message.text && message.text.trim() && message.responseStartTime) {
+                console.log('📝 Processing agent delta for response:', message.responseStartTime);
+
+                const responseKey = message.responseStartTime.toString();
+
+                // Initialize tracker for this response if it doesn't exist
+                if (!transcriptTrackerRef.current[responseKey]) {
+                  transcriptTrackerRef.current[responseKey] = {
+                    transcriptChunks: '',
+                    hasBeenDisplayed: false,
+                    finalTranscript: undefined
+                  };
+                }
+
+                // Accumulate the transcript chunk
+                const tracker = transcriptTrackerRef.current[responseKey];
+                tracker.transcriptChunks += message.text;
+
+                console.log('🎭 Agent transcript chunk accumulated for response', responseKey,
+                  ':', tracker.transcriptChunks.length, 'chars');
+
+                // Don't show in UI yet - wait for audio to play
+                setSpeaker('Agent'); // Show agent is speaking indicator
               } else {
-                console.log('⚠️ Agent transcript delta is empty or null:', message);
-            }
+                console.log('⚠️ Agent transcript delta is empty or missing responseStartTime:', message);
+              }
             break;
           case 'response.audio_transcript.delta':
             // Handle OpenAI's response.audio_transcript.delta - DISABLED to prevent double processing
@@ -237,16 +262,39 @@ const Session: React.FC = () => {
             // }
             break;
           case 'agent_transcript_complete':
-            // Handle complete agent transcripts
-            if (message.transcript) {
-              // Clear any pending agent sentence first
+            // Store complete transcript for display, but only show it if not already displayed via delayed mechanism
+            if (message.transcript && message.timestamp) {
+              const responseKey = message.timestamp;
+
+              // Initialize tracker if it doesn't exist with complete transcript
+              if (!transcriptTrackerRef.current[responseKey]) {
+                transcriptTrackerRef.current[responseKey] = {
+                  transcriptChunks: '',
+                  hasBeenDisplayed: false,
+                  finalTranscript: message.transcript.trim()
+                };
+              } else {
+                // Update with complete transcript (better than accumulated chunks)
+                transcriptTrackerRef.current[responseKey].finalTranscript = message.transcript.trim();
+              }
+
+              console.log('📝 Stored complete transcript for response:', responseKey, 'length:', message.transcript.length);
+
+              // Clear any pending agent sentences
               if (pendingSentence && pendingSentence.speaker === 'Agent') {
                 clearTimeout(pendingSentence.timeoutId);
                 setPendingSentence(null);
               }
               setSpeaker('');
-              // Add complete transcript directly
-              addSentenceToConversationLog('Agent', message.transcript, 'text', message.timestamp);
+
+              // If this transcript hasn't been displayed through delayed mechanism, show it now
+              // This covers cases where agent_response_complete might not fire properly
+              const tracker = transcriptTrackerRef.current[responseKey];
+              if (!tracker.hasBeenDisplayed && tracker.finalTranscript?.trim()) {
+                console.log('🎭 Displaying agent transcript immediately (fallback)', responseKey);
+                addSentenceToConversationLog('Agent', tracker.finalTranscript, 'text', message.timestamp);
+                tracker.hasBeenDisplayed = true;
+              }
             }
             break;
           case 'conversation.item.input_audio_transcription.delta':
@@ -282,15 +330,12 @@ const Session: React.FC = () => {
             break;
           case 'response.content_part.done':
             setSpeaker('');
-            // Handle complete transcript from OpenAI (more reliable than delta accumulation)
-            if (message.part && message.part.transcript && message.part.type === 'audio') {
-              // Clear any pending agent sentences since we have the complete transcript
-              if (pendingSentence && pendingSentence.speaker === 'Agent') {
-                clearTimeout(pendingSentence.timeoutId);
-                setPendingSentence(null);
-              }
-              // Add the complete transcript directly
-              addSentenceToConversationLog('Agent', message.part.transcript, 'text', message.timestamp);
+            // DISABLED: Don't display OpenAI content part transcripts - use delayed display only
+            console.log('⚠️ Ignoring response.content_part.done to prevent stale display');
+            // Clear any pending agent sentences
+            if (pendingSentence && pendingSentence.speaker === 'Agent') {
+              clearTimeout(pendingSentence.timeoutId);
+              setPendingSentence(null);
             }
             break;
           case 'response.output_item.done':
@@ -318,8 +363,39 @@ const Session: React.FC = () => {
               setIsSpeakingAgent(false);
               // Play only the freshest accumulated audio, discard stale ones
               playAccumulatedAudio(message.timestamp);
+
+              // Check if we have a transcript tracker for this response that should be displayed
+              if (message.timestamp && transcriptTrackerRef.current[message.timestamp]) {
+                const transcriptData = transcriptTrackerRef.current[message.timestamp];
+                if (!transcriptData.hasBeenDisplayed) {
+                  // Prefer complete transcript over accumulated chunks
+                  const finalText = transcriptData.finalTranscript || transcriptData.transcriptChunks.trim();
+                  if (finalText) {
+                    // Display the transcript now that audio is playing!
+                    console.log('🎭 Displaying delayed transcript for response:', message.timestamp,
+                      'Text:', finalText.length, 'chars');
+                    addSentenceToConversationLog('Agent', finalText, 'text', message.timestamp);
+                    transcriptData.hasBeenDisplayed = true;
+                  }
+                }
+              }
+
               // Finalize any pending sentence
               finalizePendingSentences();
+
+              // Clean up any stale transcript trackers (responses that didn't get played)
+              const responseTimestamp = message.timestamp ? new Date(message.timestamp).getTime() : Date.now();
+              Object.keys(transcriptTrackerRef.current).forEach(key => {
+                const trackerTime = new Date(key).getTime();
+                // Remove trackers for responses older than the current one by 5 seconds
+                if (trackerTime < (responseTimestamp - 5000)) {
+                  const tracker = transcriptTrackerRef.current[key];
+                  if (!tracker.hasBeenDisplayed) {
+                    console.log('🧹 Cleaning up stale transcript tracker for response:', key);
+                    delete transcriptTrackerRef.current[key];
+                  }
+                }
+              });
             break;
           case 'patient_transcript':
             if (message.transcript) {
@@ -337,6 +413,54 @@ const Session: React.FC = () => {
             // Finalize any pending sentences before ending session
             finalizePendingSentences();
             addToConversationLog('System', 'Session completed successfully', 'system');
+            break;
+          case 'end_session':
+            // Handle automatic session ending by agent function call
+            console.log('🏁 Agent initiated session end:', message);
+            if (message.consent_given && message.consent_given === true) {
+              // Add system message indicating AI-initiated completion
+              addToConversationLog('System', 'Medical intake completed by AI agent', 'system');
+
+              // Close WebSocket immediately to prevent further messages after session end
+              if (wsRef.current) {
+                console.log('🔌 Closing WebSocket to prevent race conditions');
+                wsRef.current.close(1000, 'Session auto-ended by agent');
+                wsRef.current = null;
+              }
+
+              // Clear any error messages to prevent race condition errors
+              setErrorMessage('');
+
+              // Automatically end the session after a brief delay for natural flow
+              setTimeout(() => {
+                console.log('⏰ Auto-ending session after 2-second delay');
+                // Avoid calling full endSession() which might send another WebSocket message
+                // Just update UI state directly
+                setSessionStatus('completed');
+                setConnectionStatus('Disconnected'); // Update connection status too
+                setIsRecording(false);
+                isRecordingRef.current = false;
+                if (streamRef.current) {
+                  streamRef.current.getTracks().forEach(track => track.stop());
+                  streamRef.current = null;
+                }
+                // Close audio context after a delay
+                setTimeout(() => {
+                  if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+                    try {
+                      audioContextRef.current.close();
+                      audioContextRef.current = null;
+                      gainNodeRef.current = null;
+                    } catch (error) {
+                      console.error('Error closing audio context:', error);
+                    }
+                  }
+                }, 2000);
+              }, 2000);
+            } else {
+              console.warn('⚠️ Agent attempted to end session without consent - ignoring');
+              // Don't end session if no explicit consent
+            }
             break;
           case 'request_session_end':
             // Finalize any pending sentences before ending session
@@ -907,6 +1031,8 @@ const Session: React.FC = () => {
       lastPlayedResponseStart: undefined,
       freshAudioBuffer: ''
     };
+    // Clear transcript trackers
+    transcriptTrackerRef.current = {};
     isPlayingRef.current = false;
     // Clean up Retell Web Client if exists
     if (retellWebClientRef.current) {
