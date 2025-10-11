@@ -185,6 +185,57 @@ export class DataService {
         return result;
     }
 
+    public async getSessionsPaginated(page: number = 1, limit: number = 50, status?: string): Promise<{ sessions: Session[], total: number, totalPages: number, currentPage: number }> {
+        const offset = (page - 1) * limit;
+
+        // Get total count for pagination metadata
+        let countQuery = 'SELECT COUNT(*) as count FROM sessions';
+        let params: any[] = [];
+
+        if (status) {
+            countQuery += ' WHERE status = @status';
+            params.push({ name: 'status', type: sql.VarChar(50), value: status });
+        }
+
+        const countResult = await this.runQueryWithInput<{ count: number }>(countQuery, params);
+        const total = countResult[0]?.count || 0;
+        const totalPages = Math.ceil(total / limit);
+
+        // Get paginated sessions
+        let dataQuery = `
+            SELECT *
+            FROM sessions
+            WHERE 1=1
+        `;
+
+        const dataParams: any[] = [
+            { name: 'offset', type: sql.Int, value: offset },
+            { name: 'limit', type: sql.Int, value: limit }
+        ];
+
+        if (status) {
+            dataQuery += ' AND status = @status';
+            dataParams.push({ name: 'status', type: sql.VarChar(50), value: status });
+        }
+
+        dataQuery += ' ORDER BY start_time DESC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY';
+
+        const sessions = await this.runQueryWithInput<Session>(dataQuery, dataParams);
+
+        // Cache each session individually for future lookups
+        sessions.forEach(session => {
+            const sessionCacheKey = `session:${session.id}`;
+            cacheService.set(sessionCacheKey, session);
+        });
+
+        return {
+            sessions,
+            total,
+            totalPages,
+            currentPage: page
+        };
+    }
+
     public async getSessionCounts(): Promise<{ totalSessions: number, completedToday: number }> {
         const cacheKey = `${CACHE_PATTERNS.SESSION_COUNTS}`;
 
@@ -549,10 +600,46 @@ export class DataService {
         return result;
     }
 
-    public async getRecentRedFlagEvents(): Promise<RedFlagEvent[]> {
-        return this.runQuery<RedFlagEvent>(`
-      SELECT * FROM red_flag_events WHERE timestamp > DATEADD(HOUR, -24, GETDATE()) ORDER BY timestamp DESC
-    `);
+    public async getRecentRedFlagEvents(hoursBack: number = 24): Promise<RedFlagEvent[]> {
+        const cacheKey = `${CACHE_PATTERNS.RED_FLAGS}:recent_${hoursBack}hrs`;
+
+        // Try cache first
+        const cached = cacheService.get<RedFlagEvent[]>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Query recent red flag events directly (much more efficient than loading all sessions)
+        const result = await this.runQuery<RedFlagEvent>(`
+            SELECT * FROM red_flag_events
+            WHERE timestamp > DATEADD(HOUR, -${hoursBack}, GETDATE())
+            ORDER BY timestamp DESC
+        `);
+
+        // Cache the result for 5 minutes
+        cacheService.set(cacheKey, result, 5 * 60 * 1000);
+        return result;
+    }
+
+    public async getRedFlagEventsCount(hoursBack: number = 24): Promise<number> {
+        const cacheKey = `${CACHE_PATTERNS.RED_FLAGS}:count_${hoursBack}hrs`;
+
+        // Try cache first
+        const cached = cacheService.get<number>(cacheKey);
+        if (cached !== null) {
+            return cached;
+        }
+
+        const result = await this.runQuery<{
+            count: number
+        }>(`
+            SELECT COUNT(*) as count FROM red_flag_events
+            WHERE timestamp > DATEADD(HOUR, -${hoursBack}, GETDATE())
+        `);
+
+        const count = result[0]?.count || 0;
+        cacheService.set(cacheKey, count, 5 * 60 * 1000);
+        return count;
     }
 
     public async saveRedFlagEvent(event: Omit<RedFlagEvent, 'id' | 'timestamp'>): Promise<void> {
@@ -1024,6 +1111,57 @@ export class DataService {
             });
         });
         return categories;
+    }
+
+    // Database optimization methods
+    public async createPerformanceIndexes(): Promise<void> {
+        const indexes = [
+            {
+                name: 'IX_sessions_start_time_status',
+                table: 'sessions',
+                columns: 'start_time DESC, status'
+            },
+            {
+                name: 'IX_sessions_status',
+                table: 'sessions',
+                columns: 'status'
+            },
+            {
+                name: 'IX_conversation_logs_session_id_timestamp',
+                table: 'conversation_logs',
+                columns: 'session_id, timestamp'
+            },
+            {
+                name: 'IX_red_flag_events_timestamp',
+                table: 'red_flag_events',
+                columns: 'timestamp DESC'
+            }
+        ];
+
+        for (const index of indexes) {
+            try {
+                // Check if index exists
+                const existingIndex = await this.runQuery(`
+                    SELECT name FROM sys.indexes
+                    WHERE object_id = OBJECT_ID('${index.table}')
+                    AND name = '${index.name}'
+                `);
+
+                if (existingIndex.length === 0) {
+                    await this.runQuery(`
+                        CREATE NONCLUSTERED INDEX ${index.name}
+                        ON ${index.table} (${index.columns})
+                        WITH (ONLINE = ON, FILLFACTOR = 90)
+                    `);
+                    console.log(`✅ Created index: ${index.name}`);
+                } else {
+                    console.log(`✓ Index already exists: ${index.name}`);
+                }
+            } catch (error: any) {
+                console.error(`Failed to create index ${index.name}:`, error.message);
+                // Continue with other indexes if one fails
+            }
+        }
     }
 }
 

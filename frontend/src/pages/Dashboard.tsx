@@ -213,7 +213,7 @@ const Dashboard: React.FC = () => {
               </div>
               <div className="stat-content">
                 <div className="stat-number">{stats.redFlags}</div>
-                <div className="stat-label">Red Flags</div>
+                <div className="stat-label">Red Flags (Last 24hrs)</div>
                 <div className="stat-change neutral">
                   <i className="fas fa-eye me-1"></i>
                   Requires attention
