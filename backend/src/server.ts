@@ -934,12 +934,28 @@ app.get('/api/sessions/:sessionId/transcript', async (req: any, res: any) => {
   }
 });
 
-// Generate report using OpenAI
+// Generate report using OpenAI with database caching
 app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) => {
   try {
     const { sessionId } = req.params;
 
-    // Get settings for API key   
+    // Step 1: Check if report already cached in database
+    const cachedReport = await db.getReport(sessionId);
+
+    if (cachedReport) {
+      console.log(`📋 Returning cached report for session ${sessionId} (generated ${cachedReport.generated_at})`);
+
+      return res.json({
+        report: cachedReport.report_content,
+        cached: true,
+        generatedAt: cachedReport.generated_at
+      });
+    }
+
+    // Step 2: Generate new report using OpenAI
+    console.log(`🤖 Generating new report for session ${sessionId}`);
+
+    // Get settings for API key
     const settings = await db.getAllSettings();
     const setting = settings && settings.length > 0 ? settings[0] : null;
     const apiKey = setting?.openai_api_key || process.env.OPENAI_API_KEY;
@@ -956,13 +972,10 @@ app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) 
     if (!conversationLogs || conversationLogs.length === 0) {
       return res.status(404).json({ error: 'No conversation data found for this session' });
     }
-    console.log(`📝 Generating report for session ${sessionId} with ${conversationLogs.length} conversation lines`);
 
     // Get session info and red flags
     const sessionInfo = await db.getSession(sessionId);
-    console.log(' Session info:', sessionInfo);
     const redFlagEvents = await db.getRedFlagEvents(sessionId);
-    console.log(` Session has ${redFlagEvents?.length || 0} red flag events`);
 
     // Format conversation for prompt
     const conversationText = conversationLogs.map((log: any) =>
@@ -1001,21 +1014,40 @@ Make the report professional, concise, and suitable for medical records.`;
       temperature: 0.3,
     });
 
-    const report = completion.choices[0]?.message?.content?.trim();
+    const reportContent = completion.choices[0]?.message?.content?.trim();
 
-    if (!report) {
+    if (!reportContent) {
       return res.status(500).json({ error: 'Failed to generate report from OpenAI' });
     }
 
-    // Log audit event   
+    // Step 3: Cache the report in database
+    await db.saveReport({
+      session_id: sessionId,
+      report_content: reportContent,
+      generated_at: new Date(),
+      cost: 0.03, // Approximate GPT-4 cost
+      version: 1
+    });
+
+    console.log(`💾 Cached report for session ${sessionId} in database`);
+
+    // Log audit event
     await db.insertAuditLog({
       action: 'report_generated',
-      details: JSON.stringify({ lines: conversationLogs.length }),
+      details: JSON.stringify({
+        lines: conversationLogs.length,
+        cached: false
+      }),
       session_id: sessionId,
       ip_address: req.ip || null
     });
 
-    res.json({ report });
+    // Return newly generated report
+    res.json({
+      report: reportContent,
+      cached: false,
+      generatedAt: new Date()
+    });
 
   } catch (error: any) {
     console.error('Failed to generate report:', error);

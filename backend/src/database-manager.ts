@@ -92,6 +92,15 @@ export interface SessionTokenUsage {
     timestamp: Date;
 }
 
+export interface Report {
+    id: number;
+    session_id: string;
+    report_content: string;
+    generated_at: Date;
+    cost: number | null;
+    version: number;
+}
+
 export interface User {
   id: string; // Actually uniqueidentifier/GUID in database
   username: string;
@@ -799,6 +808,29 @@ export class DataService {
 
         // Invalidate FHIR resource caches
         cacheService.invalidateByPattern('fhir-resources');
+    }
+
+    // --------------------- REPORTS ---------------------
+    public async getReport(sessionId: string): Promise<Report | null> {
+        const result = await this.runQueryWithInput<Report>(
+            `SELECT * FROM reports WHERE session_id = @session_id`,
+            [{ name: 'session_id', type: sql.VarChar, value: sessionId }]
+        );
+        return result.length > 0 ? result[0] : null;
+    }
+
+    public async saveReport(report: Omit<Report, 'id'>): Promise<void> {
+        await this.runQueryWithInput(
+            `INSERT INTO reports (session_id, report_content, generated_at, cost, version)
+             VALUES (@session_id, @report_content, @generated_at, @cost, @version)`,
+            [
+                { name: 'session_id', type: sql.VarChar, value: report.session_id },
+                { name: 'report_content', type: sql.VarChar(sql.MAX), value: report.report_content },
+                { name: 'generated_at', type: sql.DateTime, value: report.generated_at },
+                { name: 'cost', type: sql.Decimal(10, 6), value: report.cost },
+                { name: 'version', type: sql.Int, value: report.version }
+            ]
+        );
     }
 
     // --------------------- INTAKE RESPONSES ---------------------

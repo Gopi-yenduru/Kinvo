@@ -34,6 +34,8 @@ const Sessions: React.FC = () => {
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportContent, setReportContent] = useState<string>('');
   const [reportSessionId, setReportSessionId] = useState<string>('');
+  const [isReportCached, setIsReportCached] = useState<boolean>(false);
+  const [reportGeneratedAt, setReportGeneratedAt] = useState<string>('');
 
   const navigate = useNavigate();
 
@@ -96,6 +98,30 @@ const Sessions: React.FC = () => {
       if (data.report) {
         setReportContent(data.report);
         setReportSessionId(sessionId);
+        setIsReportCached(data.cached || false);
+
+        // Format timestamp for display
+        if (data.generatedAt) {
+          const generatedDate = new Date(data.generatedAt);
+          const now = new Date();
+          const diffMs = now.getTime() - generatedDate.getTime();
+          const diffMins = Math.floor(diffMs / 60000);
+          const diffHours = Math.floor(diffMins / 60);
+          const diffDays = Math.floor(diffHours / 24);
+
+          let timeMsg = '';
+          if (diffMins < 1) {
+            timeMsg = 'just now';
+          } else if (diffMins < 60) {
+            timeMsg = `${diffMins} minutes ago`;
+          } else if (diffHours < 24) {
+            timeMsg = `${diffHours} hours ago`;
+          } else {
+            timeMsg = `${diffDays} days ago`;
+          }
+          setReportGeneratedAt(timeMsg);
+        }
+
         setShowReportModal(true);
       } else {
         setError('Failed to generate report');
@@ -382,6 +408,18 @@ const Sessions: React.FC = () => {
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2 className="modal-title">Medical Intake Report</h2>
+              <div className="modal-subtitle" style={{
+                fontSize: '0.875rem',
+                color: isReportCached ? '#2563eb' : '#059669',
+                fontWeight: '500',
+                marginTop: '0.25rem'
+              }}>
+                {isReportCached ? (
+                  <>📋 Report generated {reportGeneratedAt}</>
+                ) : (
+                  <>✨ Report generated {reportGeneratedAt}</>
+                )}
+              </div>
               <button className="modal-close" onClick={closeReportModal}>
                 ×
               </button>
