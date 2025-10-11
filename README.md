@@ -49,6 +49,11 @@ A revolutionary AI-powered medical intake system with real-time voice processing
 - **Speakers/Headphones**: Audio output device for AI voice responses
 - **Internet**: Stable broadband connection (minimum 1 Mbps upload/download)
 
+### **Database Requirements**
+- **SQL Server**: Microsoft SQL Server 2019 or later (or Azure SQL Database)
+- **Database Access**: Network connectivity to SQL Server instance
+- **Permissions**: Database user with read/write permissions on target database
+
 ## 🚀 Quick Start
 
 ### **Option 1: Automated Setup (Recommended)**
@@ -114,8 +119,17 @@ OPENAI_API_KEY=your_openai_api_key_here
 PORT=3001
 NODE_ENV=development
 
-# Database Configuration
-DATABASE_PATH=./data/medical_intake.db
+# Database Configuration (SQL Server)
+# Database connection is configured in src/dbConfig.ts
+# Update the connection details in dbConfig.ts for your environment
+
+# Security Configuration
+SESSION_SECRET=your_session_secret_here
+JWT_SECRET=your_jwt_secret_here
+
+# Optional: For healthcare compliance logging
+AUDIT_LOG_ENABLED=true
+HOSPITAL_SYSTEM_ID=your_hospital_system_id
 
 # CORS Configuration
 FRONTEND_URL=http://localhost:5173
@@ -170,7 +184,10 @@ Pre-Consultation/
 │   └── src/
 │       ├── server.ts        # Express server setup
 │       ├── realtime.ts      # OpenAI Realtime API integration
-│       ├── database.ts      # SQLite database management
+│       ├── database-manager.ts # SQL Server database management
+│       ├── dbConfig.ts      # Database connection configuration
+│       ├── dbconnection.ts  # Database connection pool
+│       ├── auth.ts          # Authentication middleware
 │       └── constants.ts     # Application constants
 │
 └── frontend/                # React/TypeScript Frontend
@@ -302,6 +319,56 @@ cat backend/.env | grep OPENAI_API_KEY
 - Ensure sufficient RAM (8GB recommended)
 - Use wired internet connection when possible
 - Keep browser updated
+
+## 🚀 Deployment
+
+### **Railway Deployment (Recommended)**
+
+1. **Connect Repository**: Link your GitHub repository to Railway
+2. **Environment Variables**: Set the following in Railway dashboard:
+   ```env
+   OPENAI_API_KEY=sk-your-openai-api-key
+   NODE_ENV=production
+   SESSION_SECRET=your-secure-session-secret
+   JWT_SECRET=your-secure-jwt-secret
+   AUDIT_LOG_ENABLED=true
+   HOSPITAL_SYSTEM_ID=your-hospital-id
+   ```
+3. **Database Configuration**: Railway will automatically detect the Dockerfile and deploy the application
+4. **Domain**: Railway provides a custom domain or you can use your own
+
+### **AWS ECS Deployment**
+
+1. **Build and Push Docker Image**:
+   ```bash
+   # Build the image
+   docker build -t medical-intake-voice-agent .
+
+   # Tag and push to ECR
+   aws ecr get-login-password --region REGION | docker login --username AWS --password-stdin ACCOUNT-ID.dkr.ecr.REGION.amazonaws.com
+   docker tag medical-intake-voice-agent:latest ACCOUNT-ID.dkr.ecr.REGION.amazonaws.com/medical-intake-voice-agent:latest
+   docker push ACCOUNT-ID.dkr.ecr.REGION.amazonaws.com/medical-intake-voice-agent:latest
+   ```
+
+2. **Update task-definition.json**: Replace `ACCOUNT-ID` and `REGION` with your AWS values
+
+3. **Deploy to ECS**:
+   ```bash
+   aws ecs update-service --cluster your-cluster --service your-service --task-definition medical-intake-voice-agent --force-new-deployment
+   ```
+
+### **Local Docker Deployment**
+
+```bash
+# Build and run locally
+docker build -t medical-intake-voice-agent .
+docker run -p 80:80 \
+  -e OPENAI_API_KEY=your-api-key \
+  -e NODE_ENV=production \
+  -e SESSION_SECRET=your-secret \
+  -e JWT_SECRET=your-jwt-secret \
+  medical-intake-voice-agent
+```
 
 ## 🔐 Security & Privacy
 

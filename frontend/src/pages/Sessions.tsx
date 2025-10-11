@@ -8,6 +8,7 @@ interface Session {
   status: string;
   red_flags_detected: number;
   patient_name?: string;
+  estimated_cost?: number;
 }
 
 const Sessions: React.FC = () => {
@@ -153,23 +154,46 @@ const Sessions: React.FC = () => {
         </div>
       )}
 
+      <div className="row g-3 g-md-4 mb-4">
+          <div className="col-12 col-sm-6 col-lg-4">
+            <div className="stat-card primary h-100">
+              <div className="stat-icon">
+                <i className="fas fa-clipboard-list"></i>
+              </div>
+              <div className="stat-content">
+                <div className="stat-number">{sessions.length}</div>
+                <div className="stat-label">Total Sessions</div>
+                
+              </div>
+            </div>
+          </div>
 
-      <div className="sessions-summary">
-        <div className="summary-stats">
-          <div className="stat-item">
-            <div className="stat-number">{sessions.length}</div>
-            <div className="stat-label">Total Sessions</div>
+          <div className="col-12 col-sm-6 col-lg-4">
+            <div className="stat-card success h-100">
+              <div className="stat-icon">
+                <i className="fas fa-check-circle"></i>
+              </div>
+              <div className="stat-content">
+                <div className="stat-number">{sessions.filter(s => s.red_flags_detected > 0).length}</div>
+                <div className="stat-label">With Red Flags</div>
+                
+              </div>
+            </div>
           </div>
-          <div className="stat-item">
-            <div className="stat-number">{sessions.filter(s => s.red_flags_detected > 0).length}</div>
-            <div className="stat-label">With Red Flags</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-number">{sessions.filter(s => s.status === 'completed').length}</div>
-            <div className="stat-label">Completed</div>
+
+          <div className="col-12 col-sm-12 col-lg-4">
+            <div className="stat-card warning h-100">
+              <div className="stat-icon">
+                <i className="fas fa-exclamation-triangle"></i>
+              </div>
+              <div className="stat-content">
+                <div className="stat-number">{sessions.filter(s => s.status === 'completed').length}</div>
+                <div className="stat-label">Completed</div>
+                
+              </div>
+            </div>
           </div>
         </div>
-      </div>
 
       <div className="sessions-content">
         {filteredSessions.length === 0 ? (
@@ -198,6 +222,7 @@ const Sessions: React.FC = () => {
                   <th>Status</th>
                   <th>Start Time</th>
                   <th>Duration</th>
+                  <th>Cost</th>
                   <th>Red Flags</th>
                   <th>Actions</th>
                 </tr>
@@ -222,6 +247,13 @@ const Sessions: React.FC = () => {
                       })}
                     </td>
                     <td>{getSessionDuration(session)}</td>
+                    <td>
+                      {session.estimated_cost != null ? (
+                        <span className="cost-text">${session.estimated_cost.toFixed(4)}</span>
+                      ) : (
+                        <span className="no-flags">—</span>
+                      )}
+                    </td>
                     <td>
                       {session.red_flags_detected > 0 ? (
                         <span className="red-flag-text">⚠️ {session.red_flags_detected}</span>

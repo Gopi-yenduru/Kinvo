@@ -1,0 +1,92 @@
+/* Medical AI Voice Website - CSS Variables */
+/* ======================================== */
+
+:root {
+  /* Color Palette */
+  --color-primary: #007bff;
+  --color-secondary: #6c757d;
+  --color-success: #28a745;
+  --color-danger: #dc3545;
+  --color-warning: #ffc107;
+  --color-info: #17a2b8;
+  --color-light: #f8f9fa;
+  --color-dark: #343a40;
+
+  /* Medical AI Voice Website Specific Colors */
+  --medical-blue: #4a90e2;
+  --medical-teal: #50e3c2;
+  --medical-background-light: #f5f7fa;
+  --medical-background-dark: #2c3e50;
+  --medical-text-dark: #333;
+  --medical-text-light: #f8f9fa;
+  --medical-border-light: #e0e6ed;
+  --medical-border-dark: #4a6072;
+
+  /* Font Stack */
+  --font-family-sans-serif: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --font-family-monospace: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --base-font-size: 16px;
+
+  /* Spacing Scale */
+  --spacer: 1rem;
+  --spacer-1: calc(var(--spacer) * 0.25);
+  --spacer-2: calc(var(--spacer) * 0.5);
+  --spacer-3: var(--spacer);
+  --spacer-4: calc(var(--spacer) * 1.5);
+  --spacer-5: calc(var(--spacer) * 3);
+  --spacer-6: calc(var(--spacer) * 4);
+  --spacer-7: calc(var(--spacer) * 5);
+  --spacer-8: calc(var(--spacer) * 6);
+
+  /* Border Radii */
+  --border-radius: 0.5rem;
+  --border-radius-sm: 0.25rem;
+  --border-radius-lg: 1rem;
+  --border-radius-pill: 50rem;
+
+  /* Shadow Variables */
+  --box-shadow-sm: 0 0.125rem 0.25rem rgba(51, 51, 51, 0.075);
+  --box-shadow: 0 0.5rem 1rem rgba(51, 51, 51, 0.15);
+  --box-shadow-lg: 0 1rem 3rem rgba(51, 51, 51, 0.175);
+  --box-shadow-inset: inset 0 1px 2px rgba(51, 51, 51, 0.075);
+
+  /* Dark Mode Variables */
+  --color-primary-dark: #66b3ff;
+  --color-secondary-dark: #99aab5;
+  --color-success-dark: #4cd964;
+  --color-danger-dark: #ff3b30;
+  --color-warning-dark: #ffcc00;
+  --color-info-dark: #5ac8fa;
+  --color-light-dark: #4a4a4a;
+  --color-dark-dark: #1c1c1c;
+
+  --medical-blue-dark: #66b3ff;
+  --medical-teal-dark: #6be8d0;
+  --medical-background-light-dark: #1a2a3a;
+  --medical-background-dark-dark: #0a1a2a;
+  --medical-text-dark-dark: #f8f9fa;
+  --medical-text-light-dark: #333;
+  --medical-border-light-dark: #3a4a5a;
+  --medical-border-dark-dark: #6a7a8a;
+}
+
+/* Dark Mode Support */
+[data-theme="dark"] {
+  --color-primary: var(--color-primary-dark);
+  --color-secondary: var(--color-secondary-dark);
+  --color-success: var(--color-success-dark);
+  --color-danger: var(--color-danger-dark);
+  --color-warning: var(--color-warning-dark);
+  --color-info: var(--color-info-dark);
+  --color-light: var(--color-light-dark);
+  --color-dark: var(--color-dark-dark);
+
+  --medical-blue: var(--medical-blue-dark);
+  --medical-teal: var(--medical-teal-dark);
+  --medical-background-light: var(--medical-background-light-dark);
+  --medical-background-dark: var(--medical-background-dark-dark);
+  --medical-text-dark: var(--medical-text-dark-dark);
+  --medical-text-light: var(--medical-text-light-dark);
+  --medical-border-light: var(--medical-border-light-dark);
+  --medical-border-dark: var(--medical-border-dark-dark);
+}

@@ -1,6 +1,8 @@
 import WebSocket from 'ws';
-import db from './database.js';
+import db from './database-manager.js';
 import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY, MEDICAL_INTAKE_INSTRUCTIONS, MEDICAL_INTAKE_INSTRUCTIONS_NEW } from './constants.js';
+import { BaseProvider } from './providers/BaseProvider.js';
+import ProviderFactory from './providers/ProviderFactory.js';
 
 interface RealtimeConfig {
   sessionId: string;
@@ -13,6 +15,7 @@ interface RealtimeConfig {
 }
 
 class RealtimeSessionManager {
+  private provider: BaseProvider = ProviderFactory.getProvider('openai'); // Default to OpenAI
   public connections: Map<string, any> = new Map();
   private frontendSockets: Map<string, any> = new Map(); // Track frontend WebSocket for each session
   private agentTextBuffers: Map<string, string> = new Map(); // Accumulate full agent responses
@@ -30,10 +33,23 @@ class RealtimeSessionManager {
  private AGENT_DEFER_MS = 800; // how long to wait for patient transcript before saving agent (tune as needed)
  private RECENT_PATIENT_WINDOW_MS = 1000; // how recent is considered 'patient activity'
 
+ setProvider(provider: BaseProvider) {
+   this.provider = provider;
+ }
+
+ getProvider(): BaseProvider {
+   return this.provider;
+ }
+
 private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: string) {
   try {
     console.log(`🤖 Saving agent transcript for ${sessionId}: "${transcript}"`);
-    db.saveConversationLog(sessionId, 'agent', transcript, { source: 'response.audio_transcript.done' }, ts);
+    db.saveConversationLog({
+      session_id: sessionId,
+      speaker: 'agent',
+      message: transcript,
+      audio_data: JSON.stringify({ source: 'response.audio_transcript.done' })
+    });
     // update lastAgent saved to avoid duplicates
     this.lastAgentResponse.set(sessionId, transcript);
   } catch (err) {
@@ -74,10 +90,16 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 
   async createRealtimeSession(config: RealtimeConfig): Promise<WebSocket | null> {
+    return this.provider.createRealtimeSession(config);
+  }
+
+  // Keep the old implementation as fallback or remove it
+  async _createRealtimeSessionOld(config: RealtimeConfig): Promise<WebSocket | null> {
     return new Promise((resolve, reject) => {
       try {
         // Check if API key is available
-        if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here') {
+        console.log(`🤖 OpenAI API key: ${process.env.OPENAI_API_KEY}`);
+        if (!config.apiKey && (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here')) {
           console.error('OpenAI API key not configured properly');
           reject(new Error('OpenAI API key is required but not configured'));
           return;
@@ -138,7 +160,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               },
               tools: this.getFunctionTools(),
               temperature: config.temperature || 0.1,
-              max_response_output_tokens: config.maxResponseLength
+              max_response_output_tokens: 'inf'
             }
           };
 
@@ -169,7 +191,8 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
               }
             }
 
-            this.handleRealtimeResponse(config.sessionId, data);
+            console.warn(`⚠️ Legacy WebSocket message received but no handler implemented in realtime.ts`);
+            console.warn(`This should be handled by the OpenAIProvider via delegation`);
           } catch (messageError) {
             console.error('Error handling message:', messageError);
             if (messageError instanceof Error && messageError.message.includes('JSON')) {
@@ -259,370 +282,8 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     ];
   }
 
-  // Handle responses from OpenAI Realtime API
-    private handleRealtimeResponse(sessionId: string, data: Buffer) {
-      try {
-        const event = JSON.parse(data.toString());
-        console.log(`Realtime event for ${sessionId}:`, event.type);
-    
-        const frontendWs = this.frontendSockets.get(sessionId);
-        if (!frontendWs) {
-          console.warn(`No frontend WebSocket found for session ${sessionId}`);
-          return;
-        }
-    
-        const nowMs = Date.now();
-    
-        function queueAgentSave(self: any, sid: string, transcript: string) {
-          const ts = new Date().toISOString();
-          const arr = self.pendingAgentSaves.get(sid) || [];
-          // create timer to flush after AGENT_DEFER_MS
-          const timer = setTimeout(() => {
-            // flush this queued item (if still present)
-            const pending = self.pendingAgentSaves.get(sid) || [];
-            // find and remove this specific item by timestamp+transcript
-            const idx = pending.findIndex((p: { transcript: string; ts: string; timer?: any }) =>
-              p.transcript === transcript && p.ts === ts
-            );
-            
-            if (idx !== -1) {
-              const item = pending.splice(idx, 1)[0];
-              if (pending.length > 0) self.pendingAgentSaves.set(sid, pending);
-              else self.pendingAgentSaves.delete(sid);
-              try {
-                console.log(`🕒 Agent defer timeout reached — saving agent for ${sid}`);
-                self.saveAgentTranscriptImmediate(sid, item.transcript, item.ts);
-              } catch (err) {
-                console.error('Error flushing deferred agent save:', err);
-              }
-            }
-          }, self.AGENT_DEFER_MS);
-    
-          arr.push({ transcript, ts, timer });
-          self.pendingAgentSaves.set(sid, arr);
-        }
-    
-        // helper to flush all pending agent saves immediately
-        const flushPendingAgents = (sid: string) => {
-          const pending = this.pendingAgentSaves.get(sid);
-          if (!pending || pending.length === 0) return;
-          // clear timers, save each immediately
-          for (const item of pending) {
-            try {
-              clearTimeout(item.timer);
-              this.saveAgentTranscriptImmediate(sid, item.transcript, item.ts);
-            } catch (err) {
-              console.error('Error saving deferred agent transcript during flush:', err);
-            }
-          }
-          this.pendingAgentSaves.delete(sid);
-        };
-    
-        // Event switch ----------------------------------------------------------------
-        switch (event.type) {
-           case 'session.updated':
-             console.log(`✅ Session updated successfully for ${sessionId} - AI is ready to respond`);
-             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
-             break;
-
-           case 'session.update':
-             console.log(`📝 Session update event received for ${sessionId} - AI is ready to respond`);
-             frontendWs.send(JSON.stringify({ type: 'session_ready', sessionId }));
-             break;
-
-           case 'error':
-             console.error(`❌ OpenAI error event for ${sessionId}:`, event.error);
-             if (event.error?.message) {
-               console.error(`Error message: ${event.error.message}`);
-             }
-             // Send error to frontend
-             frontendWs.send(JSON.stringify({
-               type: 'error',
-               message: event.error?.message || 'OpenAI API error',
-               timestamp: new Date().toISOString()
-             }));
-             break;
-    
-          case 'input_audio_buffer.speech_started':
-            console.log(`🎤 Patient started speaking (${sessionId})`);
-            // mark recent activity
-            this.recentPatientActivity.set(sessionId, nowMs);
-            // Capture timestamp on first delta (if not already set for this turn)
-            if (!this.patientTurnTimestamp.has(sessionId)) {
-              this.patientTurnTimestamp.set(sessionId, nowMs);
-            }
-            break;
-    
-          case 'input_audio_buffer.speech_stopped':
-            console.log(`🛑 Patient stopped speaking (${sessionId})`);
-            // mark recent activity — a transcription likely follows
-            this.recentPatientActivity.set(sessionId, nowMs);
-            break;
-    
-          case 'conversation.item.input_audio_transcription.delta':
-          case 'input_audio_transcription.delta':
-            // patient speech partial text — mark recent activity (transcription in progress)
-            this.recentPatientActivity.set(sessionId, nowMs);
-            // do not forward partials (keeping behavior consistent)
-            break;
-    
-          case 'conversation.item.input_audio_transcription.completed':
-          case 'input_audio_transcription.completed':
-            // Check if response is already in progress
-            if (this.responseInProgress.get(sessionId)) {
-              console.log(`⏳ Response already in progress for ${sessionId}, skipping transcription processing`);
-              return;
-            }
-
-            // Final patient transcript — save immediately and flush any queued agent
-            if (event.transcript || event.text) {
-              const transcript = event.transcript || event.text;
-
-              // Skip empty or very short transcripts
-              if (!transcript.trim() || transcript.trim().length < 3) {
-                console.log(`⚠️ Skipping empty/short transcript for ${sessionId}`);
-                return;
-              }
-
-              // Check for duplicate recent transcripts
-              const lastTranscript = this.lastPatientTranscript.get(sessionId);
-              if (lastTranscript === transcript.trim()) {
-                console.log(`🔄 Duplicate transcript detected for ${sessionId}, skipping`);
-                return;
-              }
-              this.lastPatientTranscript.set(sessionId, transcript.trim());
-
-              // Use stored timestamp if available, otherwise fall back to now
-              const storedTs = this.patientTurnTimestamp.get(sessionId);
-              const ts = storedTs ? new Date(storedTs).toISOString() : new Date().toISOString();
-              console.log(`👤 Patient said (final): "${transcript}"`);
-
-              // 🔍 BACKUP RED FLAG DETECTION - Check for red flags in patient transcript
-              //this.detectRedFlagsFromTranscript(sessionId, transcript, frontendWs);
-
-              // send to frontend
-              /* frontendWs.send(JSON.stringify({
-                type: 'patient_transcript',
-                transcript: transcript,
-                timestamp: ts
-              })); */
-
-              // 🔑 Now request the model's response manually
-            const realtimeWs = this.connections.get(sessionId);
-              if (realtimeWs) {
-                // Set response in progress before triggering
-                this.responseInProgress.set(sessionId, true);
-                console.log('▶️ Triggering model response after patient transcript');
-                realtimeWs.send(JSON.stringify({
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio","text"] // return speech + text
-                  }
-                }));
-              }
-
-              // Save to DB
-              try {
-                db.saveConversationLog(sessionId, 'patient', transcript, { type: 'speech_transcript' }, ts);
-                db.logAuditEvent && db.logAuditEvent('patient_speech', { transcript }, sessionId);
-              } catch (dbErr) {
-                console.error(`Failed to save patient transcript for ${sessionId}:`, dbErr);
-              }
-
-              // mark activity (so agent deferral can be cleared)
-              this.recentPatientActivity.set(sessionId, nowMs);
-
-              // flush any pending agent saves immediately (patient is now saved)
-              flushPendingAgents(sessionId);
-            }
-
-            // Reset timestamp after saving
-            this.patientTurnTimestamp.delete(sessionId);
-            this.lastPatientTranscript.delete(sessionId);
-            this.responseInProgress.delete(sessionId);
-            break;
-    
-          // Agent streaming (frontend playback and deltas) --------------------------------
-          case 'response.text.delta':
-            if (event.delta) {
-              frontendWs.send(JSON.stringify({
-                type: 'agent_text_stream',
-                text: event.delta,
-                timestamp: new Date().toISOString()
-              }));
-            }
-            break;
-    
-          case 'response.audio.delta':
-            if (event.delta) {
-              frontendWs.send(JSON.stringify({
-                type: 'agent_audio_chunk',
-                audio: event.delta,
-                timestamp: new Date().toISOString()
-              }));
-            }
-            break;
-    
-          case 'response.audio.done':
-            console.log(`🔊 Agent audio completed for ${sessionId}`);
-            frontendWs.send(JSON.stringify({
-              type: 'agent_response_complete',
-              timestamp: new Date().toISOString()
-            }));
-
-
-
-            // backup fallback using buffered text if transcript didn't arrive; we will still check pending queue later
-            try {
-              const fullAgentResponse = this.agentTextBuffers.get(sessionId) || '';
-              if (fullAgentResponse.trim() && !this.isDuplicateAgentResponse(sessionId, fullAgentResponse)) {
-                console.log(`📝 Backup agent response (audio.done): "${fullAgentResponse}"`);
-                db.saveConversationLog(sessionId, 'agent', fullAgentResponse, { source: 'response.audio.done (backup)' }, new Date().toISOString());
-                frontendWs.send(JSON.stringify({
-                  type: 'agent_transcript_complete',
-                  transcript: fullAgentResponse,
-                  timestamp: new Date().toISOString()
-                }));
-              }
-            } catch (err) {
-              console.error('Error in audio.done backup logic:', err);
-            }
-
-            // Clear response in progress flag
-            this.responseInProgress.set(sessionId, false);
-            break;
-    
-          case 'response.audio_transcript.delta':
-            if (event.delta) {
-              // frontendWs.send(JSON.stringify({
-              //   type: 'agent_transcript_delta',
-              //   text: event.delta,
-              //   timestamp: new Date().toISOString()
-              // }));
-            }
-            break;
-    
-          case 'response.audio_transcript.done':
-            if (event.transcript && !this.isDuplicateAgentResponse(sessionId, event.transcript)) {
-              const agentTranscript = event.transcript;
-              const agentTs = new Date().toISOString();
-
-              // determine if recent patient activity suggests patient transcript might be coming shortly
-              const lastPatientActivity = this.recentPatientActivity.get(sessionId) || 0;
-              const ageSincePatientMs = nowMs - lastPatientActivity;
-
-              if (lastPatientActivity && ageSincePatientMs < this.RECENT_PATIENT_WINDOW_MS) {
-                // Defer saving the agent for a short time to wait for patient transcription.
-                console.log(`⚖️ Deferring agent save for ${sessionId} (recent patient activity ${ageSincePatientMs}ms ago)`);
-                queueAgentSave(this, sessionId, agentTranscript);
-                // Still forward final transcript to frontend so UI shows it live
-                frontendWs.send(JSON.stringify({
-                  type: 'agent_transcript_complete',
-                  transcript: agentTranscript,
-                  timestamp: agentTs
-                }));
-                // End session if agent response contains "Your provider will review"
-                if (agentTranscript.includes("Your provider will review")) {
-                  console.log(`🏁 Ending session ${sessionId} due to provider review response`);
-                  frontendWs.send(JSON.stringify({
-                    type: 'request_session_end',
-                    timestamp: agentTs
-                  }));
-                  // Delay to allow audio playback to complete
-                  setTimeout(() => {
-                    this.endSession(sessionId);
-                  }, 3000);
-                }
-              } else {
-                // No recent patient activity — safe to save immediately
-                this.saveAgentTranscriptImmediate(sessionId, agentTranscript, agentTs);
-                frontendWs.send(JSON.stringify({
-                  type: 'agent_transcript_complete',
-                  transcript: agentTranscript,
-                  timestamp: agentTs
-                }));
-                // End session if agent response contains "Your provider will review"
-                if (agentTranscript.includes("Your provider will review") || agentTranscript.includes("critical alert")) {
-                  console.log(`🏁 Ending session ${sessionId} due to provider review response`);
-                  frontendWs.send(JSON.stringify({
-                    type: 'request_session_end',
-                    timestamp: agentTs
-                  }));
-                  // Delay to allow audio playback to complete
-                  setTimeout(() => {
-                    this.endSession(sessionId);
-                  }, 10000);
-                }
-              }
-            }
-            break;
-
-          case 'response.function_call_arguments.done':
-            // Handle function calls from the AI
-            console.log(`🔧 Function call received for ${sessionId}:`, event);
-            if (event.arguments && event.name) {
-              console.log('Calling handleRealtimeFunctionCall');
-              this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
-            }
-
-            const realtimeWs = this.connections.get(sessionId);
-            if (realtimeWs) {
-              console.log('▶️ Triggering model response after triggering red flag');
-              realtimeWs.send(JSON.stringify({
-                type: "response.create",
-                response: {
-                  modalities: ["audio","text"] // return speech + text
-                }
-              }));
-            }
-            break;
-
-          case 'function_call':
-            // Alternative function call event format
-            console.log(`🔧 Alternative function call for ${sessionId}:`, event);
-            if (event.arguments && event.name) {
-              this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
-            }
-            break;
-
-          case 'conversation.item.function_call':
-            // Function call within conversation items
-            console.log(`🔧 Conversation function call for ${sessionId}:`, event);
-            if (event.item && event.item.function_call) {
-              const functionCall = event.item.function_call;
-              if (functionCall.arguments && functionCall.name) {
-                this.handleRealtimeFunctionCall(sessionId, functionCall.name, functionCall.arguments);
-              }
-            }
-            break;
-
-          case 'tool_call':
-            // Tool call event (newer format)
-            console.log(`🔧 Tool call for ${sessionId}:`, event);
-            if (event.tool_call && event.tool_call.function) {
-              const toolFunction = event.tool_call.function;
-              if (toolFunction.arguments && toolFunction.name) {
-                this.handleRealtimeFunctionCall(sessionId,  toolFunction.name, toolFunction.arguments);
-              }
-            }
-            break;
-
-          case 'function_call_response':
-            // Fallback for different function call response formats
-            console.log(`🔧 Function call response for ${sessionId}:`, event);
-            if (event.name && event.arguments) {
-              this.handleRealtimeFunctionCall(sessionId, event.name, event.arguments);
-            }
-            break;
-
-          default:
-            console.log(`Unhandled realtime event ${event.type} for ${sessionId}`, event);
-            break;
-        }
-      } catch (err) {
-        console.error('Error in handleRealtimeResponse:', err);
-      }
-    }    
+  // DEPRECATED: All realtime response handling has been moved to individual providers
+  // (e.g. OpenAIProvider, RetellAIProvider). The manager now delegates to providers.
     
     
 
@@ -676,12 +337,25 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
   // Link a frontend WebSocket to a session for bidirectional communication
   linkFrontendSocket(sessionId: string, frontendWs: any) {
+    return this.provider.linkFrontendSocket(sessionId, frontendWs);
+  }
+
+  _linkFrontendSocketOld(sessionId: string, frontendWs: any) {
     this.frontendSockets.set(sessionId, frontendWs);
 
     // Log system message for session join
     console.log(`📝 Saving system message: Session joined - ${sessionId}`);
-    db.saveConversationLog(sessionId, 'system', 'Voice agent session initialized and ready to begin intake', { type: 'session_join' }, new Date().toISOString());
-    db.logAuditEvent('session_joined', { socketLinked: true }, sessionId);
+    db.saveConversationLog({
+      session_id: sessionId,
+      speaker: 'system',
+      message: 'Voice agent session initialized and ready to begin intake',
+      audio_data: JSON.stringify({ type: 'session_join' })
+    });
+    db.insertAuditLog({
+      action: 'session_joined',
+      details: JSON.stringify({ socketLinked: true }),
+      session_id: sessionId
+    });
 
     console.log(`✅ Frontend WebSocket linked for session ${sessionId}`);
 
@@ -704,12 +378,21 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
   // Unlink frontend WebSocket when disconnected
   unlinkFrontendSocket(sessionId: string) {
+    return this.provider.unlinkFrontendSocket(sessionId);
+  }
+
+  _unlinkFrontendSocketOld(sessionId: string) {
     this.frontendSockets.delete(sessionId);
     console.log(`Frontend WebSocket unlinked for session ${sessionId}`);
   }
 
-  // Send audio data from frontend to OpenAI Realtime API
+  // Send audio data from frontend to provider
   sendAudioData(sessionId: string, audioDataObject: any) {
+    return this.provider.sendAudioData(sessionId, audioDataObject);
+  }
+
+  // Old implementation
+  _sendAudioDataOld(sessionId: string, audioDataObject: any) {
     const realtimeWs = this.connections.get(sessionId);
     if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
       try {
@@ -769,8 +452,18 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     console.log(`🔴 RED FLAG DETECTED for session ${sessionId}:`, args);
 
     try {
-      db.saveRedFlagEvent(sessionId, args.symptoms || [], args.severity || 'medium');
-      db.logAuditEvent('red_flag_detected', args, sessionId);
+      db.saveRedFlagEvent({
+        session_id: sessionId,
+        symptoms: JSON.stringify(args.symptoms || []),
+        severity: args.severity || 'medium',
+        resolved: false,
+        clinician_notified: false
+      });
+      db.insertAuditLog({
+        action: 'red_flag_detected',
+        details: JSON.stringify(args),
+        session_id: sessionId
+      });
 
       // For POC - log escalation requirement
       console.log(`🚨 CLINICIAN ESCALATION REQUIRED: Session ${sessionId} has red flag: ${args.severity}`);
@@ -804,8 +497,18 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
         console.log(`🚨 BACKUP RED FLAG DETECTION: Found ${detectedFlags.length} red flags in session ${sessionId}:`, detectedFlags);
 
         // Save to database
-        db.saveRedFlagEvent(sessionId, detectedFlags, maxSeverity);
-        db.logAuditEvent('red_flag_detected_backup', { symptoms: detectedFlags, severity: maxSeverity, transcript }, sessionId);
+        db.saveRedFlagEvent({
+          session_id: sessionId,
+          symptoms: JSON.stringify(detectedFlags),
+          severity: maxSeverity,
+          resolved: false,
+          clinician_notified: false
+        });
+        db.insertAuditLog({
+          action: 'red_flag_detected_backup',
+          details: JSON.stringify({ symptoms: detectedFlags, severity: maxSeverity, transcript }),
+          session_id: sessionId
+        });
 
         // Notify frontend
         if (frontendWs) {
@@ -835,14 +538,27 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
       else if (args.question?.toLowerCase().includes('condition') || args.question?.toLowerCase().includes('history')) category = 'history';
 
       const sessionId = args.sessionId;
-      db.saveIntakeResponse(sessionId, args.question || '', args.answer || '', category);
+      db.createIntakeResponse({
+        session_id: sessionId,
+        question: args.question || '',
+        answer: args.answer || '',
+        category: category
+      });
 
       // Log both question and answer as conversation
       if (args.question) {
-        db.saveConversationLog(sessionId, 'agent', args.question, null, new Date().toISOString());
+        db.saveConversationLog({
+          session_id: sessionId,
+          speaker: 'agent',
+          message: args.question
+        });
       }
       if (args.answer) {
-        db.saveConversationLog(sessionId, 'patient', args.answer, null, new Date().toISOString());
+        db.saveConversationLog({
+          session_id: sessionId,
+          speaker: 'patient',
+          message: args.answer
+        });
       }
     } catch (error) {
       console.error('Failed to save intake response:', error);
@@ -854,19 +570,21 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
 
     try {
       const sessionId = args.sessionId;
-      db.saveConversationLog(
-        sessionId,
-        args.speaker || 'unknown',
-        args.message || args.details || '',
-        null,
-        new Date().toISOString()
-      );
+      db.saveConversationLog({
+        session_id: sessionId,
+        speaker: args.speaker || 'unknown',
+        message: args.message || args.details || ''
+      });
     } catch (error) {
       console.error('Failed to log conversation:', error);
     }
   }
 
   async endSession(sessionId: string) {
+    return this.provider.endSession(sessionId);
+  }
+
+  async _endSessionOld(sessionId: string) {
     // Update database status to 'completed' when session ends
     try {
       db.updateSessionStatus(sessionId, 'completed');
@@ -901,7 +619,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 
   getSession(sessionId: string) {
-    return this.connections.get(sessionId);
+    return this.provider.getSession ? this.provider.getSession(sessionId) : null;
   }
 
   // Deduplication helper method

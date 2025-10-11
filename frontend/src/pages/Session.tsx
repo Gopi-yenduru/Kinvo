@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { RetellWebClient } from 'retell-client-js-sdk';
+import { useSession } from '../contexts/SessionContext';
 
 type SessionStatus = 'idle' | 'connecting' | 'active' | 'completed' | 'error';
 
@@ -18,16 +20,28 @@ const Session: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [sessionDuration, setSessionDuration] = useState(0);
   const [showTranscript, setShowTranscript] = useState(false);
-  const [pendingSentence, setPendingSentence] = useState<{speaker: string, text: string, timeoutId: number, timestamp?: string} | null>(null);
+  const [transcriptData, setTranscriptData] = useState<Message[] | null>(null);
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [pendingSentence, setPendingSentence] = useState<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
+  const [speaker, setSpeaker] = useState<string>(''); // Current speaker indicator
+  const [provider, setProvider] = useState<string>('openai'); // AI provider type
+  const [isSpeakingAgent, setIsSpeakingAgent] = useState<boolean>(false); // Track when agent is actively speaking
+
 
   // New state for patient name input
   const [patientName, setPatientName] = useState<string>('');
   const [showPatientForm, setShowPatientForm] = useState<boolean>(false);
-  const pendingSentenceRef = useRef<{speaker: string, text: string, timeoutId: number, timestamp?: string} | null>(null);
+  const pendingSentenceRef = useRef<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
+
+  // Use SessionContext
+  const { startSession: contextStartSession, endSession: contextEndSession } = useSession();
 
   const conversationMessagesRef = useRef<HTMLDivElement>(null);
+  const token = localStorage.getItem("jwt_token");
 
   const wsRef = useRef<WebSocket | null>(null);
+  const retellWebClientRef = useRef<RetellWebClient | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isRecordingRef = useRef(false);
@@ -35,7 +49,26 @@ const Session: React.FC = () => {
   const isPlayingRef = useRef(false);
   const sessionStartTime = useRef<number | null>(null);
   const audioBufferRef = useRef<string>(''); // Buffer for incoming audio chunks
-  const playbackQueueRef = useRef<string[]>([]); // Queue for audio playback
+
+  // Track audio response freshness to prevent stale audio playback
+  const audioResponseTrackerRef = useRef<{
+    currentBufferResponseStart?: number;
+    lastPlayedResponseStart?: number;
+    freshAudioBuffer: string;
+  }>({
+    currentBufferResponseStart: undefined,
+    lastPlayedResponseStart: undefined,
+    freshAudioBuffer: ''
+  });
+
+  // Track transcript response freshness to sync text with audio
+  const transcriptTrackerRef = useRef<{
+    [responseStartTime: string]: {
+      transcriptChunks: string;
+      hasBeenDisplayed: boolean;
+      finalTranscript?: string;
+    };
+  }>({});
 
   // Timer effect
   useEffect(() => {
@@ -62,23 +95,37 @@ const Session: React.FC = () => {
 
       const response = await fetch('/api/sessions/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ patientName: patientNameToUse }),
       });
 
       const data = await response.json();
 
       if (data.sessionId) {
+        // Update global session context
+        contextStartSession(data.provider || 'openai');
+
         setSessionId(data.sessionId);
+        setProvider(data.provider || 'openai');
         setSessionStatus('active');
         setConversationLog([{
           timestamp: new Date().toLocaleTimeString(),
           speaker: 'System',
-          message: 'Welcome to the Medical Intake Voice Agent. Please speak clearly and provide detailed information about your medical concerns.',
+          message: 'Connecting to HealthYoda voice agent...please wait',
           type: 'system'
         }]);
-        await initializeAudioRecording();
-        connectWebSocket(data.sessionId);
+
+        if (data.provider === 'retellai') {
+          // For Retell AI, start web call directly
+          await startRetellWebCall(data.sessionId);
+        } else {
+          // For OpenAI, initialize audio and connect WebSocket
+          await initializeAudioRecording();
+          connectWebSocket(data.sessionId);
+        }
       } else {
         setErrorMessage('Failed to start session');
         setSessionStatus('error');
@@ -120,7 +167,7 @@ const Session: React.FC = () => {
         const audioBuffer = event.inputBuffer;
         const monoChannel = audioBuffer.getChannelData(0);
         const pcm16Data = new Int16Array(monoChannel.length);
-        
+
         for (let i = 0; i < monoChannel.length; i++) {
           pcm16Data[i] = Math.max(-32768, Math.min(32767, monoChannel[i] * 32767));
         }
@@ -157,6 +204,7 @@ const Session: React.FC = () => {
   const connectWebSocket = (sessionId: string) => {
     try {
       wsRef.current = new WebSocket('/ws');
+      console.log('WebSocket readyState:', wsRef.current.readyState);
 
       wsRef.current.onopen = () => {
         setConnectionStatus('Connected');
@@ -184,16 +232,34 @@ const Session: React.FC = () => {
             // }
             break;
           case 'agent_transcript_delta':
-            // Handle agent transcript deltas from backend
-            console.log('🎵 Frontend received agent_transcript_delta:', message.text);
-            if (message.text && message.text.trim()) {
-              console.log('📝 Processing agent delta:', message.text);
-              // For agent deltas, always accumulate - don't check immediate sentence first
-              // The backend will tell us when the response is complete
-              processTranscriptDelta('Agent', message.text, message.timestamp);
-            } else {
-              console.log('⚠️ Agent transcript delta is empty or null:', message);
-            }
+              // Handle agent transcript deltas from backend with response syncing
+              console.log('🎵 Frontend received agent_transcript_delta:', message.text, 'responseStartTime:', message.responseStartTime);
+              if (message.text && message.text.trim() && message.responseStartTime) {
+                console.log('📝 Processing agent delta for response:', message.responseStartTime);
+
+                const responseKey = message.responseStartTime.toString();
+
+                // Initialize tracker for this response if it doesn't exist
+                if (!transcriptTrackerRef.current[responseKey]) {
+                  transcriptTrackerRef.current[responseKey] = {
+                    transcriptChunks: '',
+                    hasBeenDisplayed: false,
+                    finalTranscript: undefined
+                  };
+                }
+
+                // Accumulate the transcript chunk
+                const tracker = transcriptTrackerRef.current[responseKey];
+                tracker.transcriptChunks += message.text;
+
+                console.log('🎭 Agent transcript chunk accumulated for response', responseKey,
+                  ':', tracker.transcriptChunks.length, 'chars');
+
+                // Don't show in UI yet - wait for audio to play
+                setSpeaker('Agent'); // Show agent is speaking indicator
+              } else {
+                console.log('⚠️ Agent transcript delta is empty or missing responseStartTime:', message);
+              }
             break;
           case 'response.audio_transcript.delta':
             // Handle OpenAI's response.audio_transcript.delta - DISABLED to prevent double processing
@@ -203,57 +269,140 @@ const Session: React.FC = () => {
             // }
             break;
           case 'agent_transcript_complete':
-            // Handle complete agent transcripts
-            if (message.transcript) {
-              // Clear any pending agent sentence first
+            // Store complete transcript for display, but only show it if not already displayed via delayed mechanism
+            if (message.transcript && message.timestamp) {
+              const responseKey = message.timestamp;
+
+              // Initialize tracker if it doesn't exist with complete transcript
+              if (!transcriptTrackerRef.current[responseKey]) {
+                transcriptTrackerRef.current[responseKey] = {
+                  transcriptChunks: '',
+                  hasBeenDisplayed: false,
+                  finalTranscript: message.transcript.trim()
+                };
+              } else {
+                // Update with complete transcript (better than accumulated chunks)
+                transcriptTrackerRef.current[responseKey].finalTranscript = message.transcript.trim();
+              }
+
+              console.log('📝 Stored complete transcript for response:', responseKey, 'length:', message.transcript.length);
+
+              // Clear any pending agent sentences
               if (pendingSentence && pendingSentence.speaker === 'Agent') {
                 clearTimeout(pendingSentence.timeoutId);
                 setPendingSentence(null);
               }
-              // Add complete transcript directly
-              addSentenceToConversationLog('Agent', message.transcript, 'text', message.timestamp);
+              setSpeaker('');
+
+              // If this transcript hasn't been displayed through delayed mechanism, show it now
+              // This covers cases where agent_response_complete might not fire properly
+              const tracker = transcriptTrackerRef.current[responseKey];
+              if (!tracker.hasBeenDisplayed && tracker.finalTranscript?.trim()) {
+                console.log('🎭 Displaying agent transcript immediately (fallback)', responseKey);
+                addSentenceToConversationLog('Agent', tracker.finalTranscript, 'text', message.timestamp);
+                tracker.hasBeenDisplayed = true;
+              }
             }
             break;
           case 'conversation.item.input_audio_transcription.delta':
-            if (message.delta) {
-              // Handle patient transcript deltas
-              if (!checkImmediateSentence('You', message.delta) && message.delta.trim()) {
-                processTranscriptDelta('You', message.delta);
+              if (message.delta) {
+                // **INTERRUPTION DETECTION**: If agent is talking and patient starts speaking
+                if (isSpeakingAgent) {
+                  console.log('🔄 INTERRUPTION DETECTED: Patient interrupting agent - stopping agent audio');
+                  // Stop any playing agent audio immediately
+                  stopAgentAudio();
+                  // Clear speaker state
+                  setSpeaker(''); // Clear "Agent" speaker indicator immediately
+                  setIsSpeakingAgent(false);
+                  // Clear audio buffer to prevent queued audio
+                  audioBufferRef.current = '';
+                  // Clear any pending agent sentences
+                  if (pendingSentence && pendingSentence.speaker === 'Agent') {
+                    clearTimeout(pendingSentence.timeoutId);
+                    setPendingSentence(null);
+                  }
+                  finalizePendingSentences(); // Finalize what agent said before interruption
+                }
+  
+                // Set patient as active speaker
+                if (!isSpeakingAgent) { // Only set patient if agent is not speaking
+                  setSpeaker('Patient');
+                }
+  
+                // Process patient transcript deltas
+                if (!checkImmediateSentence('You', message.delta) && message.delta.trim()) {
+                  processTranscriptDelta('You', message.delta);
+                }
               }
-            }
             break;
           case 'response.content_part.done':
-            // Handle complete transcript from OpenAI (more reliable than delta accumulation)
-            if (message.part && message.part.transcript && message.part.type === 'audio') {
-              // Clear any pending agent sentences since we have the complete transcript
-              if (pendingSentence && pendingSentence.speaker === 'Agent') {
-                clearTimeout(pendingSentence.timeoutId);
-                setPendingSentence(null);
-              }
-              // Add the complete transcript directly
-              addSentenceToConversationLog('Agent', message.part.transcript, 'text', message.timestamp);
+            setSpeaker('');
+            // DISABLED: Don't display OpenAI content part transcripts - use delayed display only
+            console.log('⚠️ Ignoring response.content_part.done to prevent stale display');
+            // Clear any pending agent sentences
+            if (pendingSentence && pendingSentence.speaker === 'Agent') {
+              clearTimeout(pendingSentence.timeoutId);
+              setPendingSentence(null);
             }
             break;
           case 'response.output_item.done':
             // Handle complete item from OpenAI (includes final transcript)
             if (message.item && message.item.content && message.item.content[0] &&
-                message.item.content[0].type === 'audio' && message.item.content[0].transcript) {
+              message.item.content[0].type === 'audio' && message.item.content[0].transcript) {
               console.log('🔄 Received complete agent transcript from response.output_item.done',
                 message.item.content[0].transcript);
               // This could be used for verification or fallback
             }
             break;
           case 'agent_audio_chunk':
-            // Handle incoming audio chunks from the AI agent
-            if (message.audio) {
-              handleIncomingAudioChunk(message.audio);
-            }
+              // Handle incoming audio chunks from the AI agent with response separation
+              if (message.audio) {
+                handleIncomingAudioChunk(message.audio, message.responseStartTime);
+              }
+              // Set speaker to Agent when we start receiving audio (agent is speaking)
+              if (!isSpeakingAgent) {
+                setSpeaker('Agent');
+                setIsSpeakingAgent(true);
+              }
             break;
           case 'agent_response_complete':
-            // Play accumulated audio when response is complete
-            playAccumulatedAudio();
-            // Finalize any pending sentence
-            finalizePendingSentences();
+              setSpeaker('');
+              setIsSpeakingAgent(false);
+              // Play only the freshest accumulated audio, discard stale ones
+              playAccumulatedAudio(message.timestamp);
+
+              // Check if we have a transcript tracker for this response that should be displayed
+              if (message.timestamp && transcriptTrackerRef.current[message.timestamp]) {
+                const transcriptData = transcriptTrackerRef.current[message.timestamp];
+                if (!transcriptData.hasBeenDisplayed) {
+                  // Prefer complete transcript over accumulated chunks
+                  const finalText = transcriptData.finalTranscript || transcriptData.transcriptChunks.trim();
+                  if (finalText) {
+                    // Display the transcript now that audio is playing!
+                    console.log('🎭 Displaying delayed transcript for response:', message.timestamp,
+                      'Text:', finalText.length, 'chars');
+                    addSentenceToConversationLog('Agent', finalText, 'text', message.timestamp);
+                    transcriptData.hasBeenDisplayed = true;
+                  }
+                }
+              }
+
+              // Finalize any pending sentence
+              finalizePendingSentences();
+
+              // Clean up any stale transcript trackers (responses that didn't get played)
+              const responseTimestamp = message.timestamp ? new Date(message.timestamp).getTime() : Date.now();
+              Object.keys(transcriptTrackerRef.current).forEach(key => {
+                const trackerTime = new Date(key).getTime();
+                // Remove trackers for responses older than the current one by 5 seconds
+                if (trackerTime < (responseTimestamp - 5000)) {
+                  const tracker = transcriptTrackerRef.current[key];
+                  if (!tracker.hasBeenDisplayed) {
+                    console.log('🧹 Cleaning up stale transcript tracker for response:', key);
+                    delete transcriptTrackerRef.current[key];
+                  }
+                }
+              });
             break;
           case 'patient_transcript':
             if (message.transcript) {
@@ -272,10 +421,66 @@ const Session: React.FC = () => {
             finalizePendingSentences();
             addToConversationLog('System', 'Session completed successfully', 'system');
             break;
+          case 'end_session':
+            // Handle automatic session ending by agent function call
+            console.log('🏁 Agent initiated session end:', message);
+            if (message.consent_given && message.consent_given === true) {
+              // Add system message indicating AI-initiated completion
+              addToConversationLog('System', 'Medical intake completed by AI agent', 'system');
+
+              // Close WebSocket immediately to prevent further messages after session end
+              if (wsRef.current) {
+                console.log('🔌 Closing WebSocket to prevent race conditions');
+                wsRef.current.close(1000, 'Session auto-ended by agent');
+                wsRef.current = null;
+              }
+
+              // Clear any error messages to prevent race condition errors
+              setErrorMessage('');
+
+              // Automatically end the session after a brief delay for natural flow
+              setTimeout(() => {
+                console.log('⏰ Auto-ending session after 2-second delay');
+                // Update global session context
+                contextEndSession();
+                // Avoid calling full endSession() which might send another WebSocket message
+                // Just update UI state directly
+                setSessionStatus('completed');
+                setConnectionStatus('Disconnected'); // Update connection status too
+                setIsRecording(false);
+                isRecordingRef.current = false;
+                if (streamRef.current) {
+                  streamRef.current.getTracks().forEach(track => track.stop());
+                  streamRef.current = null;
+                }
+                // Close audio context after a delay
+                setTimeout(() => {
+                  if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+                    try {
+                      audioContextRef.current.close();
+                      audioContextRef.current = null;
+                      gainNodeRef.current = null;
+                    } catch (error) {
+                      console.error('Error closing audio context:', error);
+                    }
+                  }
+                }, 2000);
+              }, 2000);
+            } else {
+              console.warn('⚠️ Agent attempted to end session without consent - ignoring');
+              // Don't end session if no explicit consent
+            }
+            break;
           case 'request_session_end':
             // Finalize any pending sentences before ending session
             console.log('Received request_session_end from backend, ending session');
             endSession();
+            break;
+          case "listening":
+            setSpeaker('Patient');
+            break;
+          case "speaking":
+            setSpeaker('Agent');
             break;
           case 'error':
             setErrorMessage(message.message || 'An error occurred');
@@ -291,12 +496,161 @@ const Session: React.FC = () => {
       };
 
       wsRef.current.onerror = () => {
+        console.error('Failed to connect WebSocket on error method');
         setConnectionStatus('Error');
         setSessionStatus('error');
       };
     } catch (error) {
       console.error('Failed to connect WebSocket:', error);
       setErrorMessage('WebSocket connection failed');
+      setSessionStatus('error');
+    }
+  };
+
+  const startRetellWebCall = async (sessionId: string) => {
+    try {
+      setConnectionStatus('Connecting to Retell AI...');
+
+      // Get access token from backend
+      const response = await fetch(`/api/sessions/${sessionId}/start-web-call`, {
+        method: 'POST',
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const data = await response.json();
+
+      if (!data.access_token) {
+        throw new Error(data.message || 'Failed to get access token');
+      }
+
+      // Initialize Retell Web Client
+      retellWebClientRef.current = new RetellWebClient();
+      const retellWebClient = retellWebClientRef.current;
+
+      // Set up event listeners - log ALL events for debugging
+      const allEvents = [
+        'call_started', 'call_ended', 'realtime_transcript',
+        'agent_start_talking', 'agent_stop_talking', 'error',
+        'audio', 'transcript', 'tool_call', 'function_call'
+      ];
+
+      allEvents.forEach(eventName => {
+        retellWebClient.on(eventName, (event: any) => {
+          console.log(`🔄 Retell AI event [${eventName}]:`, event);
+        });
+      });
+
+      retellWebClient.on('call_started', () => {
+        console.log('Retell AI call started');
+        setConnectionStatus('Connected');
+        addToConversationLog('System', 'Connected to Retell AI. Call is active.', 'system');
+      });
+
+      retellWebClient.on('call_ended', async () => {
+        console.log('Retell AI call ended');
+        setConnectionStatus('Disconnected');
+        setSessionStatus('completed');
+        addToConversationLog('System', 'Call ended successfully', 'system');
+
+        // Automatically fetch the complete transcript after call ends
+        if (sessionId) {
+          try {
+            console.log('Fetching complete transcript from Retell AI...');
+            const response = await fetch(`/api/sessions/${sessionId}/retell-transcript`, {
+              method: 'GET',
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              }
+            });
+
+            const transcriptData = await response.json();
+
+            if (response.ok && transcriptData.transcript) {
+              console.log('Successfully retrieved complete transcript:', transcriptData);
+              addToConversationLog('System', `Complete transcript retrieved: ${transcriptData.summary.total_items} items (${transcriptData.summary.agent_lines} agent, ${transcriptData.summary.user_lines} user)`, 'system');
+            } else {
+              console.error('Failed to retrieve transcript:', transcriptData);
+              addToConversationLog('System', 'Failed to retrieve complete transcript', 'system');
+            }
+          } catch (error) {
+            console.error('Error fetching transcript:', error);
+            addToConversationLog('System', 'Error retrieving complete transcript', 'system');
+          }
+        }
+      });
+
+      // ✅ CORRECT EVENT 1: Real-time Transcript (User only, streaming)
+      retellWebClient.on('realtime_transcript', (event: any) => {
+        console.log('Retell AI REALTIME transcript:', event);
+        // { transcript: "...", is_final: false, turn: "user" }
+
+        if (event.transcript && event.turn === 'user') {
+          // Update live typing indicator (optional)
+          // processRealtimeTranscript(event.transcript);
+        }
+      });
+
+      // ✅ CORRECT EVENT 2: Final Transcript (User AND Agent)
+      retellWebClient.on('transcript', async (event: any) => {
+        console.log('Retell AI FINAL transcript:', event);
+        // { transcript: "...", turn: "user" | "agent" }
+
+        if (event.transcript) {
+          const speaker = event.turn === 'user' ? 'patient' : 'agent';
+
+          try {
+            // Save transcript to backend for persistence
+            await fetch(`/api/sessions/${sessionId}/transcript`, {
+              method: 'POST',
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                speaker: speaker,
+                message: event.transcript,
+                timestamp: new Date().toISOString(),
+                type: event.turn === 'user' ? 'user_transcript' : 'agent_transcript'
+              })
+            });
+
+            // Update UI
+            const uiSpeaker = event.turn === 'user' ? 'You' : 'Agent';
+            if (!checkImmediateSentence(uiSpeaker, event.transcript) && event.transcript.trim()) {
+              processTranscriptDelta(uiSpeaker, event.transcript);
+            }
+          } catch (error) {
+            console.error('Failed to save transcript:', error);
+          }
+        }
+      });
+
+      retellWebClient.on('agent_start_talking', () => {
+        setSpeaker('Agent');
+      });
+
+      retellWebClient.on('agent_stop_talking', () => {
+        setSpeaker('Patient');
+      });
+
+      retellWebClient.on('error', (error: any) => {
+        console.error('Retell AI error:', error);
+        setErrorMessage(error.message || 'Retell AI error occurred');
+        setSessionStatus('error');
+      });
+
+      // Start the call
+      await retellWebClient.startCall({
+        accessToken: data.access_token,
+      });
+
+    } catch (error: any) {
+      console.error('Failed to start Retell AI web call:', error);
+      setErrorMessage(error.message || 'Failed to connect to Retell AI');
       setSessionStatus('error');
     }
   };
@@ -349,6 +703,13 @@ const Session: React.FC = () => {
     }
   };
 
+  const getDynamicTimeout = (speaker: string, text: string): number => {
+    if (text.includes('.') || text.includes('?') || text.includes('!')) return 300; // Faster for complete sentences
+    if (text.length > 20) return 500; // Longer for substantial responses
+    if (speaker === 'Agent') return 400; // Agents speak more deliberately
+    return 600; // Patient default
+  };
+
   const processTranscriptDelta = (speaker: string, delta: string, timestamp?: string) => {
     if (delta.includes('[DONE]')) return;
 
@@ -378,8 +739,8 @@ const Session: React.FC = () => {
       return;
     }
 
-    // Start new timeout for finalization
-    const timeoutId = setTimeout(() => finalizeSentence(speaker, fullText, finalTimestamp), 800);
+    // Start new timeout for finalization with dynamic timeout
+    const timeoutId = setTimeout(() => finalizeSentence(speaker, fullText, finalTimestamp), getDynamicTimeout(speaker, fullText));
     const pending = { speaker, text: fullText, timeoutId, timestamp: finalTimestamp };
     pendingSentenceRef.current = pending;
     setPendingSentence(pending);
@@ -493,50 +854,103 @@ const Session: React.FC = () => {
 
   const endSession = async () => {
     console.log('endSession called');
-    if (isRecording) {
+
+    // Update global session context first
+    contextEndSession();
+
+    // Handle provider-specific cleanup
+    if (provider === 'retellai') {
+      // End Retell AI call
+      if (retellWebClientRef.current) {
+        try {
+          await retellWebClientRef.current.stopCall();
+          console.log('Retell AI call stopped');
+        } catch (error) {
+          console.error('Error stopping Retell AI call:', error);
+        }
+      }
+    } else {
+
       console.log('Stopping recording');
       setIsRecording(false);
       isRecordingRef.current = false;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-    }
-    // Delay closing audio context to allow any ongoing audio playback to complete
-    setTimeout(() => {
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-        try {
-          audioContextRef.current.close();
-          audioContextRef.current = null;
-          gainNodeRef.current = null;
-        } catch (error) {
-          console.error('Error closing audio context:', error);
-        }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
       }
-    }, 20000);
-    if (wsRef.current) {
-      wsRef.current.send(JSON.stringify({ type: 'end_session' }));
+      // Delay closing audio context to allow any ongoing audio playback to complete
+      setTimeout(() => {
+        if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+          try {
+            audioContextRef.current.close();
+            audioContextRef.current = null;
+            gainNodeRef.current = null;
+          } catch (error) {
+            console.error('Error closing audio context:', error);
+          }
+        }
+      }, 20000);
+      if (wsRef.current) {
+        wsRef.current.send(JSON.stringify({ type: 'end_session' }));
+      }
     }
+    
     setSessionStatus('completed');
     setIsRecording(false);
   };
 
-  const handleIncomingAudioChunk = (audioChunk: string) => {
-    // Accumulate audio chunks
-    audioBufferRef.current += audioChunk;
-    console.log(`Received audio chunk: ${audioChunk.length} characters`);
+  const handleIncomingAudioChunk = (audioChunk: string, responseStartTime?: number) => {
+    // Track which response these chunks belong to and only buffer if it's the latest response
+    if (responseStartTime) {
+      if (!audioResponseTrackerRef.current.currentBufferResponseStart) {
+        // First chunks of a new response
+        audioResponseTrackerRef.current.currentBufferResponseStart = responseStartTime;
+        audioResponseTrackerRef.current.freshAudioBuffer = audioChunk;
+        console.log(`🎵 Starting audio buffer for response starting at ${responseStartTime}`);
+      } else if (responseStartTime === audioResponseTrackerRef.current.currentBufferResponseStart) {
+        // Continuation of current response - add to buffer
+        audioResponseTrackerRef.current.freshAudioBuffer += audioChunk;
+        console.log(`🎵 Adding chunk to buffer (${audioResponseTrackerRef.current.freshAudioBuffer.length} total chars)`);
+      } else if (responseStartTime > audioResponseTrackerRef.current.currentBufferResponseStart!) {
+        // New response is starting - replace the buffer
+        console.log(`📹 Newer response starting ${responseStartTime} vs ${audioResponseTrackerRef.current.currentBufferResponseStart} - replacing buffer`);
+        audioResponseTrackerRef.current.currentBufferResponseStart = responseStartTime;
+        audioResponseTrackerRef.current.freshAudioBuffer = audioChunk;
+      } else {
+        // This is an older/delayed response - discard it
+        console.log(`🗑️ Discarding chunk from stale response (${responseStartTime} vs current ${audioResponseTrackerRef.current.currentBufferResponseStart})`);
+      }
+    } else {
+      // Legacy behavior for chunks without response start time
+      audioResponseTrackerRef.current.freshAudioBuffer += audioChunk;
+      console.log(`Received legacy audio chunk: ${audioChunk.length} characters`);
+    }
   };
 
-  const playAccumulatedAudio = async () => {
-    if (!audioBufferRef.current || isPlayingRef.current) {
+  const playAccumulatedAudio = async (responseTimestamp?: string) => {
+    // Check if this response would be stale compared to when the user last spoke
+    if (responseTimestamp && responseTimestamp.trim()) {
+      const responseTime = new Date(responseTimestamp).getTime();
+      const lastPlayedTime = audioResponseTrackerRef.current.lastPlayedResponseStart || 0;
+
+      // If we already played a newer response, skip this older one
+      if (lastPlayedTime >= responseTime) {
+        console.log(`🗑️ Skipping playback of stale audio response (${new Date(responseTime).toISOString()} vs last played ${new Date(lastPlayedTime).toISOString()})`);
+        // Clear the buffer and return without playing
+        audioResponseTrackerRef.current.freshAudioBuffer = '';
+        return;
+      }
+    }
+
+    if (!audioResponseTrackerRef.current.freshAudioBuffer || isPlayingRef.current) {
       return;
     }
 
     try {
       isPlayingRef.current = true;
-      console.log(`Playing accumulated audio: ${audioBufferRef.current.length} characters`);
+      console.log(`Playing accumulated audio: ${audioResponseTrackerRef.current.freshAudioBuffer.length} characters`);
 
-      // Decode base64 audio data
-      const audioData = atob(audioBufferRef.current);
+      // Decode base64 audio data from fresh buffer
+      const audioData = atob(audioResponseTrackerRef.current.freshAudioBuffer);
       const audioBytes = new Uint8Array(audioData.length);
       for (let i = 0; i < audioData.length; i++) {
         audioBytes[i] = audioData.charCodeAt(i);
@@ -548,7 +962,7 @@ const Session: React.FC = () => {
       }
 
       const audioContext = audioContextRef.current;
-      
+
       // Resume audio context if suspended
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
@@ -569,7 +983,7 @@ const Session: React.FC = () => {
       // Create and play audio source
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
-      
+
       // Connect to gain node if available, otherwise directly to destination
       if (gainNodeRef.current) {
         source.connect(gainNodeRef.current);
@@ -583,31 +997,107 @@ const Session: React.FC = () => {
       };
 
       source.start();
-      
-      // Clear the buffer after playing
-      audioBufferRef.current = '';
+
+      // Update last played time and clear the buffer after playing
+      const responseTime = responseTimestamp ? new Date(responseTimestamp).getTime() : Date.now();
+      audioResponseTrackerRef.current.lastPlayedResponseStart = responseTime;
+      audioResponseTrackerRef.current.freshAudioBuffer = '';
 
     } catch (error) {
       console.error('Error playing audio:', error);
       isPlayingRef.current = false;
       // Clear buffer on error to prevent accumulation
-      audioBufferRef.current = '';
+      audioResponseTrackerRef.current.freshAudioBuffer = '';
     }
   };
 
+  const stopAgentAudio = () => {
+    // Immediately mute/stop any agent audio that's currently playing
+    if (gainNodeRef.current) {
+      console.log('Muting agent audio gain node');
+      gainNodeRef.current.gain.setValueAtTime(0, audioContextRef.current?.currentTime || 0);
+    }
+
+    // Mark audio as no longer playing to prevent new audio from starting
+    isPlayingRef.current = false;
+
+    console.log('Agent audio stopped/inactivated');
+  };
+
   const resetSession = () => {
+    console.log('resetSession: Starting complete session reset');
+
+    // FIRST: Update global session context
+    contextEndSession();
+
+    // CLEANUP: Stop and clean up any existing connections
+    if (wsRef.current) {
+      console.log('resetSession: Closing existing WebSocket');
+      wsRef.current.close(1000, 'Session reset');
+      wsRef.current = null;
+    }
+
+    if (retellWebClientRef.current) {
+      console.log('resetSession: Cleaning up Retell Web Client');
+      retellWebClientRef.current.stopCall();
+      retellWebClientRef.current = null;
+    }
+
+    // CLEANUP: Stop audio processing
+    if (isRecordingRef.current) {
+      isRecordingRef.current = false;
+    }
+
+    if (streamRef.current) {
+      console.log('resetSession: Stopping media stream');
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+
+    // CLEANUP: Audio context cleanup
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      console.log('resetSession: Cleaning up audio context');
+      try {
+        audioContextRef.current.close();
+      } catch (error) {
+        console.error('Error closing audio context during reset:', error);
+      }
+      audioContextRef.current = null;
+      gainNodeRef.current = null;
+    }
+
+    // RESET: All state variables
     setSessionStatus('idle');
     setSessionId(null);
+    setConnectionStatus('Disconnected');
     setConversationLog([]);
     setPendingSentence(null);
     pendingSentenceRef.current = null;
+    setIsRecording(false);
+    setIsSpeakingAgent(false);
     setErrorMessage('');
     setSessionDuration(0);
     sessionStartTime.current = null;
-    // Clear audio buffers
+    setProvider('openai'); // Reset to default provider
+    setSpeaker('');
+    setTranscriptData(null);
+    setShowTranscript(false);
+
+    // RESET: All audio-related buffers and trackers
     audioBufferRef.current = '';
-    playbackQueueRef.current = [];
+    audioResponseTrackerRef.current = {
+      currentBufferResponseStart: undefined,
+      lastPlayedResponseStart: undefined,
+      freshAudioBuffer: ''
+    };
+
+    // RESET: Transcript trackers
+    transcriptTrackerRef.current = {};
+
+    // RESET: Playback states
     isPlayingRef.current = false;
+
+    console.log('resetSession: Complete session reset finished');
   };
 
   const handlePatientFormSubmit = (e: React.FormEvent) => {
@@ -629,277 +1119,424 @@ const Session: React.FC = () => {
     setErrorMessage('');
   };
 
+  // Fetch transcript from database when modal opens
+  const fetchTranscriptData = async () => {
+    if (!sessionId) return;
+
+    setTranscriptLoading(true);
+    setTranscriptError(null);
+    setTranscriptData(null);
+
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/transcript`, {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Transform API response to Message[] format
+      // API returns: { transcript: Array<{timestamp, speaker, message}> }
+      // We need: Message[] with speaker: 'Agent' | 'You' | 'System'
+      const transformedTranscript: Message[] = data.transcript?.map((item: any) => ({
+        timestamp: new Date(item.timestamp).toLocaleTimeString(),
+        speaker: item.speaker === 'agent' ? 'Agent' :
+                item.speaker === 'patient' ? 'You' : 'System',
+        message: item.message,
+        type: item.type === 'audio_with_text' ? 'audio' :
+              item.speaker === 'system' ? 'system' : 'text'
+      })) || [];
+
+      setTranscriptData(transformedTranscript);
+    } catch (error: any) {
+      console.error('Failed to fetch transcript:', error);
+      setTranscriptError(error.message || 'Failed to load transcript');
+    } finally {
+      setTranscriptLoading(false);
+    }
+  };
+
+  // Handle transcript modal opening/closing
+  const handleTranscriptModalToggle = (show: boolean) => {
+    if (show) {
+      setShowTranscript(true);
+      fetchTranscriptData();
+    } else {
+      setShowTranscript(false);
+      // Clear state when closing
+      setTranscriptData(null);
+      setTranscriptError(null);
+    }
+  };
+
   return (
-    <div className="session-page-container">
+    <div className="session-page-container w-100">
       {/* Page Header */}
-      <div className="session-page-header">
-        <div className="page-header-content">
-          <div className="page-header-left">
-            <h1 className="page-title">Voice Intake Session</h1>
-            <p className="page-subtitle">Conduct AI-powered medical intake interviews with real-time voice processing</p>
-          </div>
-          <div className="page-header-right">
-            <div className={`status-badge-large ${sessionStatus}`}>
-              <div className="status-indicator">
-                <div className="status-dot"></div>
-                <span className="status-text">
-                  {sessionStatus === 'idle' && 'Ready to Start'}
-                  {sessionStatus === 'connecting' && 'Connecting...'}
-                  {sessionStatus === 'active' && 'Session Active'}
-                  {sessionStatus === 'completed' && 'Session Complete'}
-                  {sessionStatus === 'error' && 'Error Occurred'}
-                </span>
-              </div>
-
-              {sessionStatus === 'active' && (
-                <div className="timer-display">
-                  <span className="timer-icon">⏱️</span>
-                  <span className="timer-value">{formatDuration(sessionDuration)}</span>
-                </div>
-              )}
-
-              {sessionId && (
-                <div className="session-id-display">
-                  <span className="session-id-label">ID:</span>
-                  <span className="session-id-value">{sessionId.slice(0, 8)}...</span>
-                </div>
-              )}
+      <div className="session-page-header w-100">
+        <div className="container-fluid px-3 px-md-4">
+          <div className="row align-items-start g-3 py-3">
+            <div className="col-12 col-lg-8">
+              <h1 className="h2 fw-bold text-primary mb-2">Voice Intake Session</h1>
+              <p className="text-muted mb-0">Conduct AI-powered medical intake interviews with real-time voice processing</p>
             </div>
+            {sessionStatus !== 'idle' && (
+              <>
+                <div className="col-12 col-lg-4">
+                  <div className={`d-flex flex-column flex-sm-row align-items-start align-sm-center gap-2 gap-sm-3 p-3 rounded-3 border ${sessionStatus === 'connecting' ? 'bg-warning-subtle border-warning' :
+                      sessionStatus === 'active' ? 'bg-success-subtle border-success' :
+                        sessionStatus === 'completed' ? 'bg-primary-subtle border-primary' :
+                          'bg-danger-subtle border-danger'
+                    }`}>
+                    <div className="d-flex align-items-center gap-2 flex-shrink-0">
+                      <div className={`rounded-circle status-dot ${sessionStatus === 'active' ? 'bg-success' :
+                          sessionStatus === 'error' ? 'bg-danger' :
+                            sessionStatus === 'connecting' ? 'bg-warning' :
+                              'bg-secondary'
+                        }`}></div>
+                      <span className="fw-semibold small">
+                        {sessionStatus === 'connecting' && 'Connecting...'}
+                        {sessionStatus === 'active' && 'Session Active'}
+                        {sessionStatus === 'completed' && 'Session Complete'}
+                        {sessionStatus === 'error' && 'Error Occurred'}
+                      </span>
+                    </div>
+
+                    <div className="d-flex gap-2 flex-wrap">
+                      {sessionStatus === 'active' && (
+                        <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
+                          <i className="fas fa-clock text-muted"></i>
+                          <span className="font-monospace fw-semibold small">{formatDuration(sessionDuration)}</span>
+                        </div>
+                      )}
+
+                      {sessionId && (
+                        <div className="d-flex align-items-center gap-2 px-2 py-1 bg-white rounded flex-shrink-0">
+                          <span className="text-muted small">ID:</span>
+                          <span className="font-monospace fw-semibold small">{sessionId.slice(0, 8)}...</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+
           </div>
         </div>
       </div>
 
       {/* Error Alert */}
       {errorMessage && (
-        <div className="error-banner">
-          <div className="error-banner-content">
-            <div className="error-banner-icon">⚠️</div>
-            <div className="error-banner-text">
-              <h4>Session Error</h4>
-              <p>{errorMessage}</p>
+        <div className="container-fluid px-3 px-md-4">
+          <div className="alert alert-danger alert-dismissible mb-3" role="alert">
+            <div className="d-flex align-items-start">
+              <i className="fas fa-exclamation-triangle me-3 mt-1 flex-shrink-0"></i>
+              <div className="flex-grow-1">
+                <h6 className="alert-heading mb-1">Session Error</h6>
+                <p className="mb-0">{errorMessage}</p>
+              </div>
             </div>
-            <button className="error-banner-close" onClick={() => setErrorMessage('')}>
-              ✕
-            </button>
+            <button type="button" className="btn-close" onClick={() => setErrorMessage('')}></button>
           </div>
         </div>
       )}
 
       {/* Main Content Layout */}
-      <div className="session-layout">
-        {/* Main Conversation Area */}
-        <div className="session-main-area">
-          <div className="conversation-card">
-            <div className="conversation-card-header">
-              <div className="conversation-card-title">
-                <h2>Live Conversation</h2>
-              </div>
-              <div className="conversation-indicators">
-                {connectionStatus === 'Connected' && (
-                  <div className="status-indicator-small connected">
-                    <div className="connection-dot-small"></div>
-                    <span>Connected</span>
-                  </div>
-                )}
-                {isRecording && (
-                  <div className="status-indicator-small recording">
-                    <div className="recording-dot-small"></div>
-                    <span>Recording</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="conversation-card-body">
-              <div className="conversation-messages" ref={conversationMessagesRef}>
-                {conversationLog.length === 0 && !pendingSentence ? (
-                  <div className="empty-conversation">
-                    <div className="empty-conversation-icon">🎙️</div>
-                    <h3>Ready to Begin</h3>
-                    <p>Start a new session to begin the AI-powered medical intake conversation</p>
-                  </div>
-                ) : (
-                  <>
-                    {conversationLog.map((entry, index) => (
-                      <div key={index} className={`conversation-message ${entry.type} speaker-${entry.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
-                        <div className="message-avatar">
-                          {entry.speaker === 'Agent' && '🤖'}
-                          {entry.speaker === 'You' && '👤'}
-                          {entry.speaker === 'System' && '⚙️'}
-                          {entry.speaker === '⚠️ ALERT' && '🚨'}
-                        </div>
-                        <div className="message-bubble">
-                          <div className="message-header">
-                            <span className="message-speaker">{entry.speaker}</span>
-                            <span className="message-time">{entry.timestamp}</span>
-                          </div>
-                          <div className="message-content">
-                            {entry.message.split('\n').map((line, i) => (
-                              <p key={i}>{line}</p>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-
-                    {/* Show pending sentence with typing indicator */}
-                    {pendingSentence && (
-                      <div className={`conversation-message typing speaker-${pendingSentence.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
-                        <div className="message-avatar">
-                          {pendingSentence.speaker === 'Agent' && '🤖'}
-                          {pendingSentence.speaker === 'You' && '👤'}
-                        </div>
-                        <div className="message-bubble">
-                          <div className="message-header">
-                            <span className="message-speaker">{pendingSentence.speaker}</span>
-                            <span className="message-time">{new Date().toLocaleTimeString()}</span>
-                          </div>
-                          <div className="message-content">
-                            <p>{pendingSentence.text}<span className="typing-indicator">|</span></p>
-                          </div>
-                        </div>
-                      </div>
+      <div className="container-fluid px-3 px-md-4 pb-4">
+        <div className="row g-3 g-md-4">
+          {/* Main Conversation Area */}
+          <div className="col-12 col-xl-8">
+            <div className="card h-100 border-0 shadow-sm">
+              <div className="card-header bg-white border-bottom">
+                <div className="d-flex justify-content-between align-items-center">
+                  <div className="d-flex align-items-center gap-3">
+                    <h5 className="card-title mb-0">Live Conversation</h5>
+                    {speaker && (
+                      <span className="badge bg-info-subtle text-info border border-info-subtle fw-semibold px-3 py-2">
+                        <i className={`fas me-2 ${speaker === 'Agent' ? 'fa-volume-up' : 'fa-microphone'}`} style={{ fontSize: '0.875rem' }}></i>
+                        <span className="fs-6">
+                          {speaker === 'Agent' ? 'Doctor' : 'Patient'}
+                        </span>
+                      </span>
                     )}
-                  </>
-                )}
+                  </div>
+                  <div className="d-flex gap-2">
+                    {connectionStatus === 'Connected' && (
+                      <span className="badge bg-success-subtle text-success border border-success-subtle">
+                        <i className="fas fa-circle me-1 status-icon-small"></i>
+                        Connected
+                      </span>
+                    )}
+                    {connectionStatus === 'Connecting to Retell AI...' && (
+                      <span className="badge bg-warning-subtle text-warning border border-warning-subtle">
+                        <i className="fas fa-spinner fa-spin me-1" style={{ fontSize: '0.5rem' }}></i>
+                        Connecting to Retell AI
+                      </span>
+                    )}
+                    {provider !== 'retellai' && isRecording && (
+                      <span className="badge bg-danger-subtle text-danger border border-danger-subtle">
+                        <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem', animation: 'pulse 1.5s infinite' }}></i>
+                        Recording
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="card-body p-0 conversation-card-body">
+                <div className="conversation-messages h-100 overflow-auto p-4" ref={conversationMessagesRef}>
+                  {conversationLog.length === 0 && !pendingSentence ? (
+                    <div className="d-flex flex-column align-items-center justify-content-center h-100 text-center conversation-card-body-cursor"
+                      onClick={() => setShowPatientForm(true)}>
+                      <i className="fas fa-microphone fa-4x text-muted mb-4" style={{ opacity: '0.5' }}></i>
+                      <h4 className="text-primary mb-2">Ready to Begin</h4>
+                      <p className="text-muted">Start a new session to begin the AI-powered medical intake conversation</p>
+                    </div>
+                  ) : (
+                    <>
+                      {conversationLog.map((entry, index) => (
+                        <div key={index} className={`conversation-message d-flex gap-3 mb-4 speaker-${entry.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
+                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${entry.speaker === 'Agent' ? 'bg-primary-subtle text-primary' :
+                              entry.speaker === 'You' ? 'bg-success-subtle text-success' :
+                                entry.speaker === 'System' ? 'bg-warning-subtle text-warning' :
+                                  'bg-danger-subtle text-danger'
+                            } message-avatar"`}>
+                            {entry.speaker === 'Agent' && <i className="fas fa-user-md"></i>}
+                            {entry.speaker === 'You' && <i className="fas fa-user"></i>}
+                            {entry.speaker === 'System' && <i className="fas fa-cog"></i>}
+                            {entry.speaker === '⚠️ ALERT' && <i className="fas fa-exclamation-triangle"></i>}
+                          </div>
+                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${entry.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' :
+                              entry.speaker === 'You' ? 'bg-success-subtle border border-success-subtle' :
+                                entry.speaker === 'System' ? 'bg-warning-subtle border border-warning-subtle' :
+                                  'bg-danger-subtle border border-danger-subtle'
+                            }`} style={{ maxWidth: '80%' }}>
+                            <div className="d-flex justify-content-between align-items-center mb-2">
+                              <span className="fw-semibold small">{entry.speaker}</span>
+                              <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{entry.timestamp}</span>
+                            </div>
+                            <div className="message-content">
+                              {entry.message.split('\n').map((line, i) => (
+                                <p key={i} className="mb-1 last:mb-0">{line}</p>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Show pending sentence with typing indicator */}
+                      {pendingSentence && (
+                        <div className={`conversation-message d-flex gap-3 mb-4 speaker-${pendingSentence.speaker.toLowerCase().replace(/[^a-z]/g, '')}`}>
+                          <div className={`message-avatar rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 ${pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle text-primary' : 'bg-success-subtle text-success'
+                            } message-avatar"`}>
+                            {pendingSentence.speaker === 'Agent' ? <i className="fas fa-user-md"></i> : <i className="fas fa-user"></i>}
+                          </div>
+                          <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${pendingSentence.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' : 'bg-success-subtle border border-success-subtle'
+                            }`} style={{ maxWidth: '80%', opacity: '0.8' }}>
+                            <div className="d-flex justify-content-between align-items-center mb-2">
+                              <span className="fw-semibold small">
+                                {pendingSentence.speaker === 'Agent' ? 'Doctor' : 'Patient'}
+                              </span>
+                              <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{new Date().toLocaleTimeString()}</span>
+                            </div>
+                            <div className="message-content">
+                              <p className="mb-0">{pendingSentence.text}<span className="typing-indicator text-primary fw-bold">|</span></p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           </div>
-        </div>
 
-        {/* Sidebar Controls */}
-        <div className="session-sidebar">
-          {/* Session Controls */}
-          <div className="control-panel">
-            <h3 className="panel-title">Session Controls</h3>
+          {/* Sidebar Controls */}
+          <div className="col-12 col-xl-4">
+            <div className="row g-3 g-md-4">
+              {/* Session Controls */}
+              {sessionStatus && sessionStatus !== 'idle' && (
+                <>
+                <div className="col-12">
+                  <div className="card border-0 shadow-sm h-100">
 
-            <div className="control-actions">
-              {sessionStatus === 'idle' && (
-                <div className="control-btn primary large" onClick={() => setShowPatientForm(true)}>
-                  <span className="btn-icon">🎙️</span>
-                  <span className="btn-content">
-                    <span className="btn-text">Start New Session</span>
-                    <span className="btn-subtitle">Begin voice intake</span>
-                  </span>
+                    <div className="card-header bg-white border-bottom">
+                      <h5 className="card-title mb-0">Session Controls</h5>
+                    </div>
+                    <div className="card-body">
+                      <div className="d-grid gap-3">
+                        {sessionStatus === 'active' && (
+                          <>
+                            {provider === 'retellai' ? (
+                              // Retell AI controls - simpler, just end call
+                              <button className="btn btn-danger btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                                <i className="fas fa-phone-slash fa-2x flex-shrink-0"></i>
+                                <div className="text-start flex-grow-1">
+                                  <div className="fw-bold">End Call</div>
+                                  <small className="opacity-75">Terminate voice call</small>
+                                </div>
+                              </button>
+                            ) : (
+                              // OpenAI controls - recording controls
+                              <>
+                                <button className={`btn ${isRecording ? 'btn-warning' : 'btn-primary'} btn-lg d-flex align-items-center gap-3 p-3 w-100`} onClick={toggleRecording}>
+                                  <i className={`fas ${isRecording ? 'fa-pause' : 'fa-microphone'} fa-2x flex-shrink-0`}></i>
+                                  <div className="text-start flex-grow-1">
+                                    <div className="fw-bold">{isRecording ? 'Pause Recording' : 'Resume Recording'}</div>
+                                    <small className="opacity-75">{isRecording ? 'Stop voice input' : 'Continue conversation'}</small>
+                                  </div>
+                                </button>
+
+                                <button className="btn btn-danger d-flex align-items-center gap-3 p-3 w-100" onClick={endSession}>
+                                  <i className="fas fa-stop fa-lg flex-shrink-0"></i>
+                                  <div className="text-start flex-grow-1">
+                                    <div className="fw-bold">End Session</div>
+                                    <small className="opacity-75">Terminate conversation</small>
+                                  </div>
+                                </button>
+                              </>
+                            )}
+                          </>
+                        )}
+
+                        {sessionStatus === 'completed' && (
+                          <>
+                            <button className="btn btn-success btn-lg d-flex align-items-center gap-3 p-3 w-100" onClick={resetSession}>
+                              <i className="fas fa-plus fa-2x flex-shrink-0"></i>
+                              <div className="text-start flex-grow-1">
+                                <div className="fw-bold">Start New Session</div>
+                                <small className="opacity-75">Begin another intake</small>
+                              </div>
+                            </button>
+
+                            <button className="btn btn-outline-secondary d-flex align-items-center gap-3 p-3 w-100" onClick={() => handleTranscriptModalToggle(true)}>
+                              <i className="fas fa-file-alt fa-lg flex-shrink-0"></i>
+                              <div className="text-start flex-grow-1">
+                                <div className="fw-bold">View Transcript</div>
+                                <small className="opacity-75">See conversation history</small>
+                              </div>
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              )}
+              </>
+            )}
 
-              {sessionStatus === 'active' && (
-                <>
-                  <div className="control-btn primary large" onClick={toggleRecording}>
-                    <span className="btn-icon">{isRecording ? '⏸️' : '🎤'}</span>
-                    <span className="btn-content">
-                      <span className="btn-text">{isRecording ? 'Pause Recording' : 'Resume Recording'}</span>
-                      <span className="btn-subtitle">{isRecording ? 'Stop voice input' : 'Continue conversation'}</span>
-                    </span>
+              {/* Helpful Tips */}
+              <div className="col-12">
+                <div className="card border-0 shadow-sm h-100">
+                  <div className="card-header bg-white border-bottom">
+                    <h5 className="card-title mb-0">Tips for Better Results</h5>
                   </div>
-
-                  <div className="control-btn danger" onClick={endSession}>
-                    <span className="btn-icon">⏹️</span>
-                    <span className="btn-content">
-                      <span className="btn-text">End Session</span>
-                      <span className="btn-subtitle">Terminate conversation</span>
-                    </span>
+                  <div className="card-body">
+                    <div className="d-flex flex-column gap-2 gap-md-3">
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-microphone text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Speak clearly and at a normal pace</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-volume-mute text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Minimize background noise</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-edit text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Provide detailed information</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-pause text-primary mt-1 flex-shrink-0"></i>
+                        <span className="small">Pause between different topics</span>
+                      </div>
+                      <div className="d-flex align-items-start gap-2 gap-md-3 p-2 bg-light rounded">
+                        <i className="fas fa-exclamation-triangle text-danger mt-1 flex-shrink-0"></i>
+                        <span className="small">Mention any urgent symptoms immediately</span>
+                      </div>
+                    </div>
                   </div>
-                </>
-              )}
-
-              {sessionStatus === 'completed' && (
-                <>
-                  <div className="control-btn success large" onClick={resetSession}>
-                    <span className="btn-icon">🆕</span>
-                    <span className="btn-content">
-                      <span className="btn-text">Start New Session</span>
-                      <span className="btn-subtitle">Begin another intake</span>
-                    </span>
-                  </div>
-
-                  <div className="control-btn secondary" onClick={() => setShowTranscript(true)}>
-                    <span className="btn-icon">📋</span>
-                    <span className="btn-content">
-                      <span className="btn-text">View Transcript</span>
-                      <span className="btn-subtitle">See conversation history</span>
-                    </span>
-                  </div>
-                </>
-              )}
+                </div>
+              </div>
             </div>
-          </div>
-
-
-          {/* Helpful Tips */}
-          <div className="tips-panel">
-            <h3 className="panel-title">Tips for Better Results</h3>
-            <ul className="tips-list">
-              <li className="tip-item">
-                <span className="tip-icon">🎤</span>
-                <span>Speak clearly and at a normal pace</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">🔇</span>
-                <span>Minimize background noise</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">📝</span>
-                <span>Provide detailed information</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">⏸️</span>
-                <span>Pause between different topics</span>
-              </li>
-              <li className="tip-item">
-                <span className="tip-icon">🚨</span>
-                <span>Mention any urgent symptoms immediately</span>
-              </li>
-            </ul>
           </div>
         </div>
       </div>
 
       {/* Transcript Modal */}
       {showTranscript && (
-        <div className="modal-overlay" onClick={() => setShowTranscript(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 className="modal-title">Session Transcript</h2>
-              <button className="modal-close" onClick={() => setShowTranscript(false)}>
-                ✕
-              </button>
-            </div>
-            <div className="modal-body">
-              {conversationLog.length === 0 ? (
-                <p className="modal-empty">No conversation recorded yet.</p>
-              ) : (
-                <div className="modal-messages">
-                  {conversationLog.map((entry, index) => (
-                    <div key={index} className={`modal-message ${entry.type}`}>
-                      <div className="modal-message-meta">
-                        <span className="modal-speaker">{entry.speaker}</span>
-                        <span className="modal-time">{entry.timestamp}</span>
+        <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }} onClick={() => handleTranscriptModalToggle(false)}>
+          <div className="modal-dialog modal-lg modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content border-0 shadow">
+              <div className="modal-header bg-light">
+                <h5 className="modal-title fw-semibold">Session Transcript</h5>
+                <button type="button" className="btn-close" onClick={() => handleTranscriptModalToggle(false)}></button>
+              </div>
+              <div className="modal-body" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                {transcriptLoading ? (
+                  <div className="text-center py-5">
+                    <i className="fas fa-spinner fa-spin fa-3x text-primary mb-3"></i>
+                    <h5 className="text-primary">Loading Transcript...</h5>
+                    <p className="text-muted">Retrieving conversation data from database</p>
+                  </div>
+                ) : transcriptError ? (
+                  <div className="text-center py-5 bg-danger-subtle border border-danger rounded">
+                    <i className="fas fa-exclamation-triangle fa-3x text-danger mb-3"></i>
+                    <h5 className="text-danger">Failed to Load Transcript</h5>
+                    <p className="text-muted mb-0">{transcriptError}</p>
+                  </div>
+                ) : !transcriptData || transcriptData.length === 0 ? (
+                  <div className="text-center text-muted py-5">
+                    <i className="fas fa-file-alt fa-3x mb-3 opacity-50"></i>
+                    <p className="mb-0">No conversation recorded yet.</p>
+                  </div>
+                ) : (
+                  <div className="d-flex flex-column gap-3">
+                    {transcriptData.map((entry, index) => (
+                      <div key={index} className={`p-3 rounded border-start border-4 ${entry.type === 'system' ? 'bg-warning-subtle border-warning' :
+                          entry.type === 'alert' ? 'bg-danger-subtle border-danger' :
+                            'bg-light border-primary'
+                        }`}>
+                        <div className="d-flex justify-content-between align-items-center mb-2">
+                          <span className="fw-semibold small text-primary">{entry.speaker}</span>
+                          <span className="text-muted font-monospace" style={{ fontSize: '0.75rem' }}>{entry.timestamp}</span>
+                        </div>
+                        <div className="message-content">
+                          {entry.message.split('\n').map((line, i) => (
+                            <p key={i} className="mb-1 last:mb-0">{line}</p>
+                          ))}
+                        </div>
                       </div>
-                      <div className="modal-message-content">
-                        {entry.message.split('\n').map((line, i) => (
-                          <p key={i}>{line}</p>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setShowTranscript(false)}>
-                Close
-              </button>
-              <button className="btn btn-primary" onClick={() => {
-                const transcript = conversationLog.map(entry =>
-                  `[${entry.timestamp}] ${entry.speaker}: ${entry.message}`
-                ).join('\n\n');
-                navigator.clipboard.writeText(transcript);
-                alert('Transcript copied to clipboard!');
-              }}>
-                Copy Transcript
-              </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="modal-footer bg-light">
+                <button type="button" className="btn btn-secondary" onClick={() => handleTranscriptModalToggle(false)}>
+                  Close
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary d-flex align-items-center gap-2"
+                  onClick={() => {
+                    const transcript = (transcriptData || conversationLog).map(entry =>
+                      `[${entry.timestamp}] ${entry.speaker}: ${entry.message}`
+                    ).join('\n\n');
+                    navigator.clipboard.writeText(transcript);
+                    alert('Transcript copied to clipboard!');
+                  }}
+                  disabled={!transcriptData && !conversationLog.length}
+                >
+                  <i className="fas fa-copy"></i>
+                  Copy Transcript
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -907,49 +1544,54 @@ const Session: React.FC = () => {
 
       {/* Patient Name Form Modal */}
       {showPatientForm && (
-        <div className="modal-overlay" onClick={handlePatientFormCancel}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 className="modal-title">Enter Patient Information</h2>
-              <button className="modal-close" onClick={handlePatientFormCancel}>
-                ✕
-              </button>
-            </div>
-            <div className="modal-body">
-              <form onSubmit={handlePatientFormSubmit}>
-                <div className="form-group">
-                  <label htmlFor="patientName" className="form-label">
-                    Patient Name <span className="required">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    id="patientName"
-                    className="form-input"
-                    value={patientName}
-                    onChange={(e) => setPatientName(e.target.value)}
-                    placeholder="Enter patient's full name"
-                    autoFocus
-                    required
-                  />
-                </div>
-              </form>
-            </div>
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={handlePatientFormCancel}
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="btn btn-primary"
-                onClick={handlePatientFormSubmit}
-                disabled={!patientName.trim()}
-              >
-                Start Session
-              </button>
+        <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }} onClick={handlePatientFormCancel}>
+          <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content border-0 shadow">
+              <div className="modal-header bg-light">
+                <h5 className="modal-title fw-semibold">Enter Patient Information</h5>
+                <button type="button" className="btn-close" onClick={handlePatientFormCancel}></button>
+              </div>
+              <div className="modal-body">
+                <form onSubmit={handlePatientFormSubmit}>
+                  <div className="mb-3">
+                    <label htmlFor="patientName" className="form-label fw-semibold">
+                      Patient Name <span className="text-danger">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      id="patientName"
+                      className="form-control form-control-lg"
+                      value={patientName}
+                      onChange={(e) => setPatientName(e.target.value)}
+                      placeholder="Enter patient's full name"
+                      autoFocus
+                      required
+                    />
+                    <div className="form-text">
+                      <i className="fas fa-info-circle me-1"></i>
+                      This information will be used to identify the session
+                    </div>
+                  </div>
+                </form>
+              </div>
+              <div className="modal-footer bg-light">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handlePatientFormCancel}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary d-flex align-items-center gap-2"
+                  onClick={handlePatientFormSubmit}
+                  disabled={!patientName.trim()}
+                >
+                  <i className="fas fa-play"></i>
+                  Start Session
+                </button>
+              </div>
             </div>
           </div>
         </div>
