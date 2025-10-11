@@ -970,6 +970,10 @@ private estimateIntakeProgress(turnCount: number): string {
         resolved: false,
         clinician_notified: true // Auto-mark as clinician notified since we're ending session
       });
+
+      // ✅ INCREMENT SESSION RED FLAG COUNT
+      db.updateSessionRedFlagCount(sessionId);
+
       db.insertAuditLog({
         action: 'red_flag_detected_session_ended',
         details: JSON.stringify({

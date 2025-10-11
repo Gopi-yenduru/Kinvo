@@ -280,6 +280,20 @@ export class DataService {
         return result[0]; // first (and only) inserted row
     }
 
+    public async updateSessionRedFlagCount(sessionId: string): Promise<void> {
+        await this.runQueryWithInput(
+            `UPDATE sessions SET red_flags_detected = red_flags_detected + 1 WHERE id = @id`,
+            [
+                { name: 'id', type: sql.VarChar, value: sessionId }
+            ]
+        );
+
+        // Invalidate cache for sessions and related data
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.DASHBOARD_SUMMARY);
+    }
+
     public async updateSessionStatus(sessionId: string, status: string): Promise<void> {
         await this.runQueryWithInput(
             `UPDATE sessions SET status = @status, end_time = CASE WHEN @status = 'completed' THEN CURRENT_TIMESTAMP ELSE end_time END WHERE id = @id`,
