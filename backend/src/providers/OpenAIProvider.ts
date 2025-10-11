@@ -106,7 +106,7 @@ private async maybePruneConversation(sessionId: string, ws: WebSocket | null, tu
     // Create a summary of the conversation so far
     const summaryMessage = await this.generateConversationSummary(sessionId, turnCount);
 
-    // Step 1: Inject summary as a system message to preserve contexts
+    // Step 1: Inject summary as a system message to preserve context
     const summaryPayload = {
       type: "conversation.item.create",
       item: {
