@@ -1409,8 +1409,49 @@ h1, .h1, h2, .h2, h3, .h3, h4, .h4, h5, .h5, h6, .h6 {
 }
 
 .action-btn-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1, 0.25rem);
   font-size: 0.75rem;
+  font-weight: bold;
   padding: 0.25rem 0.5rem;
+  background: transparent;
+  border: none;
+  color: var(--medical-teal, #2487b7);
+  text-decoration: underline;
+  cursor: pointer;
+  transition: all var(--transition-fast, 150ms ease-out);
+  min-height: var(--min-touch-target, 44px);
+  font-family: var(--font-family-primary, 'Inter', sans-serif);
+  outline: none;
+  border-radius: var(--radius-sm, 0.25rem);
+}
+
+.action-btn-sm:focus {
+  outline: none;
+  text-decoration: none;
+  color: #1e6c94;
+}
+
+.action-btn-sm:hover {
+  text-decoration: none;
+  color: #1e6c94;
+  background: rgba(36, 135, 183, 0.05);
+}
+
+.action-btn-sm:disabled {
+  color: var(--text-muted, #64748b);
+  text-decoration: underline;
+  cursor: not-allowed;
+  background: transparent;
+}
+
+/* Icon styling for action links */
+.action-btn-sm .btn-icon-sm {
+  font-size: 0.875rem;
+  flex-shrink: 0;
+  opacity: 0.8;
 }
 
 /* Empty state */

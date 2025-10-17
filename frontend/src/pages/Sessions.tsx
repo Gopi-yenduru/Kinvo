@@ -11,32 +11,47 @@ interface Session {
   estimated_cost?: number;
 }
 
+interface PaginationInfo {
+  currentPage: number;
+  totalPages: number;
+  totalCount: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  pageSize: number;
+}
+
+interface SessionsResponse {
+  sessions: Session[];
+  pagination: PaginationInfo;
+}
+
 const Sessions: React.FC = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [pagination, setPagination] = useState<PaginationInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [generatingReport, setGeneratingReport] = useState<string | null>(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportContent, setReportContent] = useState<string>('');
   const [reportSessionId, setReportSessionId] = useState<string>('');
-  
+  const [isReportCached, setIsReportCached] = useState<boolean>(false);
+  const [reportGeneratedAt, setReportGeneratedAt] = useState<string>('');
+
   const navigate = useNavigate();
 
   useEffect(() => {
     fetchSessions();
   }, []);
 
-  const fetchSessions = async () => {
+  const fetchSessions = async (page: number = 1, limit: number = 10) => {
     try {
       setLoading(true);
-      const response = await fetch('/api/sessions');
-      const data = await response.json();
-      
+      const response = await fetch(`/api/sessions?page=${page}&limit=${limit}`);
+      const data: SessionsResponse = await response.json();
+
       if (data.sessions) {
-        const sortedSessions = data.sessions.sort((a: Session, b: Session) =>
-          new Date(b.start_time).getTime() - new Date(a.start_time).getTime()
-        );
-        setSessions(sortedSessions);
+        setSessions(data.sessions);
+        setPagination(data.pagination);
       } else {
         setError('Failed to load sessions');
       }
@@ -46,6 +61,14 @@ const Sessions: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const goToPage = (page: number) => {
+    fetchSessions(page, pagination?.pageSize || 10);
+  };
+
+  const changePageSize = (newLimit: number) => {
+    fetchSessions(1, newLimit);
   };
 
   const viewTranscript = async (sessionId: string) => {
@@ -75,6 +98,30 @@ const Sessions: React.FC = () => {
       if (data.report) {
         setReportContent(data.report);
         setReportSessionId(sessionId);
+        setIsReportCached(data.cached || false);
+
+        // Format timestamp for display
+        if (data.generatedAt) {
+          const generatedDate = new Date(data.generatedAt);
+          const now = new Date();
+          const diffMs = now.getTime() - generatedDate.getTime();
+          const diffMins = Math.floor(diffMs / 60000);
+          const diffHours = Math.floor(diffMins / 60);
+          const diffDays = Math.floor(diffHours / 24);
+
+          let timeMsg = '';
+          if (diffMins < 1) {
+            timeMsg = 'just now';
+          } else if (diffMins < 60) {
+            timeMsg = `${diffMins} minutes ago`;
+          } else if (diffHours < 24) {
+            timeMsg = `${diffHours} hours ago`;
+          } else {
+            timeMsg = `${diffDays} days ago`;
+          }
+          setReportGeneratedAt(timeMsg);
+        }
+
         setShowReportModal(true);
       } else {
         setError('Failed to generate report');
@@ -161,9 +208,9 @@ const Sessions: React.FC = () => {
                 <i className="fas fa-clipboard-list"></i>
               </div>
               <div className="stat-content">
-                <div className="stat-number">{sessions.length}</div>
+                <div className="stat-number">{pagination?.totalCount || sessions.length}</div>
                 <div className="stat-label">Total Sessions</div>
-                
+
               </div>
             </div>
           </div>
@@ -175,8 +222,8 @@ const Sessions: React.FC = () => {
               </div>
               <div className="stat-content">
                 <div className="stat-number">{sessions.filter(s => s.red_flags_detected > 0).length}</div>
-                <div className="stat-label">With Red Flags</div>
-                
+                <div className="stat-label">With Red Flags (Current Page)</div>
+
               </div>
             </div>
           </div>
@@ -188,8 +235,8 @@ const Sessions: React.FC = () => {
               </div>
               <div className="stat-content">
                 <div className="stat-number">{sessions.filter(s => s.status === 'completed').length}</div>
-                <div className="stat-label">Completed</div>
-                
+                <div className="stat-label">Completed (Current Page)</div>
+
               </div>
             </div>
           </div>
@@ -213,7 +260,7 @@ const Sessions: React.FC = () => {
             )}
           </div>
         ) : (
-          <div className="sessions-table-container">
+          <div className="sessions-table-container" style={{ marginBottom: '20px' }}>
             <table className="sessions-table">
               <thead>
                 <tr>
@@ -286,6 +333,73 @@ const Sessions: React.FC = () => {
             </table>
           </div>
         )}
+
+        {/* Pagination Controls */}
+        {pagination && pagination.totalPages > 1 && (
+          <div className="pagination-container">
+            <div className="pagination-controls" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                <div className="pagination-info">
+                  <span style={{ fontWeight: 'bold' }}>
+                    Showing {((pagination.currentPage - 1) * pagination.pageSize) + 1} to{' '}
+                    {Math.min(pagination.currentPage * pagination.pageSize, pagination.totalCount)} of{' '}
+                    {pagination.totalCount} sessions
+                  </span>
+                </div>
+
+                <div className="pagination-size-selector">
+                  <label htmlFor="pageSize" style={{ fontWeight: 'bold' }}>Page size:</label>
+                  <select
+                    id="pageSize"
+                    value={pagination.pageSize}
+                    onChange={(e) => changePageSize(parseInt(e.target.value))}
+                  >
+                    <option value="10">10</option>
+                    <option value="20">20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="pagination-buttons" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button
+                  className="btn btn-sm btn-secondary"
+                  onClick={() => goToPage(1)}
+                  disabled={!pagination.hasPreviousPage}
+                >
+                  First
+                </button>
+                <button
+                  className="btn btn-sm btn-secondary"
+                  onClick={() => goToPage(pagination.currentPage - 1)}
+                  disabled={!pagination.hasPreviousPage}
+                >
+                  Previous
+                </button>
+
+                <span className="pagination-page">
+                  Page {pagination.currentPage} of {pagination.totalPages}
+                </span>
+
+                <button
+                  className="btn btn-sm btn-secondary"
+                  onClick={() => goToPage(pagination.currentPage + 1)}
+                  disabled={!pagination.hasNextPage}
+                >
+                  Next
+                </button>
+                <button
+                  className="btn btn-sm btn-secondary"
+                  onClick={() => goToPage(pagination.totalPages)}
+                  disabled={!pagination.hasNextPage}
+                >
+                  Last
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Report Modal */}
@@ -294,6 +408,18 @@ const Sessions: React.FC = () => {
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2 className="modal-title">Medical Intake Report</h2>
+              <div className="modal-subtitle" style={{
+                fontSize: '0.875rem',
+                color: isReportCached ? '#2563eb' : '#059669',
+                fontWeight: '500',
+                marginTop: '0.25rem'
+              }}>
+                {isReportCached ? (
+                  <>📋 Report generated {reportGeneratedAt}</>
+                ) : (
+                  <>✨ Report generated {reportGeneratedAt}</>
+                )}
+              </div>
               <button className="modal-close" onClick={closeReportModal}>
                 ×
               </button>

@@ -34,6 +34,26 @@ app.get('/health', (req: any, res: any) => {
   res.json({ status: 'OK', message: 'Medical Intake Voice Agent Backend is running' });
 });
 
+// Initialize performance indexes (one-time setup)
+app.post('/api/setup-indexes', async (req: any, res: any) => {
+  try {
+    console.log('🛠️ Setting up database performance indexes...');
+    await db.createPerformanceIndexes();
+    console.log('✅ Database performance indexes setup complete');
+
+    res.json({
+      success: true,
+      message: 'Database performance indexes have been created/improved'
+    });
+  } catch (error: any) {
+    console.error('Failed to setup performance indexes:', error);
+    res.status(500).json({
+      error: 'Failed to setup performance indexes',
+      details: error.message
+    });
+  }
+});
+
 // Debug route to test database savings
 app.post('/api/test-agent-response', async (req: any, res: any) => {
   try {
@@ -687,7 +707,7 @@ app.post('/api/sessions/:sessionId/transcript', authenticateJWT, async (req: any
   }
 });
 
-// Get red flag events for all sessions (for clinician dashboard) - MUST be defined BEFORE :sessionId routes
+// Get recent red flag events (for clinician dashboard) - Optimized: loads only recent events directly
 app.get('/api/sessions/red-flags', async (req: any, res: any) => {
   console.log('📡 REQUEST DETAILS:', {
     method: req.method,
@@ -696,34 +716,15 @@ app.get('/api/sessions/red-flags', async (req: any, res: any) => {
     headers: req.headers
   });
   try {
-    console.log('🔍 DEBUG: Fetching red flags for all sessions');
-    const redFlags: any[] = [];
+    // Only load recent red flags (last 24 hours) for dashboard efficiency
+    const hoursBack = parseInt(req.query.hours) || 24;
+    console.log(`🔍 DEBUG: Fetching red flags for last ${hoursBack} hours`);
 
-    // Get all sessions to include completed ones that may have red flags
-    const sessions = await db.getAllSessions();
+    // Direct query to red_flag_events table (much more efficient!)
+    const recentRedFlags = await db.getRecentRedFlagEvents(hoursBack);
 
-    console.log(`🔍 DEBUG: Found ${sessions?.length || 0} sessions`);
-
-    if (sessions && sessions.length > 0) {
-      await Promise.all(sessions.map(async (session: any) => {
-        console.log(`🔍 DEBUG: Checking session ${session.id} for red flags`);
-        try {
-          const sessionRedFlags = await db.getRedFlagEvents(session.id);
-          console.log(`🔍 DEBUG: Session ${session.id} has ${sessionRedFlags?.length || 0} red flags`);
-          if (sessionRedFlags && sessionRedFlags.length > 0) {
-            redFlags.push(...sessionRedFlags);
-          }
-        } catch (sessionError: any) {
-          console.error(`🔍 DEBUG: Error getting red flags for session ${session.id}:`, sessionError.message);
-        }
-      }));
-    }
-
-    // Sort by timestamp (most recent first)
-    redFlags.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    console.log(`🔍 DEBUG: Returning ${redFlags.length} total red flags`);
-
-    res.json({ redFlags });
+    console.log(`🔍 DEBUG: Found ${recentRedFlags.length} recent red flags`);
+    res.json({ redFlags: recentRedFlags });
   } catch (error: any) {
     console.error('Failed to get red flag events:', error);
     res.status(500).json({ error: 'Failed to retrieve red flag events', details: error.message });
@@ -783,30 +784,39 @@ app.get('/api/sessions-counts', async (req: any, res: any) => {
   }
 });
 
-// Get all active sessions
+// Get all active sessions (with pagination support)
 app.get('/api/sessions', async (req: any, res: any) => {
-  console.log('🔍 DEBUG: Getting all sessions');
+  console.log('🔍 DEBUG: Getting sessions with pagination');
   try {
-    const sessions = await db.getAllSessions();
-    console.log(`🔍 DEBUG: Found ${sessions?.length || 0} total sessions`);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const status = req.query.status;
+
+    // Validate pagination parameters
+    if (page < 1 || limit < 1 || limit > 200) {
+      return res.status(400).json({
+        error: 'Invalid pagination parameters',
+        message: 'Page must be >= 1, limit must be 1-200'
+      });
+    }
+
+    const result = await db.getSessionsPaginated(page, limit, status);
+    console.log(`🔍 DEBUG: Found ${result.total} total sessions, returning page ${page} with ${result.sessions.length} sessions`);
 
     // Enrich sessions with token usage data for completed sessions
     const enrichedSessions = await Promise.all(
-      (sessions || []).map(async (session: any) => {
+      result.sessions.map(async (session: any) => {
         let estimatedCost = null;
 
         // Only try to get cost for completed sessions
         if (session.status === 'completed') {
           try {
-            //console.log(`🔍 DEBUG: Checking token usage for completed session ${session.id}`);
             // Try to get token usage from database
             const tokenUsageList = await db.getSessionTokenUsage(session.id);
-            //console.log(`🔍 DEBUG: Found ${tokenUsageList?.length || 0} token usage records for session ${session.id}`);
 
             // Get the latest token usage entry (in case multiple)
             if (tokenUsageList && tokenUsageList.length > 0) {
-              const latestUsage = tokenUsageList[0]; // Already ordered by timestamp DESC
-              //console.log(`🔍 DEBUG: Latest token usage for ${session.id}: estimated_cost=${latestUsage.estimated_cost}`);
+              const latestUsage = tokenUsageList[0];
               if (latestUsage.estimated_cost > 0) {
                 estimatedCost = latestUsage.estimated_cost;
               }
@@ -824,8 +834,18 @@ app.get('/api/sessions', async (req: any, res: any) => {
       })
     );
 
-    console.log(`🔍 DEBUG: Returning ${enrichedSessions.length} enriched sessions`);
-    res.json({ sessions: enrichedSessions });
+    console.log(`🔍 DEBUG: Returning page ${result.currentPage}/${result.totalPages} with ${enrichedSessions.length} enriched sessions`);
+    res.json({
+      sessions: enrichedSessions,
+      pagination: {
+        currentPage: result.currentPage,
+        totalPages: result.totalPages,
+        totalCount: result.total,
+        hasNextPage: result.currentPage < result.totalPages,
+        hasPreviousPage: result.currentPage > 1,
+        pageSize: limit
+      }
+    });
   } catch (error: any) {
     console.error('Failed to get sessions:', error);
     res.status(500).json({ error: 'Failed to retrieve sessions' });
@@ -914,12 +934,28 @@ app.get('/api/sessions/:sessionId/transcript', async (req: any, res: any) => {
   }
 });
 
-// Generate report using OpenAI
+// Generate report using OpenAI with database caching
 app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) => {
   try {
     const { sessionId } = req.params;
 
-    // Get settings for API key   
+    // Step 1: Check if report already cached in database
+    const cachedReport = await db.getReport(sessionId);
+
+    if (cachedReport) {
+      console.log(`📋 Returning cached report for session ${sessionId} (generated ${cachedReport.generated_at})`);
+
+      return res.json({
+        report: cachedReport.report_content,
+        cached: true,
+        generatedAt: cachedReport.generated_at
+      });
+    }
+
+    // Step 2: Generate new report using OpenAI
+    console.log(`🤖 Generating new report for session ${sessionId}`);
+
+    // Get settings for API key
     const settings = await db.getAllSettings();
     const setting = settings && settings.length > 0 ? settings[0] : null;
     const apiKey = setting?.openai_api_key || process.env.OPENAI_API_KEY;
@@ -936,13 +972,10 @@ app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) 
     if (!conversationLogs || conversationLogs.length === 0) {
       return res.status(404).json({ error: 'No conversation data found for this session' });
     }
-    console.log(`📝 Generating report for session ${sessionId} with ${conversationLogs.length} conversation lines`);
 
     // Get session info and red flags
     const sessionInfo = await db.getSession(sessionId);
-    console.log(' Session info:', sessionInfo);
     const redFlagEvents = await db.getRedFlagEvents(sessionId);
-    console.log(` Session has ${redFlagEvents?.length || 0} red flag events`);
 
     // Format conversation for prompt
     const conversationText = conversationLogs.map((log: any) =>
@@ -981,21 +1014,40 @@ Make the report professional, concise, and suitable for medical records.`;
       temperature: 0.3,
     });
 
-    const report = completion.choices[0]?.message?.content?.trim();
+    const reportContent = completion.choices[0]?.message?.content?.trim();
 
-    if (!report) {
+    if (!reportContent) {
       return res.status(500).json({ error: 'Failed to generate report from OpenAI' });
     }
 
-    // Log audit event   
+    // Step 3: Cache the report in database
+    await db.saveReport({
+      session_id: sessionId,
+      report_content: reportContent,
+      generated_at: new Date(),
+      cost: 0.03, // Approximate GPT-4 cost
+      version: 1
+    });
+
+    console.log(`💾 Cached report for session ${sessionId} in database`);
+
+    // Log audit event
     await db.insertAuditLog({
       action: 'report_generated',
-      details: JSON.stringify({ lines: conversationLogs.length }),
+      details: JSON.stringify({
+        lines: conversationLogs.length,
+        cached: false
+      }),
       session_id: sessionId,
       ip_address: req.ip || null
     });
 
-    res.json({ report });
+    // Return newly generated report
+    res.json({
+      report: reportContent,
+      cached: false,
+      generatedAt: new Date()
+    });
 
   } catch (error: any) {
     console.error('Failed to generate report:', error);
