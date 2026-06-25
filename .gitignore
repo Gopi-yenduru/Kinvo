@@ -230,6 +230,10 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
 backend/data/
 
 # Environment files (IMPORTANT: Keep these private!)
@@ -389,3 +393,6 @@ docs/.vuepress/dist/
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+# DB backups
+backups/
+*.sql

@@ -8,8 +8,13 @@ interface Session {
   status: string;
   red_flags_detected: number;
   patient_name?: string;
+  patient_phone?: string;
   estimated_cost?: number;
+  language?: string;
 }
+
+// Short language badge label from the session's language code.
+const LANG_LABEL: Record<string, string> = { 'te-IN': 'తెలుగు', 'hi-IN': 'हिंदी', 'en-IN': 'English' };
 
 interface PaginationInfo {
   currentPage: number;
@@ -36,6 +41,20 @@ const Sessions: React.FC = () => {
   const [reportSessionId, setReportSessionId] = useState<string>('');
   const [isReportCached, setIsReportCached] = useState<boolean>(false);
   const [reportGeneratedAt, setReportGeneratedAt] = useState<string>('');
+  // Doctor review state
+  const [reportStatus, setReportStatus] = useState<string>('pending');
+  const [reportReviewedBy, setReportReviewedBy] = useState<string | null>(null);
+  const [isEditingReport, setIsEditingReport] = useState<boolean>(false);
+  const [editedContent, setEditedContent] = useState<string>('');
+  const [reviewing, setReviewing] = useState<boolean>(false);
+
+  // Current user's role (stored as JSON in localStorage at login) — gates review actions.
+  const currentRole = (() => {
+    try { return JSON.parse(localStorage.getItem('user') || '{}').role || ''; } catch { return ''; }
+  })();
+  const canReview = currentRole === 'doctor' || currentRole === 'admin';
+  const isAdmin = currentRole === 'admin';   // only admins can delete sessions
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const navigate = useNavigate();
 
@@ -60,6 +79,38 @@ const Sessions: React.FC = () => {
       setError('Unable to load sessions');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Admin only: delete one session (and its data) after confirmation.
+  const handleDeleteSession = async (sessionId: string) => {
+    if (!window.confirm(`Delete session #${sessionId.slice(0, 8)} and all of its data?\nThis cannot be undone.`)) return;
+    try {
+      setDeletingId(sessionId);
+      const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Delete failed');
+      setSessions(prev => prev.filter(s => s.id !== sessionId));
+    } catch (err) {
+      console.error('Delete session failed:', err);
+      setError('Failed to delete session');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // Admin only: delete ALL sessions (keeps patients) after confirmation.
+  const handleDeleteAll = async () => {
+    if (!window.confirm('Delete ALL sessions and their data?\nPatients are kept. This cannot be undone.')) return;
+    try {
+      setDeletingId('all');
+      const res = await fetch('/api/sessions', { method: 'DELETE' });
+      if (!res.ok) throw new Error('Delete failed');
+      await fetchSessions(1, pagination?.pageSize || 10);
+    } catch (err) {
+      console.error('Delete all sessions failed:', err);
+      setError('Failed to delete sessions');
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -99,6 +150,10 @@ const Sessions: React.FC = () => {
         setReportContent(data.report);
         setReportSessionId(sessionId);
         setIsReportCached(data.cached || false);
+        setReportStatus(data.status || 'pending');
+        setReportReviewedBy(data.reviewedBy || null);
+        setIsEditingReport(false);
+        setEditedContent(data.report);
 
         // Format timestamp for display
         if (data.generatedAt) {
@@ -134,6 +189,50 @@ const Sessions: React.FC = () => {
     }
   };
 
+  // Doctor saves edits / approves the report.
+  const reviewReport = async (status: 'pending' | 'approved') => {
+    try {
+      setReviewing(true);
+      const body: any = { status };
+      if (isEditingReport) body.content = editedContent;
+      const res = await fetch(`/api/sessions/${reportSessionId}/report/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) { setError('Failed to save review'); return; }
+      const data = await res.json();
+      if (isEditingReport) setReportContent(editedContent);
+      setReportStatus(data.status);
+      setReportReviewedBy(data.reviewedBy);
+      setIsEditingReport(false);
+    } catch {
+      setError('Unable to save review');
+    } finally {
+      setReviewing(false);
+    }
+  };
+
+  // Export the session as a FHIR R4 Bundle (for EMR/HIS ingestion).
+  const exportFhir = async () => {
+    try {
+      const res = await fetch(`/api/sessions/${reportSessionId}/fhir`);
+      if (!res.ok) { setError('Failed to export FHIR'); return; }
+      const bundle = await res.json();
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/fhir+json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `session-${reportSessionId}-fhir.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError('Unable to export FHIR');
+    }
+  };
+
   const downloadReport = (sessionId: string, content: string) => {
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -161,6 +260,10 @@ const Sessions: React.FC = () => {
     return `${minutes} min`;
   };
 
+  // Numbers-only display ID derived from the session UUID (stable per session, no '#'/letters).
+  // The real UUID is still used for all actions/links and is shown on hover.
+  const toNumericId = (id: string) => parseInt((id.replace(/[^0-9a-f]/gi, '').slice(0, 8) || '0'), 16).toString();
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'completed': return 'success';
@@ -181,11 +284,22 @@ const Sessions: React.FC = () => {
 
   return (
     <div className="sessions-page">
-      <div className="sessions-header">
+      <div className="sessions-header d-flex justify-content-between align-items-start gap-3">
         <div className="page-title">
           <h1>Medical Intake Sessions</h1>
           <p>View and manage all patient intake sessions</p>
         </div>
+        {isAdmin && sessions.length > 0 && (
+          <button
+            className="btn btn-outline-danger btn-sm d-flex align-items-center gap-2 flex-shrink-0"
+            onClick={handleDeleteAll}
+            disabled={deletingId !== null}
+            title="Delete all sessions (admin)"
+          >
+            <i className="fas fa-trash"></i>
+            {deletingId === 'all' ? 'Deleting…' : 'Delete all'}
+          </button>
+        )}
       </div>
 
       {error && (
@@ -266,6 +380,7 @@ const Sessions: React.FC = () => {
                 <tr>
                   <th>Session ID</th>
                   <th>Patient Name</th>
+                  <th>Phone</th>
                   <th>Status</th>
                   <th>Start Time</th>
                   <th>Duration</th>
@@ -277,9 +392,15 @@ const Sessions: React.FC = () => {
               <tbody>
                 {filteredSessions.map((session) => (
                   <tr key={session.id}>
-                    <td>#{session.id.slice(0, 8)}</td>
+                    <td title={session.id}>{toNumericId(session.id)}</td>
                     <td>
                       {session.patient_name || <span className="no-flags">—</span>}
+                      {session.language && (
+                        <span className="badge bg-secondary ms-2 fw-normal">{LANG_LABEL[session.language] || session.language}</span>
+                      )}
+                    </td>
+                    <td>
+                      {session.patient_phone || <span className="no-flags">—</span>}
                     </td>
                     <td>
                       <span className={`status-badge ${getStatusColor(session.status)}`}>
@@ -325,6 +446,17 @@ const Sessions: React.FC = () => {
                           <span className="btn-icon-sm">📄</span>
                           {generatingReport === session.id ? 'Generating...' : 'Generate Report'}
                         </button>
+                        {isAdmin && (
+                          <button
+                            className="action-btn-sm danger"
+                            onClick={() => handleDeleteSession(session.id)}
+                            disabled={deletingId !== null}
+                            title="Delete this session (admin)"
+                          >
+                            <span className="btn-icon-sm">🗑️</span>
+                            {deletingId === session.id ? 'Deleting…' : 'Delete'}
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -408,16 +540,14 @@ const Sessions: React.FC = () => {
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2 className="modal-title">Medical Intake Report</h2>
-              <div className="modal-subtitle" style={{
-                fontSize: '0.875rem',
-                color: isReportCached ? '#2563eb' : '#059669',
-                fontWeight: '500',
-                marginTop: '0.25rem'
-              }}>
-                {isReportCached ? (
-                  <>📋 Report generated {reportGeneratedAt}</>
+              <div className="modal-subtitle" style={{ fontSize: '0.875rem', fontWeight: 500, marginTop: '0.25rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ color: isReportCached ? '#2563eb' : '#059669' }}>
+                  {isReportCached ? '📋' : '✨'} Generated {reportGeneratedAt}
+                </span>
+                {reportStatus === 'approved' ? (
+                  <span style={{ color: '#059669' }}>✅ Approved{reportReviewedBy ? ` by ${reportReviewedBy}` : ''}</span>
                 ) : (
-                  <>✨ Report generated {reportGeneratedAt}</>
+                  <span style={{ color: '#d97706' }}>⏳ Pending doctor review</span>
                 )}
               </div>
               <button className="modal-close" onClick={closeReportModal}>
@@ -425,27 +555,55 @@ const Sessions: React.FC = () => {
               </button>
             </div>
             <div className="modal-body">
-              <pre style={{
-                whiteSpace: 'pre-wrap',
-                fontFamily: 'var(--font-family)',
-                fontSize: '0.875rem',
-                lineHeight: '1.5',
-                color: 'var(--gray-800)',
-                margin: 0,
-                padding: 0,
-                maxHeight: '400px',
-                overflowY: 'auto'
-              }}>
-                {reportContent}
-              </pre>
+              {isEditingReport ? (
+                <textarea
+                  value={editedContent}
+                  onChange={(e) => setEditedContent(e.target.value)}
+                  style={{ width: '100%', minHeight: '380px', fontFamily: 'var(--font-family)', fontSize: '0.875rem', lineHeight: 1.5, padding: '0.5rem' }}
+                />
+              ) : (
+                <pre style={{
+                  whiteSpace: 'pre-wrap',
+                  fontFamily: 'var(--font-family)',
+                  fontSize: '0.875rem',
+                  lineHeight: '1.5',
+                  color: 'var(--gray-800)',
+                  margin: 0,
+                  padding: 0,
+                  maxHeight: '400px',
+                  overflowY: 'auto'
+                }}>
+                  {reportContent}
+                </pre>
+              )}
             </div>
             <div className="modal-actions">
               <button
                 className="btn btn-secondary"
                 onClick={() => downloadReport(reportSessionId, reportContent)}
               >
-                📥 Download Report
+                📥 Download
               </button>
+              {canReview && (
+                <button className="btn btn-secondary" onClick={exportFhir} title="Export as FHIR R4 Bundle for the hospital EMR">
+                  🏥 Export FHIR
+                </button>
+              )}
+              {canReview && !isEditingReport && (
+                <button className="btn btn-secondary" onClick={() => { setEditedContent(reportContent); setIsEditingReport(true); }}>
+                  ✏️ Edit
+                </button>
+              )}
+              {canReview && isEditingReport && (
+                <button className="btn btn-secondary" disabled={reviewing} onClick={() => reviewReport(reportStatus === 'approved' ? 'approved' : 'pending')}>
+                  💾 Save edits
+                </button>
+              )}
+              {canReview && reportStatus !== 'approved' && (
+                <button className="btn btn-success" disabled={reviewing} onClick={() => reviewReport('approved')}>
+                  {reviewing ? 'Saving…' : '✅ Approve'}
+                </button>
+              )}
               <button className="btn btn-primary" onClick={closeReportModal}>
                 Close
               </button>

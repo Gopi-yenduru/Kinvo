@@ -1,11 +1,18 @@
+import 'dotenv/config';   // MUST be first — other modules read process.env at import time
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { WebSocketServer } from 'ws';
 import * as http from 'http';
-import { v4 as uuidv4 } from 'uuid';
 import { OpenAI } from 'openai';
-import { authenticateJWT, AuthRequest } from "./auth.js";
-import 'dotenv/config';
+import { SarvamAIClient } from 'sarvamai';
+import jwt from 'jsonwebtoken';
+import { authenticateJWT, requireRole, getJwtSecret, AuthRequest } from "./auth.js";
+import { buildFhirBundle } from "./fhir-service.js";
+import { answerQuestion as assistantAnswer, speak as assistantSpeak, transcribe as assistantTranscribe } from "./assistant-service.js";
+import { createIntakeSession, IntakeSessionError } from "./intake-service.js";
+import crypto from "crypto";
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -19,19 +26,99 @@ import db from './database-manager.js';
 import ProviderFactory from './providers/ProviderFactory.js';
 import RetellAIProvider from './providers/RetellAIProvider.js';
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// --- Security middleware ---
+app.use(helmet());
 
-// Debug middleware to log all request
+// Restrict CORS to the configured frontend origin(s). Comma-separate multiple.
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173')
+  .split(',').map(o => o.trim()).filter(Boolean);
+app.use(cors({
+  origin: (origin, cb) => {
+    // allow same-origin / curl (no Origin header) and any explicitly allowed origin.
+    // Disallowed origins get cb(null, false): the browser blocks it via missing
+    // CORS headers (clean) rather than the request throwing a 500.
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(null, false);
+  },
+  credentials: true
+}));
+
+app.use(express.json({ limit: '2mb' }));
+
+// Rate limiting. Authenticated requests are keyed by USER (decoded from the JWT,
+// not verified here — that's the auth gate's job) so that all staff behind a
+// single hospital NAT IP are not throttled as one. Unauthenticated requests fall
+// back to a per-IP key.
+const rateKey = (req: any): string => {
+  const h = req.headers?.authorization;
+  if (typeof h === 'string' && h.startsWith('Bearer ')) {
+    try {
+      const decoded: any = jwt.decode(h.slice(7));
+      if (decoded && decoded.id) return `u:${decoded.id}`;
+    } catch { /* fall through to IP */ }
+  }
+  return `ip:${ipKeyGenerator(req.ip)}`;
+};
+
+// Brute-force protection on login (per IP).
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many login attempts, please try again later.' } });
+// General API cap (per user / per IP).
+const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, keyGenerator: rateKey, standardHeaders: true, legacyHeaders: false });
+// Stricter cap on expensive, paid operations (each triggers Sarvam API usage).
+const expensiveLimiter = rateLimit({ windowMs: 60 * 1000, max: 15, keyGenerator: rateKey, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many requests for this operation — please slow down.' } });
+app.use('/api/login', loginLimiter);
+app.use('/api/', apiLimiter);
+
+// Request logging (avoid logging tokens/PHI here).
 app.use((req: any, res: any, next: any) => {
   console.log(`📡 ${req.method} ${req.path} - ${new Date().toISOString()}`);
   next();
 });
 
-// Basic health check route
-app.get('/health', (req: any, res: any) => {
-  res.json({ status: 'OK', message: 'Medical Intake Voice Agent Backend is running' });
+// Health check (public) — also verifies DB connectivity so monitors/load-balancers
+// detect a database outage (returns 503 when the DB is unreachable).
+app.get('/health', async (req: any, res: any) => {
+  const dbUp = await db.ping();
+  res.status(dbUp ? 200 : 503).json({
+    status: dbUp ? 'OK' : 'DEGRADED',
+    db: dbUp ? 'up' : 'down',
+    uptimeSeconds: Math.round(process.uptime()),
+    message: 'Medical Intake Voice Agent Backend'
+  });
+});
+
+// Operational metrics (admin only) — for dashboards/monitoring.
+app.get('/api/admin/metrics', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const counts = await db.getSessionCounts();
+    const active = await db.getActiveSessions();
+    const users = await db.listUsers();
+    res.json({
+      uptimeSeconds: Math.round(process.uptime()),
+      activeSessions: active.length,
+      totalSessions: counts.totalSessions,
+      completedToday: counts.completedToday,
+      users: users.length,
+      memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      timestamp: new Date().toISOString()
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to collect metrics' });
+  }
+});
+
+// --- GLOBAL AUTH GATE ---
+// Every /api/ route requires a valid JWT EXCEPT /api/login. This protects all
+// patient data (transcripts, reports, analytics, logs) and paid actions
+// (report generation) which must never be reachable without authentication.
+app.use((req: any, res: any, next: any) => {
+  if (!req.path.startsWith('/api/')) return next();
+  if (req.path === '/api/login') return next();
+  // Public patient-intake-link endpoints authorize via the link token itself (the patient has
+  // no account), so they sit outside the JWT gate — like /api/login. They are still rate-limited
+  // by apiLimiter and must never return 401/403 (see the route handlers).
+  if (req.path.startsWith('/api/public/')) return next();
+  return authenticateJWT(req, res, next);
 });
 
 // Initialize performance indexes (one-time setup)
@@ -183,177 +270,33 @@ app.post('/api/test-red-flag-detection', async (req: any, res: any) => {
   }
 });
 
-// Start a new intake session
-app.post('/api/sessions/start', authenticateJWT, async (req: any, res: any) => {
-  let sessionId = uuidv4();
+// Start a new intake session (staff / in-clinic). Thin wrapper over the shared
+// createIntakeSession helper — the same helper backs the public patient-link flow.
+app.post('/api/sessions/start', expensiveLimiter, authenticateJWT, async (req: any, res: any) => {
   try {
-    const { patientName } = req.body;
-
-    // Validate patient name
-    if (!patientName || patientName.trim().length === 0) {
-      return res.status(400).json({
-        error: 'Patient name required',
-        message: 'Patient name is required to start a session.'
-      });
-    }
-
-    // Get current settings from database
-    const settings = await db.getAllSettings();
-    const setting = settings && settings.length > 0 ? settings[0] : null;
-    console.log(`Temparature from settings: ${setting?.temperature}, max response length from settings: ${setting?.max_response_length}`);
-
-    // Set the provider based on database settings
-    const providerType = setting?.provider || 'openai';
-    realtimeManager.setProvider(ProviderFactory.getProvider(providerType as any));
-    console.log(`Using provider: ${providerType}`);
-
-    // Validate API keys based on selected provider
-    let apiKeyConfigured = false;
-    if (providerType === 'openai') {
-      apiKeyConfigured = !!(setting?.openai_api_key || process.env.OPENAI_API_KEY);
-      if (!apiKeyConfigured) {
-        return res.status(400).json({
-          error: 'OpenAI API key missing',
-          message: 'OpenAI API key not configured. Please check your Settings page or .env file.'
-        });
-      }
-    } else if (providerType === 'retellai') {
-      const retellApiKey = (setting as any)?.retellai_api_key || process.env.RETELLAI_API_KEY;
-      const retellAgentId = (setting as any)?.retellai_agent_id || process.env.RETELLAI_AGENT_ID;
-      apiKeyConfigured = !!(retellApiKey && retellAgentId);
-      if (!apiKeyConfigured) {
-        return res.status(400).json({
-          error: 'RetellAI configuration missing',
-          message: 'RetellAI API key and Agent ID must be configured. Please check your Settings page or .env file.'
-        });
-      }
-    } else if (providerType === 'vapi') {
-      // VAPI not implemented yet
-      return res.status(400).json({
-        error: 'VAPI not supported yet',
-        message: 'VAPI integration is planned but not yet implemented.'
-      });
-    }
-
-    if (!setting) {
-      console.log('⚠️ Using API keys from .env file as fallback (database settings not configured)');
-    }
-
-    // Create session in database first
-    var insertedData = await db.createSession({
-      patient_id: 0,
-      patient_name: patientName.trim(),
-      provider: providerType,
-      status: 'active',
-      start_time: new Date(),
-      end_time: null,
-      red_flags_detected: 0
+    const { patientName, consentGiven, language, phone } = req.body;
+    const result = await createIntakeSession({
+      patientName,
+      consentGiven,
+      language,
+      phone,
+      source: 'staff',
+      ip: req.ip || null,
+      userAgent: req.headers['user-agent'] || null
     });
 
-    console.log(' Inserted data:', insertedData);
-    console.log(' setting data:', setting);
-    sessionId = insertedData.id; // use the actual session ID from DB
-
-    // Log audit event
-    let audioResult = {
-      clientIp: req.ip,
-      userAgent: req.headers['user-agent'],
-      model: setting?.model,
-      voice: setting?.voice
-    };
-
-    await db.insertAuditLog({
-      action: 'session_started',
-      details: JSON.stringify(audioResult),
-      session_id: sessionId,
-      ip_address: req.ip || null
+    res.json({
+      sessionId: result.sessionId,
+      status: result.status,
+      provider: result.provider,
+      message: 'Session started successfully',
+      isReturning: result.isReturning,
+      patient: result.patient
     });
-
-    // Initialize based on provider type
-    if (providerType === 'retellai') {
-      // For Retell AI, just create the session in database - no realtime connection needed
-      console.log(`📝 Session ${sessionId} started successfully for Retell AI`);
-
-      res.json({
-        sessionId,
-        status: 'active',
-        provider: providerType,
-        message: 'Session started successfully'
-      });
-    } else if (providerType === 'openai') {
-      // For OpenAI, create session configuration and initialize Realtime API session
-      const instructions = setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS;
-
-      console.log(`🔧 Creating session config for ${sessionId}`);
-      console.log(`📝 Instructions source: ${setting?.medical_instructions ? 'database' : 'defaults'}`);
-      console.log(`📏 Instructions length: ${instructions.length} characters`);
-      console.log(`📋 Instructions preview: ${instructions.substring(0, 150)}...`);
-
-      const config = {
-        sessionId,
-        instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
-        voice: setting?.voice || 'alloy',
-        temperature: setting?.temperature || 0.6,
-        maxResponseLength: setting?.max_response_length || 200,
-        model: setting?.model || 'gpt-4o-realtime-preview',
-        apiKey: setting?.openai_api_key || process.env.OPENAI_API_KEY
-      };
-
-      // Debug: Test JSON serialization
-      try {
-        JSON.stringify({ test: config.instructions });
-        console.log('✅ Instructions JSON serialization test passed');
-      } catch (jsonError) {
-        console.error('❌ Instructions JSON serialization test failed:', jsonError);
-        console.error('❌ Instructions content:', config.instructions);
-      }
-
-      realtimeManager.createRealtimeSession(config)
-        .then((realtimeConnection: any) => {
-          if (realtimeConnection) {
-            console.log(`📝 Session ${sessionId} started successfully with Realtime connection`);
-
-            res.json({
-              sessionId,
-              status: 'active',
-              provider: providerType,
-              message: 'Session started successfully'
-            });
-          } else {
-            throw new Error('Realtime connection failed to initialize');
-          }
-        })
-        .catch(async (error: any) => {
-          console.error('Failed to create Realtime session:', error);
-
-          // Update database on failure
-          await db.updateSessionStatus(sessionId, 'error');
-          await db.insertAuditLog({
-            action: 'session_start_failed',
-            details: JSON.stringify({ error: error.message }),
-            session_id: sessionId,
-            ip_address: req.ip || null
-          });
-          res.status(500).json({
-            error: 'Failed to create session',
-            message: error.message,
-            details: 'Check your OpenAI API key and Realtime API access'
-          });
-        });
-    } else if (providerType === 'vapi') {
-      // VAPI not implemented yet
-      return res.status(400).json({
-        error: 'VAPI not supported yet',
-        message: 'VAPI integration is planned but not yet implemented.'
-      });
-    } else {
-      return res.status(400).json({
-        error: 'Unknown provider',
-        message: `Provider '${providerType}' is not supported.`
-      });
-    }
-
   } catch (error: any) {
+    if (error instanceof IntakeSessionError) {
+      return res.status(error.httpStatus).json(error.payload);
+    }
     console.error('Session start error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -732,6 +675,90 @@ app.get('/api/sessions/red-flags', async (req: any, res: any) => {
 });
 
 
+// Admin only: delete ALL session data (keeps patients/users/settings). Declared before the
+// :sessionId route so the literal path matches first.
+app.delete('/api/sessions', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const removed = await db.deleteAllSessions();
+    await db.insertAuditLog({
+      action: 'all_sessions_deleted',
+      details: JSON.stringify({ removed, by: req.user?.username }),
+      session_id: null, ip_address: req.ip || null
+    }).catch(() => {});
+    console.log(`🗑️  All sessions deleted (${removed}) by ${req.user?.username}`);
+    res.json({ message: 'All sessions deleted', removed });
+  } catch (error: any) {
+    console.error('Delete all sessions failed:', error);
+    res.status(500).json({ error: 'Failed to delete sessions', details: error.message });
+  }
+});
+
+// Admin only: delete a single session and all of its data.
+app.delete('/api/sessions/:sessionId', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
+    await db.deleteSession(sessionId);
+    await db.insertAuditLog({
+      action: 'session_deleted',
+      details: JSON.stringify({ session_id: sessionId, by: req.user?.username }),
+      session_id: sessionId, ip_address: req.ip || null
+    }).catch(() => {});
+    res.json({ message: 'Session deleted', sessionId });
+  } catch (error: any) {
+    console.error('Delete session failed:', error);
+    res.status(500).json({ error: 'Failed to delete session', details: error.message });
+  }
+});
+
+
+// Patient directory — paginated, most recently seen first.
+app.get('/api/patients', authenticateJWT, async (req: any, res: any) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const result = await db.getPatientsPaginated(page, limit);
+    res.json(result);
+  } catch (error: any) {
+    console.error('Failed to list patients:', error);
+    res.status(500).json({ error: 'Failed to list patients', details: error.message });
+  }
+});
+
+// One patient's full record + their visit history.
+app.get('/api/patients/:id', authenticateJWT, async (req: any, res: any) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid patient id' });
+    const patient = await db.getPatientById(id);
+    if (!patient) return res.status(404).json({ error: 'Patient not found' });
+    const sessions = await db.getSessionsByPatientId(id);
+    res.json({ patient, sessions });
+  } catch (error: any) {
+    console.error('Failed to get patient:', error);
+    res.status(500).json({ error: 'Failed to get patient', details: error.message });
+  }
+});
+
+// Admin only: delete a patient and ALL of their sessions/visits and data.
+app.delete('/api/patients/:id', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid patient id' });
+    await db.deletePatient(id);
+    await db.insertAuditLog({
+      action: 'patient_deleted',
+      details: JSON.stringify({ patient_id: id, by: req.user?.username }),
+      session_id: null, ip_address: req.ip || null
+    }).catch(() => {});
+    console.log(`🗑️  Patient ${id} deleted by ${req.user?.username}`);
+    res.json({ message: 'Patient deleted', id });
+  } catch (error: any) {
+    console.error('Delete patient failed:', error);
+    res.status(500).json({ error: 'Failed to delete patient', details: error.message });
+  }
+});
+
+
 // Get session status
 app.get('/api/sessions/:sessionId', (req: any, res: any) => {
   const { sessionId } = req.params;
@@ -935,7 +962,7 @@ app.get('/api/sessions/:sessionId/transcript', async (req: any, res: any) => {
 });
 
 // Generate report using OpenAI with database caching
-app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) => {
+app.post('/api/sessions/:sessionId/generate-report', expensiveLimiter, async (req: any, res: any) => {
   try {
     const { sessionId } = req.params;
 
@@ -948,24 +975,25 @@ app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) 
       return res.json({
         report: cachedReport.report_content,
         cached: true,
-        generatedAt: cachedReport.generated_at
+        generatedAt: cachedReport.generated_at,
+        status: (cachedReport as any).status || 'pending',
+        reviewedBy: (cachedReport as any).reviewed_by || null
       });
     }
 
-    // Step 2: Generate new report using OpenAI
+    // Step 2: Generate new report using Sarvam (the conversation is in Telugu)
     console.log(`🤖 Generating new report for session ${sessionId}`);
 
     // Get settings for API key
     const settings = await db.getAllSettings();
     const setting = settings && settings.length > 0 ? settings[0] : null;
-    const apiKey = setting?.openai_api_key || process.env.OPENAI_API_KEY;
+    const sarvamKey = process.env.SARVAM_API_KEY;
 
-    if (!apiKey) {
-      return res.status(400).json({ error: 'OpenAI API key not configured' });
+    if (!sarvamKey) {
+      return res.status(400).json({ error: 'Sarvam API key not configured (SARVAM_API_KEY).' });
     }
 
-    // Initialize OpenAI client
-    const openai = new OpenAI({ apiKey });
+    const sarvam = new SarvamAIClient({ apiSubscriptionKey: sarvamKey });
 
     // Get conversation logs
     const conversationLogs = await db.getSessionConversationLogs(sessionId);
@@ -973,16 +1001,23 @@ app.post('/api/sessions/:sessionId/generate-report', async (req: any, res: any) 
       return res.status(404).json({ error: 'No conversation data found for this session' });
     }
 
-    // Get session info and red flags
+    // Get session info, red flags and structured intake responses
     const sessionInfo = await db.getSession(sessionId);
     const redFlagEvents = await db.getRedFlagEvents(sessionId);
+    const intakeResponses = await db.getAllIntakeResponsesBySession(sessionId);
 
     // Format conversation for prompt
     const conversationText = conversationLogs.map((log: any) =>
       `${log.speaker.toUpperCase()}: ${log.message}`
-    ).join('\n\n');
+    ).join('\n');
 
-    const prompt = `Please generate a comprehensive medical intake report based on the following conversation transcript.
+    const structured = (intakeResponses || [])
+      .map((r: any) => `- [${r.category || 'general'}] Q: ${r.question} | A: ${r.answer}`)
+      .join('\n') || 'None recorded.';
+
+    const langLabel = sessionInfo?.language === 'hi-IN' ? 'Hindi'
+                    : sessionInfo?.language === 'en-IN' ? 'English' : 'Telugu';
+    const prompt = `You are a clinical documentation assistant. The intake conversation below is in ${langLabel} between an intake assistant and a patient. Produce a professional medical pre-consultation intake report in ENGLISH for the doctor (accurately translate any non-English details).
 
 Session Information:
 - Patient Name: ${sessionInfo?.patient_name || 'Not specified'}
@@ -990,34 +1025,40 @@ Session Information:
 - Duration: ${sessionInfo?.end_time ? Math.round((new Date(sessionInfo.end_time).getTime() - new Date(sessionInfo.start_time).getTime()) / 1000 / 60) + ' minutes' : 'Ongoing'}
 - Red Flags Detected: ${redFlagEvents?.length || 0}
 
-Conversation Transcript:
+Structured intake responses (captured during the call):
+${structured}
+
+Full Conversation Transcript (${langLabel}):
 ${conversationText}
 
-Please structure the report with the following sections:
+Structure the report with these sections (use the headings):
 1. Patient Information
 2. Chief Complaint / Presenting Symptoms
-3. Medical History
-4. Current Medications/Allergies (if mentioned)
-5. Assessment/Recommendations
-6. Red Flags Identified (if any)
+3. History of Present Illness (onset, duration, location, severity, aggravating/relieving factors, associated symptoms)
+4. Past Medical History
+5. Current Medications / Allergies
+6. Family History & Social History (if mentioned)
+7. Red Flags Identified (if any)
+8. Summary for the Physician
 
-Make the report professional, concise, and suitable for medical records.`;
+Only use information actually present in the conversation; write "Not reported" where the patient did not provide it. Be concise, factual, and suitable for medical records. Do NOT invent findings or give a diagnosis.`;
 
-    // Call OpenAI API
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4',
+    // Call Sarvam chat completions
+    const completion: any = await sarvam.chat.completions({
+      model: 'sarvam-30b',
       messages: [
-        { role: 'system', content: 'You are a medical assistant generating intake reports from conversation transcripts.' },
+        { role: 'system', content: 'You are a careful medical scribe that writes accurate English clinical intake reports from the patient-language conversation provided. Never fabricate information.' },
         { role: 'user', content: prompt }
       ],
-      max_tokens: 2000,
-      temperature: 0.3,
-    });
+      max_tokens: 1500,
+      temperature: 0.2,
+      reasoning_effort: null   // disable "thinking" so the model returns the report text directly
+    } as any);
 
-    const reportContent = completion.choices[0]?.message?.content?.trim();
+    const reportContent = completion?.choices?.[0]?.message?.content?.trim();
 
     if (!reportContent) {
-      return res.status(500).json({ error: 'Failed to generate report from OpenAI' });
+      return res.status(500).json({ error: 'Failed to generate report from Sarvam' });
     }
 
     // Step 3: Cache the report in database
@@ -1042,16 +1083,79 @@ Make the report professional, concise, and suitable for medical records.`;
       ip_address: req.ip || null
     });
 
-    // Return newly generated report
+    // Return newly generated report (always starts as pending review)
     res.json({
       report: reportContent,
       cached: false,
-      generatedAt: new Date()
+      generatedAt: new Date(),
+      status: 'pending',
+      reviewedBy: null
     });
 
   } catch (error: any) {
     console.error('Failed to generate report:', error);
     res.status(500).json({ error: 'Failed to generate report', details: error.message });
+  }
+});
+
+// Doctor review: edit and/or approve a generated report (doctor or admin only).
+app.post('/api/sessions/:sessionId/report/review', requireRole('doctor', 'admin'), async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
+    const { content, status } = req.body || {};
+    const newStatus = status === 'approved' ? 'approved' : 'pending';
+
+    const existing = await db.getReport(sessionId);
+    if (!existing) return res.status(404).json({ error: 'No report to review for this session. Generate it first.' });
+
+    const reviewedBy = req.user?.username || 'unknown';
+    await db.reviewReport(sessionId, {
+      content: typeof content === 'string' ? content : undefined,
+      status: newStatus,
+      reviewedBy
+    });
+
+    await db.insertAuditLog({
+      action: newStatus === 'approved' ? 'report_approved' : 'report_edited',
+      details: JSON.stringify({ by: reviewedBy, edited: typeof content === 'string' }),
+      session_id: sessionId,
+      ip_address: req.ip || null
+    });
+
+    res.json({ message: newStatus === 'approved' ? 'Report approved' : 'Report saved', status: newStatus, reviewedBy });
+  } catch (error: any) {
+    console.error('Failed to review report:', error);
+    res.status(500).json({ error: 'Failed to review report' });
+  }
+});
+
+// FHIR R4 export of a completed intake (doctor/admin) — for EMR/HIS ingestion.
+// Returns a FHIR Bundle (Patient, Encounter, QuestionnaireResponse, Flags, report).
+app.get('/api/sessions/:sessionId/fhir', requireRole('doctor', 'admin'), async (req: any, res: any) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await db.getSession(sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const [intake, redFlags, report] = await Promise.all([
+      db.getAllIntakeResponsesBySession(sessionId) as any,
+      db.getRedFlagEvents(sessionId) as any,
+      db.getReport(sessionId),
+    ]);
+
+    const bundle = buildFhirBundle(session as any, intake || [], redFlags || [], report as any);
+
+    await db.insertAuditLog({
+      action: 'fhir_export',
+      details: JSON.stringify({ by: req.user?.username, entries: bundle.entry.length }),
+      session_id: sessionId,
+      ip_address: req.ip || null,
+    });
+
+    res.type('application/fhir+json').json(bundle);
+  } catch (error: any) {
+    console.error('Failed to build FHIR export:', error);
+    res.status(500).json({ error: 'Failed to build FHIR export' });
   }
 });
 
@@ -1303,14 +1407,267 @@ app.post('/api/settings/config', async (req: any, res: any) => {
 
 app.post('/api/login', async (req, res) => {
   try {
-    const { username, password } = req.body;
-    const ip = req.ip;
-    const userAgent = req.get('User-Agent') || '';
+    const { username, password } = req.body || {};
 
-    const result = await db.loginUser(username, password, ip, userAgent);
+    // Basic input validation.
+    if (typeof username !== 'string' || typeof password !== 'string' ||
+        username.trim().length === 0 || username.length > 100 ||
+        password.length === 0 || password.length > 200) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+
+    const ip = req.ip;
+    const userAgent = (req.get('User-Agent') || '').slice(0, 250);
+
+    const result = await db.loginUser(username.trim(), password, ip, userAgent);
     res.json(result);
   } catch (err: any) {
-    res.status(401).json({ error: err.message });
+    // Generic message — don't reveal whether the username or password was wrong.
+    res.status(401).json({ error: 'Invalid username or password' });
+  }
+});
+
+// --------------------- ADMIN: USER MANAGEMENT (admin role only) ---------------------
+app.get('/api/admin/users', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    res.json({ users: await db.listUsers() });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to list users' });
+  }
+});
+
+app.post('/api/admin/users', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const { username, email, password, role } = req.body || {};
+    const allowedRoles = ['admin', 'doctor', 'nurse', 'clinician'];
+    if (typeof username !== 'string' || username.trim().length < 3 || username.length > 100) {
+      return res.status(400).json({ error: 'Username must be 3-100 characters.' });
+    }
+    if (typeof password !== 'string' || password.length < 8 || password.length > 200) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+    const userRole = allowedRoles.includes(role) ? role : 'clinician';
+    await db.registerUser(username.trim(), (email || '').toString().slice(0, 250), password, userRole);
+    await db.insertAuditLog({
+      action: 'user_created',
+      details: JSON.stringify({ username: username.trim(), role: userRole, by: req.user?.username }),
+      user_id: null, session_id: null, ip_address: req.ip || null
+    });
+    res.status(201).json({ message: 'User created', username: username.trim(), role: userRole });
+  } catch (err: any) {
+    // Unique-constraint violation -> username already exists
+    const msg = /unique|duplicate/i.test(err?.message || '') ? 'Username already exists' : 'Failed to create user';
+    res.status(400).json({ error: msg });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REMOTE PATIENT INTAKE LINKS
+// Admin generates a per-patient link; the patient opens it on their own phone (no
+// login, no app) and does the same voice intake. Admin routes are JWT+admin-gated;
+// public routes authorize via the opaque link token (see the global gate exemption).
+// ─────────────────────────────────────────────────────────────────────────────
+const INTAKE_LINK_TTL_MS = 24 * 60 * 60 * 1000; // links expire 24h after creation
+
+// Fold expiry + the linked session's live status into a single status for the admin UI.
+function deriveLinkDisplayStatus(link: any, now: number): string {
+  if (link.status === 'revoked') return 'revoked';
+  if (link.status === 'completed' || link.session_status === 'completed') return 'completed';
+  if (link.status === 'pending' && link.expires_at && new Date(link.expires_at).getTime() < now) return 'expired';
+  if (link.status === 'in_progress') return link.session_status === 'error' ? 'error' : 'in_progress';
+  return link.status; // pending
+}
+
+// Load a link and decide whether it can still be used. Returns { link } when usable, or an
+// { httpStatus, body } describing why not. Never 401/403 (so the SPA fetch interceptor, if a
+// staff token happens to be present, won't clear the admin's auth).
+async function loadUsableIntakeLink(token: string): Promise<{ link?: any; httpStatus?: number; body?: any }> {
+  const link = await db.getIntakeLinkByToken(String(token || ''));
+  if (!link) return { httpStatus: 404, body: { error: 'invalid', message: 'This link is not valid.' } };
+  if (link.status === 'revoked') return { httpStatus: 409, body: { error: 'revoked', message: 'This link has been cancelled. Please contact the clinic.' } };
+  if (link.status === 'completed') return { httpStatus: 409, body: { error: 'completed', message: 'This intake has already been completed. Thank you!' } };
+  if (link.status === 'pending' && link.expires_at && new Date(link.expires_at).getTime() < Date.now()) {
+    return { httpStatus: 410, body: { error: 'expired', message: 'This link has expired. Please ask the clinic for a new one.' } };
+  }
+  return { link };
+}
+
+// Admin: generate a new intake link for a patient.
+app.post('/api/intake-links', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const { patientName, phone, language } = req.body || {};
+    const lang = ['te-IN', 'hi-IN', 'en-IN'].includes(language) ? language : 'te-IN';
+    const phoneTrimmed = (phone && String(phone).trim()) || '';
+    const nameTrimmed = (patientName && String(patientName).trim()) || '';
+
+    // Pre-tie to a patient record by phone (create if new) so the resulting session links to the
+    // patient's history. We do NOT increment the visit count here — that happens when the patient
+    // actually starts the intake (inside createIntakeSession, keyed off the same phone).
+    let patientId: number | null = null;
+    if (phoneTrimmed) {
+      try {
+        let patient = await db.findPatientByPhone(phoneTrimmed);
+        if (!patient) patient = await db.createPatient(phoneTrimmed);
+        patientId = patient.id;
+        if (nameTrimmed) await db.updatePatientNameIfEmpty(patientId, nameTrimmed);
+      } catch (e: any) {
+        console.error('intake-link patient resolve failed:', e?.message || e);
+      }
+    }
+
+    const token = crypto.randomBytes(32).toString('hex'); // 64-char opaque URL secret
+    const expiresAt = new Date(Date.now() + INTAKE_LINK_TTL_MS);
+
+    const link = await db.createIntakeLink({
+      token,
+      created_by: req.user?.username || null,
+      patient_id: patientId,
+      patient_name: nameTrimmed || null,
+      phone: phoneTrimmed || null,
+      language: lang,
+      expires_at: expiresAt
+    });
+
+    await db.insertAuditLog({
+      action: 'intake_link_created',
+      details: JSON.stringify({ link_id: link.id, by: req.user?.username, language: lang, hasPhone: !!phoneTrimmed }),
+      session_id: null, ip_address: req.ip || null
+    }).catch(() => {});
+
+    res.status(201).json({ id: link.id, token, path: `/intake/${token}`, status: link.status, language: lang, expiresAt });
+  } catch (error: any) {
+    console.error('Failed to create intake link:', error);
+    res.status(500).json({ error: 'Failed to create intake link', details: error.message });
+  }
+});
+
+// Admin: list intake links (paginated, newest first) with a derived display status.
+app.get('/api/intake-links', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const result = await db.getIntakeLinksPaginated(page, limit);
+    const now = Date.now();
+    const links = result.links.map((l: any) => ({ ...l, displayStatus: deriveLinkDisplayStatus(l, now) }));
+    res.json({
+      links,
+      pagination: { currentPage: result.currentPage, totalPages: result.totalPages, totalCount: result.total, pageSize: limit }
+    });
+  } catch (error: any) {
+    console.error('Failed to list intake links:', error);
+    res.status(500).json({ error: 'Failed to list intake links', details: error.message });
+  }
+});
+
+// Admin: revoke a link (cannot revoke an already-completed one).
+app.post('/api/intake-links/:id/revoke', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const link = await db.getIntakeLinkById(id);
+    if (!link) return res.status(404).json({ error: 'Link not found' });
+    if (link.status === 'completed') return res.status(409).json({ error: 'Link already completed' });
+    await db.setIntakeLinkStatus(id, 'revoked');
+    await db.insertAuditLog({ action: 'intake_link_revoked', details: JSON.stringify({ link_id: id, by: req.user?.username }), session_id: null, ip_address: req.ip || null }).catch(() => {});
+    res.json({ message: 'Link revoked', id });
+  } catch (error: any) {
+    console.error('Failed to revoke intake link:', error);
+    res.status(500).json({ error: 'Failed to revoke intake link', details: error.message });
+  }
+});
+
+// Admin only: permanently delete an intake-link record (keeps any linked session/intake data).
+app.delete('/api/intake-links/:id', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const link = await db.getIntakeLinkById(id);
+    if (!link) return res.status(404).json({ error: 'Link not found' });
+    await db.deleteIntakeLink(id);
+    await db.insertAuditLog({ action: 'intake_link_deleted', details: JSON.stringify({ link_id: id, by: req.user?.username }), session_id: null, ip_address: req.ip || null }).catch(() => {});
+    console.log(`🗑️  Intake link ${id} deleted by ${req.user?.username}`);
+    res.json({ message: 'Link deleted', id });
+  } catch (error: any) {
+    console.error('Failed to delete intake link:', error);
+    res.status(500).json({ error: 'Failed to delete intake link', details: error.message });
+  }
+});
+
+// Public: validate a link (no login). Returns minimal info only — never PHI.
+app.get('/api/public/intake/:token', async (req: any, res: any) => {
+  try {
+    const r = await loadUsableIntakeLink(req.params.token);
+    if (!r.link) return res.status(r.httpStatus!).json(r.body);
+    res.json({ valid: true, status: r.link.status, language: r.link.language });
+  } catch (error: any) {
+    console.error('Failed to validate intake link:', error);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+// Public: patient consents and starts the intake — creates the session + a scoped WS token.
+app.post('/api/public/intake/:token/start', expensiveLimiter, async (req: any, res: any) => {
+  try {
+    const r = await loadUsableIntakeLink(req.params.token);
+    if (!r.link) return res.status(r.httpStatus!).json(r.body);
+    const link = r.link;
+
+    const { consentGiven, language } = req.body || {};
+    const lang = ['te-IN', 'hi-IN', 'en-IN'].includes(language) ? language : link.language;
+
+    let result;
+    try {
+      result = await createIntakeSession({
+        patientName: link.patient_name || undefined,
+        consentGiven: consentGiven === true,
+        language: lang,
+        phone: link.phone || undefined,
+        source: 'remote-link',
+        ip: req.ip || null,
+        userAgent: req.headers['user-agent'] || null
+      });
+    } catch (e: any) {
+      if (e instanceof IntakeSessionError) return res.status(e.httpStatus).json(e.payload);
+      throw e;
+    }
+
+    await db.setIntakeLinkSession(link.id, result.sessionId);
+    await db.insertAuditLog({
+      action: 'intake_link_started',
+      details: JSON.stringify({ link_id: link.id, session_id: result.sessionId }),
+      session_id: result.sessionId, ip_address: req.ip || null
+    }).catch(() => {});
+
+    // Short-lived WS token scoped to THIS session only (patients have no account). The WS
+    // join_session handler binds it to result.sessionId, so it can't join anything else.
+    const wsToken = jwt.sign(
+      { scope: 'patient-intake', sessionId: result.sessionId, linkId: link.id },
+      getJwtSecret(),
+      { expiresIn: '2h' }
+    );
+
+    res.json({ sessionId: result.sessionId, wsToken, provider: result.provider, language: lang });
+  } catch (error: any) {
+    console.error('Failed to start public intake:', error);
+    res.status(500).json({ error: 'Failed to start the session. Please try again.' });
+  }
+});
+
+// Public: mark the intake complete (idempotent) — called when the patient ends the session.
+app.post('/api/public/intake/:token/complete', async (req: any, res: any) => {
+  try {
+    const link = await db.getIntakeLinkByToken(String(req.params.token || ''));
+    if (!link) return res.status(404).json({ error: 'invalid' });
+    if (link.status !== 'completed') {
+      await db.setIntakeLinkStatus(link.id, 'completed');
+      await db.insertAuditLog({
+        action: 'intake_link_completed',
+        details: JSON.stringify({ link_id: link.id, session_id: link.session_id }),
+        session_id: link.session_id || null, ip_address: req.ip || null
+      }).catch(() => {});
+    }
+    res.json({ message: 'completed' });
+  } catch (error: any) {
+    console.error('Failed to complete public intake:', error);
+    res.status(500).json({ error: 'Something went wrong.' });
   }
 });
 
@@ -1319,34 +1676,57 @@ wss.on('connection', (ws: any, req: any) => {
   console.log('WebSocket connection established');
   let currentSessionId: string | null = null;
   ws.sessionId = null; // Store sessionId on WebSocket object as well
+  ws.authenticated = false; // set true once a valid JWT is presented on join_session
 
   ws.on('message', async (data: Buffer) => {
     try {
       const message = JSON.parse(data.toString());
       //console.log('WS received message:', message.type);
 
+      // Every message except join_session requires an authenticated socket.
+      if (message.type !== 'join_session' && !ws.authenticated) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
+        return;
+      }
+
       switch (message.type) {
-        case 'join_session':
+        case 'join_session': {
+          // Authenticate the WebSocket with the same JWT used for the REST API.
+          // Browsers cannot set WS headers, so the token is sent in this message.
+          try {
+            const decoded: any = jwt.verify(String(message.token || ''), getJwtSecret());
+            // Patient-link tokens are scoped to ONE session: bind them so a leaked token can't be
+            // used to join any other session. Staff tokens (no scope) keep full access as before.
+            if (decoded.scope === 'patient-intake') {
+              if (!decoded.sessionId || decoded.sessionId !== message.sessionId) {
+                console.log('❌ WebSocket join rejected: patient token / session mismatch');
+                ws.send(JSON.stringify({ type: 'error', message: 'Authentication required' }));
+                ws.close();
+                return;
+              }
+              ws.authenticated = true;
+              ws.user = { role: 'patient', sessionId: decoded.sessionId };
+            } else {
+              ws.authenticated = true;
+              ws.user = { id: decoded.id, username: decoded.username, role: decoded.role };
+            }
+          } catch {
+            console.log('❌ WebSocket join rejected: invalid/missing token');
+            ws.send(JSON.stringify({ type: 'error', message: 'Authentication required' }));
+            ws.close();
+            return;
+          }
+
           currentSessionId = message.sessionId;
           ws.sessionId = currentSessionId; // Store on WebSocket object
 
           // Get the Realtime API connection for this session
           const realtimeConnection = realtimeManager.getSession(currentSessionId!);
           if (realtimeConnection) {
-            // Link frontend WebSocket to realtime session
+            // Link frontend WebSocket to realtime session. The provider then drives
+            // all session events itself (session_ready, status, transcripts, audio…),
+            // so the server no longer injects its own join/status messages.
             realtimeManager.linkFrontendSocket(currentSessionId!, ws);
-
-            ws.send(JSON.stringify({
-              type: 'session_joined',
-              sessionId: currentSessionId,
-              message: 'Getting Ready...'
-            }));
-
-            ws.send(JSON.stringify({
-              type: 'listening',
-              message: 'Agent is listening'
-            }));
-
             console.log(`✅ Frontend WebSocket linked to session ${currentSessionId}`);
           } else {
             ws.send(JSON.stringify({
@@ -1356,36 +1736,31 @@ wss.on('connection', (ws: any, req: any) => {
             console.log(`❌ Session ${currentSessionId} not found for WebSocket linking`);
           }
           break;
+        }
 
-        case 'audio_data':
-          // Forward simplified audio data to Realtime API
+        case 'audio_data': {
+          // Forward microphone audio to the provider. The provider decides what to do
+          // with it (and drives all status/transcript/audio events back to the client).
           const sessionIdForAudio = ws.sessionId || currentSessionId;
           if (sessionIdForAudio && realtimeManager.getSession(sessionIdForAudio)) {
             try {
-              // Pass the data object directly to realtime manager (simplified format)
-              // 🟢 Agent is now processing/responding → tell frontend "speaking"
-              ws.send(JSON.stringify({
-                type: 'speaking',
-                message: 'Agent is speaking'
-              }));
               realtimeManager.sendAudioData(sessionIdForAudio, message.data);
-              //console.log(`📡 Audio data forwarded for session ${sessionIdForAudio}`);
             } catch (error: any) {
               console.error('Error forwarding audio data:', error.message);
-              ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Failed to process audio data: ' + error.message
-              }));
             }
-          } else {
-            console.warn(`⚠️ Audio data received but no active session found (sessionId: ${sessionIdForAudio})`);
-            ws.send(JSON.stringify({
-              type: 'error',
-              message: 'No active session - please join a session first'
-            }));
-            console.log('Available sessions:', Array.from(Object.keys(realtimeManager.connections || {})));
           }
           break;
+        }
+
+        case 'interrupt': {
+          // User-initiated barge-in: abort the agent's current spoken turn.
+          const sessionIdForInterrupt = ws.sessionId || currentSessionId;
+          if (sessionIdForInterrupt && realtimeManager.getSession(sessionIdForInterrupt)) {
+            try { realtimeManager.interrupt(sessionIdForInterrupt); }
+            catch (error: any) { console.error('Error handling interrupt:', error.message); }
+          }
+          break;
+        }
 
         case 'end_session':
           if (currentSessionId) {
@@ -1413,16 +1788,80 @@ wss.on('connection', (ws: any, req: any) => {
       // Unlink frontend WebSocket from realtime session
       realtimeManager.unlinkFrontendSocket(currentSessionId);
 
-      // Clean up session if requested
-      if (ws.sessions?.shouldEnd === true) {
-        realtimeManager.endSession(currentSessionId).catch(console.error);
-      }
+      // The browser is the only client for a session and does not reconnect, so a
+      // closed socket means the session is abandoned. End it to release the provider's
+      // STT/TTS sockets (cost + leak), free the in-memory session, and mark the DB
+      // row completed. endSession is idempotent, so this is safe even if the session
+      // was already ended via the end_session tool or the REST endpoint.
+      realtimeManager.endSession(currentSessionId)
+        .catch((e: any) => console.error('endSession on ws close failed:', e?.message || e));
     }
   });
 
   ws.on('error', (error: Error) => {
     console.error('WebSocket error:', error);
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-app HELP assistant (Telugu) — answers patient questions ABOUT THE APP.
+// Grounded + refuses medical advice (see assistant-service.ts). Text + voice.
+// Authenticated (global gate) and rate-limited (paid Sarvam calls).
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/assistant/chat', expensiveLimiter, async (req: any, res: any) => {
+  try {
+    const { message, history, language } = req.body || {};
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'message is required' });
+    }
+    const reply = await assistantAnswer(message, Array.isArray(history) ? history : [], language);
+    res.json({ reply });
+  } catch (e: any) {
+    console.error('assistant/chat failed:', e?.message || e);
+    res.status(500).json({ error: 'Assistant is unavailable right now.' });
+  }
+});
+
+app.post('/api/assistant/tts', expensiveLimiter, async (req: any, res: any) => {
+  try {
+    const { text, language } = req.body || {};
+    if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text is required' });
+    const audio = await assistantSpeak(text, language);
+    res.json({ audio, format: 'wav' });
+  } catch (e: any) {
+    console.error('assistant/tts failed:', e?.message || e);
+    res.status(500).json({ error: 'Speech generation failed.' });
+  }
+});
+
+app.post('/api/assistant/transcribe', expensiveLimiter, async (req: any, res: any) => {
+  try {
+    const { audio, mime, language } = req.body || {};
+    if (!audio || typeof audio !== 'string') return res.status(400).json({ error: 'audio (base64) is required' });
+    const buffer = Buffer.from(audio, 'base64');
+    if (buffer.length === 0) return res.status(400).json({ error: 'empty audio' });
+    const text = await assistantTranscribe(buffer, typeof mime === 'string' ? mime : 'audio/webm', language);
+    res.json({ text });
+  } catch (e: any) {
+    console.error('assistant/transcribe failed:', e?.message || e);
+    res.status(500).json({ error: 'Could not understand the audio. Please try again.' });
+  }
+});
+
+// Express error handler — return a clean 500 instead of leaking stack traces / crashing.
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error('Unhandled route error:', err?.message || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Process-level safety nets so a stray async error never takes the server down
+// mid-consultation. (In production a supervisor like systemd/pm2 should also be used.)
+process.on('unhandledRejection', (reason: any) => {
+  console.error('⚠️ Unhandled promise rejection:', reason?.message || reason);
+});
+process.on('uncaughtException', (err: any) => {
+  console.error('⚠️ Uncaught exception:', err?.message || err);
 });
 
 // Start server

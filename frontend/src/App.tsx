@@ -6,20 +6,36 @@ import Session from './pages/Session';
 import Sessions from './pages/Sessions';
 import Settings from './pages/Settings';
 import Transcript from './pages/Transcript';
+import Analytics from './pages/Analytics';
+import Patients from './pages/Patients';
+import Users from './pages/Users';
+import IntakeLinks from './pages/IntakeLinks';
+import PatientIntake from './pages/PatientIntake';
 import Login from './pages/Login';
 import authService from './services/authService';
 import { SessionProvider } from './contexts/SessionContext';
 import './App.css';
 
-// Global fetch interceptor for authentication
+// Global fetch interceptor: inject the JWT on protected API calls + handle auth failures.
 const originalFetch = window.fetch;
 window.fetch = async (url: RequestInfo | URL, options?: RequestInit) => {
+  const urlString = typeof url === 'string' ? url : url.toString();
+  const isProtectedApi = urlString.includes('/api/') && !urlString.includes('/api/login');
+
+  // Attach the bearer token so the backend's auth gate accepts the request.
+  if (isProtectedApi) {
+    const token = localStorage.getItem('jwt_token');
+    if (token) {
+      const headers = new Headers((options && options.headers) || {});
+      if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
+      options = { ...(options || {}), headers };
+    }
+  }
+
   const response = await originalFetch(url, options);
 
   // Handle authentication failures for protected API routes
-  const urlString = typeof url === 'string' ? url : url.toString();
-  if ((urlString.includes('/api/') && !urlString.includes('/api/login')) &&
-      (response.status === 401 || response.status === 403)) {
+  if (isProtectedApi && (response.status === 401 || response.status === 403)) {
     console.log('Authentication failed for protected API, clearing auth data');
 
     // Clear authentication data through the service
@@ -68,6 +84,10 @@ function App() {
           {/* Login route */}
           <Route path="/login" element={<Login onLoginSuccess={handleLoginSuccess} />} />
 
+          {/* PUBLIC patient intake link — no login. Declared before the auth gate so the
+              unauthenticated catch-all redirect to /login can never swallow it. */}
+          <Route path="/intake/:token" element={<PatientIntake />} />
+
           {/* Protected routes */}
           {authState.token ? (
             <Route path="/" element={<Layout onLogout={handleLogout} />}>
@@ -75,17 +95,10 @@ function App() {
               <Route path="session" element={<Session />} />
               <Route path="sessions" element={<Sessions />} />
               <Route path="sessions/:sessionId/transcript" element={<Transcript />} />
-              <Route
-                path="analytics"
-                element={
-                  <div className="page-placeholder">
-                    <div className="placeholder-content">
-                      <h1>📊 Analytics</h1>
-                      <p>Advanced analytics and reporting dashboard coming soon...</p>
-                    </div>
-                  </div>
-                }
-              />
+              <Route path="patients" element={<Patients />} />
+              <Route path="analytics" element={<Analytics />} />
+              <Route path="intake-links" element={<IntakeLinks />} />
+              <Route path="users" element={<Users />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           ) : (

@@ -37,5 +37,8 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
-  }
+  },
+  // Only the app source is compiled/typechecked; tests + config live outside rootDir.
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "test", "vitest.config.ts"]
 }

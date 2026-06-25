@@ -391,6 +391,11 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
     return this.provider.sendAudioData(sessionId, audioDataObject);
   }
 
+  // User-initiated barge-in: abort the agent's current spoken turn (if supported).
+  interrupt(sessionId: string) {
+    return this.provider.interrupt?.(sessionId);
+  }
+
   // Old implementation
   _sendAudioDataOld(sessionId: string, audioDataObject: any) {
     const realtimeWs = this.connections.get(sessionId);

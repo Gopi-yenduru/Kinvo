@@ -205,7 +205,8 @@ const Settings: React.FC = () => {
 
   const providerOptions = [
     { value: 'openai', label: 'OpenAI Realtime' },
-    { value: 'retellai', label: 'RetellAI' }
+    { value: 'retellai', label: 'RetellAI' },
+    { value: 'sarvam', label: 'Sarvam AI (Telugu)' }
   ];
 
   const voiceOptions = [
@@ -219,6 +220,20 @@ const Settings: React.FC = () => {
     { value: 'coral', label: 'Coral' },
     { value: 'sage', label: 'Sage' },
     { value: 'verse', label: 'Verse' }
+  ];
+
+  // Sarvam (bulbul) Telugu voices. v3 voices are newer/more natural.
+  const sarvamVoiceOptions = [
+    { value: 'ritu', label: 'Ritu — sweet natural female (v3)' },
+    { value: 'priya', label: 'Priya — calm professional female (v3)' },
+    { value: 'neha', label: 'Neha — warm female (v3)' },
+    { value: 'shreya', label: 'Shreya — expressive female (v3)' },
+    { value: 'pooja', label: 'Pooja — gentle female (v3)' },
+    { value: 'vidya', label: 'Vidya — standard female (v2)' },
+    { value: 'manisha', label: 'Manisha — standard female (v2)' },
+    { value: 'anushka', label: 'Anushka — standard female (v2)' },
+    { value: 'aditya', label: 'Aditya — professional male (v3)' },
+    { value: 'rahul', label: 'Rahul — calm male (v3)' },
   ];
 
   if (loading) {
@@ -270,6 +285,32 @@ const Settings: React.FC = () => {
             </select>
           </div>
         </div>
+
+        {/* Sarvam-specific section (Telugu voice) */}
+        {config.provider === 'sarvam' && (
+          <div className="settings-section">
+            <div className="section-header">
+              <h2>🗣️ Voice (Telugu)</h2>
+            </div>
+            <div className="settings-field">
+              <label className="field-label">Voice</label>
+              <select
+                className="field-input voice-select"
+                value={config.voice}
+                onChange={(e) => handleInputChange('voice', e.target.value)}
+              >
+                {sarvamVoiceOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <small className="text-muted d-block mt-1">
+                "v3" voices are newer and more natural. Changes apply to the next session.
+              </small>
+            </div>
+          </div>
+        )}
 
         {/* OpenAI-specific sections */}
         {config.provider === 'openai' && (

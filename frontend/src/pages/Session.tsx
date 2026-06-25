@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { RetellWebClient } from 'retell-client-js-sdk';
 import { useSession } from '../contexts/SessionContext';
+import { VoiceClient } from '../lib/voiceClient';
 
 type SessionStatus = 'idle' | 'connecting' | 'active' | 'completed' | 'error';
 
@@ -29,9 +30,13 @@ const Session: React.FC = () => {
   const [isSpeakingAgent, setIsSpeakingAgent] = useState<boolean>(false); // Track when agent is actively speaking
 
 
-  // New state for patient name input
-  const [patientName, setPatientName] = useState<string>('');
+  // New state for patient name input (name is collected by voice; only the reset setter is used)
+  const [, setPatientName] = useState<string>('');
+  const [consentGiven, setConsentGiven] = useState<boolean>(false);
   const [showPatientForm, setShowPatientForm] = useState<boolean>(false);
+  const [language, setLanguage] = useState<'te-IN' | 'hi-IN' | 'en-IN'>('te-IN'); // patient's chosen language
+  const [phone, setPhone] = useState<string>(''); // phone / patient ID — key to recognise returning patients
+  const [visitType, setVisitType] = useState<'new' | 'returning' | ''>(''); // first-time vs returning patient
   const pendingSentenceRef = useRef<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
 
   // Use SessionContext
@@ -40,35 +45,9 @@ const Session: React.FC = () => {
   const conversationMessagesRef = useRef<HTMLDivElement>(null);
   const token = localStorage.getItem("jwt_token");
 
-  const wsRef = useRef<WebSocket | null>(null);
   const retellWebClientRef = useRef<RetellWebClient | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const isRecordingRef = useRef(false);
-  const gainNodeRef = useRef<GainNode | null>(null);
-  const isPlayingRef = useRef(false);
+  const voiceClientRef = useRef<VoiceClient | null>(null); // Sarvam voice loop (WS + mic + playback)
   const sessionStartTime = useRef<number | null>(null);
-  const audioBufferRef = useRef<string>(''); // Buffer for incoming audio chunks
-
-  // Track audio response freshness to prevent stale audio playback
-  const audioResponseTrackerRef = useRef<{
-    currentBufferResponseStart?: number;
-    lastPlayedResponseStart?: number;
-    freshAudioBuffer: string;
-  }>({
-    currentBufferResponseStart: undefined,
-    lastPlayedResponseStart: undefined,
-    freshAudioBuffer: ''
-  });
-
-  // Track transcript response freshness to sync text with audio
-  const transcriptTrackerRef = useRef<{
-    [responseStartTime: string]: {
-      transcriptChunks: string;
-      hasBeenDisplayed: boolean;
-      finalTranscript?: string;
-    };
-  }>({});
 
   // Timer effect
   useEffect(() => {
@@ -99,7 +78,7 @@ const Session: React.FC = () => {
           "Authorization": `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ patientName: patientNameToUse }),
+        body: JSON.stringify({ patientName: patientNameToUse, consentGiven: true, language, phone: phone.trim() }),
       });
 
       const data = await response.json();
@@ -111,20 +90,30 @@ const Session: React.FC = () => {
         setSessionId(data.sessionId);
         setProvider(data.provider || 'openai');
         setSessionStatus('active');
-        setConversationLog([{
+        const initialLog: Message[] = [{
           timestamp: new Date().toLocaleTimeString(),
           speaker: 'System',
           message: 'Connecting to HealthYoda voice agent...please wait',
           type: 'system'
-        }]);
+        }];
+        if (data.isReturning && data.patient) {
+          const who = data.patient.name ? `${data.patient.name}` : 'Returning patient';
+          initialLog.unshift({
+            timestamp: new Date().toLocaleTimeString(),
+            speaker: 'System',
+            message: `🔁 Returning patient: ${who} — visit #${data.patient.visitCount}${data.patient.hasHistory ? ' • prior history on file' : ''}.`,
+            type: 'system'
+          });
+        }
+        setConversationLog(initialLog);
 
         if (data.provider === 'retellai') {
           // For Retell AI, start web call directly
           await startRetellWebCall(data.sessionId);
         } else {
-          // For OpenAI, initialize audio and connect WebSocket
-          await initializeAudioRecording();
-          connectWebSocket(data.sessionId);
+          // Sarvam (and any non-Retell provider): the VoiceClient owns the whole
+          // realtime voice loop (WebSocket + microphone + streaming playback).
+          await startVoiceSession(data.sessionId);
         }
       } else {
         setErrorMessage('Failed to start session');
@@ -137,375 +126,54 @@ const Session: React.FC = () => {
     }
   };
 
-  const initializeAudioRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-
-      streamRef.current = stream;
-      const audioContext = new AudioContext({ sampleRate: 24000 });
-      audioContextRef.current = audioContext;
-
-      const gainNode = audioContext.createGain();
-      gainNode.gain.value = 1.0;
-      gainNode.connect(audioContext.destination);
-      gainNodeRef.current = gainNode;
-
-      const source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-      processor.onaudioprocess = (event) => {
-        if (!isRecordingRef.current) return;
-
-        const audioBuffer = event.inputBuffer;
-        const monoChannel = audioBuffer.getChannelData(0);
-        const pcm16Data = new Int16Array(monoChannel.length);
-
-        for (let i = 0; i < monoChannel.length; i++) {
-          pcm16Data[i] = Math.max(-32768, Math.min(32767, monoChannel[i] * 32767));
-        }
-
-        sendAudioChunk(pcm16Data);
-      };
-
-      source.connect(processor);
-      processor.connect(audioContext.destination);
-
-      const sendAudioChunk = (pcmData: Int16Array) => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          try {
-            const pcmArray = Array.from(pcmData);
-            wsRef.current.send(JSON.stringify({
-              type: 'audio_data',
-              data: { pcm16: pcmArray, timestamp: Date.now() }
-            }));
-          } catch (error) {
-            console.error('Failed to send audio chunk:', error);
-          }
-        }
-      };
-
-      setIsRecording(true);
-      isRecordingRef.current = true;
-    } catch (error) {
-      console.error('Failed to initialize audio:', error);
-      setErrorMessage('Failed to initialize audio processing. Please allow microphone access.');
-      setSessionStatus('error');
-    }
-  };
-
-  const connectWebSocket = (sessionId: string) => {
-    try {
-      wsRef.current = new WebSocket('/ws');
-      console.log('WebSocket readyState:', wsRef.current.readyState);
-
-      wsRef.current.onopen = () => {
+  // Sarvam voice loop: spin up the VoiceClient (WebSocket + mic + streaming playback)
+  // and map its callbacks onto the conversation UI.
+  const startVoiceSession = async (newSessionId: string) => {
+    const client = new VoiceClient({
+      onReady: () => {
         setConnectionStatus('Connected');
-        wsRef.current?.send(JSON.stringify({
-          type: 'join_session',
-          sessionId: sessionId
-        }));
-      };
-
-      wsRef.current.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-
-        console.log('📨 Frontend received WS message:', message.type, message);
-
-        switch (message.type) {
-          case 'session_joined':
-            addToConversationLog('System', message.message || 'Voice agent ready to begin intake', 'system');
-            break;
-          case 'agent_speech':
-            // Handle legacy agent speech messages - DISABLED to avoid conflict with agent_transcript_delta
-            // if (message.text) {
-            //   if (!checkImmediateSentence('Agent', message.text) && message.text.trim()) {
-            //     processTranscriptDelta('Agent', message.text);
-            //   }
-            // }
-            break;
-          case 'agent_transcript_delta':
-              // Handle agent transcript deltas from backend with response syncing
-              console.log('🎵 Frontend received agent_transcript_delta:', message.text, 'responseStartTime:', message.responseStartTime);
-              if (message.text && message.text.trim() && message.responseStartTime) {
-                console.log('📝 Processing agent delta for response:', message.responseStartTime);
-
-                const responseKey = message.responseStartTime.toString();
-
-                // Initialize tracker for this response if it doesn't exist
-                if (!transcriptTrackerRef.current[responseKey]) {
-                  transcriptTrackerRef.current[responseKey] = {
-                    transcriptChunks: '',
-                    hasBeenDisplayed: false,
-                    finalTranscript: undefined
-                  };
-                }
-
-                // Accumulate the transcript chunk
-                const tracker = transcriptTrackerRef.current[responseKey];
-                tracker.transcriptChunks += message.text;
-
-                console.log('🎭 Agent transcript chunk accumulated for response', responseKey,
-                  ':', tracker.transcriptChunks.length, 'chars');
-
-                // Don't show in UI yet - wait for audio to play
-                setSpeaker('Agent'); // Show agent is speaking indicator
-              } else {
-                console.log('⚠️ Agent transcript delta is empty or missing responseStartTime:', message);
-              }
-            break;
-          case 'response.audio_transcript.delta':
-            // Handle OpenAI's response.audio_transcript.delta - DISABLED to prevent double processing
-            // Use 'agent_transcript_delta' from backend instead
-            // if (message.delta && message.delta.trim()) {
-            //   processTranscriptDelta('Agent', message.delta);
-            // }
-            break;
-          case 'agent_transcript_complete':
-            // Store complete transcript for display, but only show it if not already displayed via delayed mechanism
-            if (message.transcript && message.timestamp) {
-              const responseKey = message.timestamp;
-
-              // Initialize tracker if it doesn't exist with complete transcript
-              if (!transcriptTrackerRef.current[responseKey]) {
-                transcriptTrackerRef.current[responseKey] = {
-                  transcriptChunks: '',
-                  hasBeenDisplayed: false,
-                  finalTranscript: message.transcript.trim()
-                };
-              } else {
-                // Update with complete transcript (better than accumulated chunks)
-                transcriptTrackerRef.current[responseKey].finalTranscript = message.transcript.trim();
-              }
-
-              console.log('📝 Stored complete transcript for response:', responseKey, 'length:', message.transcript.length);
-
-              // Clear any pending agent sentences
-              if (pendingSentence && pendingSentence.speaker === 'Agent') {
-                clearTimeout(pendingSentence.timeoutId);
-                setPendingSentence(null);
-              }
-              setSpeaker('');
-
-              // If this transcript hasn't been displayed through delayed mechanism, show it now
-              // This covers cases where agent_response_complete might not fire properly
-              const tracker = transcriptTrackerRef.current[responseKey];
-              if (!tracker.hasBeenDisplayed && tracker.finalTranscript?.trim()) {
-                console.log('🎭 Displaying agent transcript immediately (fallback)', responseKey);
-                addSentenceToConversationLog('Agent', tracker.finalTranscript, 'text', message.timestamp);
-                tracker.hasBeenDisplayed = true;
-              }
-            }
-            break;
-          case 'conversation.item.input_audio_transcription.delta':
-              if (message.delta) {
-                // **INTERRUPTION DETECTION**: If agent is talking and patient starts speaking
-                if (isSpeakingAgent) {
-                  console.log('🔄 INTERRUPTION DETECTED: Patient interrupting agent - stopping agent audio');
-                  // Stop any playing agent audio immediately
-                  stopAgentAudio();
-                  // Clear speaker state
-                  setSpeaker(''); // Clear "Agent" speaker indicator immediately
-                  setIsSpeakingAgent(false);
-                  // Clear audio buffer to prevent queued audio
-                  audioBufferRef.current = '';
-                  // Clear any pending agent sentences
-                  if (pendingSentence && pendingSentence.speaker === 'Agent') {
-                    clearTimeout(pendingSentence.timeoutId);
-                    setPendingSentence(null);
-                  }
-                  finalizePendingSentences(); // Finalize what agent said before interruption
-                }
-  
-                // Set patient as active speaker
-                if (!isSpeakingAgent) { // Only set patient if agent is not speaking
-                  setSpeaker('Patient');
-                }
-  
-                // Process patient transcript deltas
-                if (!checkImmediateSentence('You', message.delta) && message.delta.trim()) {
-                  processTranscriptDelta('You', message.delta);
-                }
-              }
-            break;
-          case 'response.content_part.done':
-            setSpeaker('');
-            // DISABLED: Don't display OpenAI content part transcripts - use delayed display only
-            console.log('⚠️ Ignoring response.content_part.done to prevent stale display');
-            // Clear any pending agent sentences
-            if (pendingSentence && pendingSentence.speaker === 'Agent') {
-              clearTimeout(pendingSentence.timeoutId);
-              setPendingSentence(null);
-            }
-            break;
-          case 'response.output_item.done':
-            // Handle complete item from OpenAI (includes final transcript)
-            if (message.item && message.item.content && message.item.content[0] &&
-              message.item.content[0].type === 'audio' && message.item.content[0].transcript) {
-              console.log('🔄 Received complete agent transcript from response.output_item.done',
-                message.item.content[0].transcript);
-              // This could be used for verification or fallback
-            }
-            break;
-          case 'agent_audio_chunk':
-              // Handle incoming audio chunks from the AI agent with response separation
-              if (message.audio) {
-                handleIncomingAudioChunk(message.audio, message.responseStartTime);
-              }
-              // Set speaker to Agent when we start receiving audio (agent is speaking)
-              if (!isSpeakingAgent) {
-                setSpeaker('Agent');
-                setIsSpeakingAgent(true);
-              }
-            break;
-          case 'agent_response_complete':
-              setSpeaker('');
-              setIsSpeakingAgent(false);
-              // Play only the freshest accumulated audio, discard stale ones
-              playAccumulatedAudio(message.timestamp);
-
-              // Check if we have a transcript tracker for this response that should be displayed
-              if (message.timestamp && transcriptTrackerRef.current[message.timestamp]) {
-                const transcriptData = transcriptTrackerRef.current[message.timestamp];
-                if (!transcriptData.hasBeenDisplayed) {
-                  // Prefer complete transcript over accumulated chunks
-                  const finalText = transcriptData.finalTranscript || transcriptData.transcriptChunks.trim();
-                  if (finalText) {
-                    // Display the transcript now that audio is playing!
-                    console.log('🎭 Displaying delayed transcript for response:', message.timestamp,
-                      'Text:', finalText.length, 'chars');
-                    addSentenceToConversationLog('Agent', finalText, 'text', message.timestamp);
-                    transcriptData.hasBeenDisplayed = true;
-                  }
-                }
-              }
-
-              // Finalize any pending sentence
-              finalizePendingSentences();
-
-              // Clean up any stale transcript trackers (responses that didn't get played)
-              const responseTimestamp = message.timestamp ? new Date(message.timestamp).getTime() : Date.now();
-              Object.keys(transcriptTrackerRef.current).forEach(key => {
-                const trackerTime = new Date(key).getTime();
-                // Remove trackers for responses older than the current one by 5 seconds
-                if (trackerTime < (responseTimestamp - 5000)) {
-                  const tracker = transcriptTrackerRef.current[key];
-                  if (!tracker.hasBeenDisplayed) {
-                    console.log('🧹 Cleaning up stale transcript tracker for response:', key);
-                    delete transcriptTrackerRef.current[key];
-                  }
-                }
-              });
-            break;
-          case 'patient_transcript':
-            if (message.transcript) {
-              // Check if this forms an immediate sentence first
-              if (!checkImmediateSentence('You', message.transcript, message.timestamp) && message.transcript.trim()) {
-                processTranscriptDelta('You', message.transcript, message.timestamp);
-              }
-            }
-            break;
-          case 'red_flag_detected':
-            const warningMessage = `⚠️ MEDICAL ALERT: ${message.severity?.toUpperCase()} SYMPTOMS DETECTED\n• ${message.symptoms?.join('\n• ')}\nClinical team has been notified.`;
-            addToConversationLog('⚠️ ALERT', warningMessage, 'alert');
-            break;
-          case 'session_ended':
-            // Finalize any pending sentences before ending session
-            finalizePendingSentences();
-            addToConversationLog('System', 'Session completed successfully', 'system');
-            break;
-          case 'end_session':
-            // Handle automatic session ending by agent function call
-            console.log('🏁 Agent initiated session end:', message);
-            if (message.consent_given && message.consent_given === true) {
-              // Add system message indicating AI-initiated completion
-              addToConversationLog('System', 'Medical intake completed by AI agent', 'system');
-
-              // Close WebSocket immediately to prevent further messages after session end
-              if (wsRef.current) {
-                console.log('🔌 Closing WebSocket to prevent race conditions');
-                wsRef.current.close(1000, 'Session auto-ended by agent');
-                wsRef.current = null;
-              }
-
-              // Clear any error messages to prevent race condition errors
-              setErrorMessage('');
-
-              // Automatically end the session after a brief delay for natural flow
-              setTimeout(() => {
-                console.log('⏰ Auto-ending session after 2-second delay');
-                // Update global session context
-                contextEndSession();
-                // Avoid calling full endSession() which might send another WebSocket message
-                // Just update UI state directly
-                setSessionStatus('completed');
-                setConnectionStatus('Disconnected'); // Update connection status too
-                setIsRecording(false);
-                isRecordingRef.current = false;
-                if (streamRef.current) {
-                  streamRef.current.getTracks().forEach(track => track.stop());
-                  streamRef.current = null;
-                }
-                // Close audio context after a delay
-                setTimeout(() => {
-                  if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-                    try {
-                      audioContextRef.current.close();
-                      audioContextRef.current = null;
-                      gainNodeRef.current = null;
-                    } catch (error) {
-                      console.error('Error closing audio context:', error);
-                    }
-                  }
-                }, 2000);
-              }, 2000);
-            } else {
-              console.warn('⚠️ Agent attempted to end session without consent - ignoring');
-              // Don't end session if no explicit consent
-            }
-            break;
-          case 'request_session_end':
-            // Finalize any pending sentences before ending session
-            console.log('Received request_session_end from backend, ending session');
-            endSession();
-            break;
-          case "listening":
-            setSpeaker('Patient');
-            break;
-          case "speaking":
-            setSpeaker('Agent');
-            break;
-          case 'error':
-            setErrorMessage(message.message || 'An error occurred');
-            break;
-        }
-      };
-
-      wsRef.current.onclose = () => {
+        addToConversationLog('System', 'Voice agent ready. Please answer when the assistant speaks.', 'system');
+      },
+      onStatus: (status) => {
+        if (status === 'speaking') { setSpeaker('Agent'); setIsSpeakingAgent(true); }
+        else if (status === 'thinking') { setSpeaker('Agent'); setIsSpeakingAgent(false); }
+        else if (status === 'listening') { setSpeaker('Patient'); setIsSpeakingAgent(false); setIsRecording(true); }
+        else { setSpeaker(''); setIsSpeakingAgent(false); }
+      },
+      onPatientTranscript: (text) => addSentenceToConversationLog('You', text, 'text'),
+      onAgentTranscript: (text) => addSentenceToConversationLog('Agent', text, 'text'),
+      onRedFlag: (symptoms, severity) => {
+        const warning = `⚠️ MEDICAL ALERT: ${severity.toUpperCase()} SYMPTOMS DETECTED\n• ${symptoms}\nClinical team notified — a doctor is being sent immediately.`;
+        addToConversationLog('⚠️ ALERT', warning, 'alert');
+      },
+      onError: (message) => setErrorMessage(message),
+      onSessionEnded: () => {
+        finalizePendingSentences();
+        addToConversationLog('System', 'Session completed.', 'system');
+        contextEndSession();
+        setSessionStatus('completed');
         setConnectionStatus('Disconnected');
-        if (sessionStatus === 'active') {
-          setSessionStatus('completed');
-        }
-      };
+        setIsRecording(false);
+        setIsSpeakingAgent(false);
+        setSpeaker('');
+      },
+      onClose: () => {
+        setConnectionStatus('Disconnected');
+        setSessionStatus(prev => (prev === 'active' ? 'completed' : prev));
+      },
+    });
+    voiceClientRef.current = client;
 
-      wsRef.current.onerror = () => {
-        console.error('Failed to connect WebSocket on error method');
-        setConnectionStatus('Error');
-        setSessionStatus('error');
-      };
+    try {
+      await client.start(newSessionId, token);
+      setIsRecording(true);
     } catch (error) {
-      console.error('Failed to connect WebSocket:', error);
-      setErrorMessage('WebSocket connection failed');
+      console.error('Failed to start voice session:', error);
+      setErrorMessage('Failed to access microphone or connect. Please allow microphone access and retry.');
       setSessionStatus('error');
     }
   };
+
 
   const startRetellWebCall = async (sessionId: string) => {
     try {
@@ -848,8 +516,13 @@ const Session: React.FC = () => {
   };
 
   const toggleRecording = () => {
-    setIsRecording(!isRecording);
-    isRecordingRef.current = !isRecording;
+    const client = voiceClientRef.current;
+    if (!client) return;
+    // While the agent is speaking, the mic button doubles as a barge-in / interrupt.
+    if (isSpeakingAgent) { client.interrupt(); return; }
+    const next = !isRecording;
+    setIsRecording(next);
+    client.setMicEnabled(next);
   };
 
   const endSession = async () => {
@@ -870,200 +543,31 @@ const Session: React.FC = () => {
         }
       }
     } else {
-
-      console.log('Stopping recording');
+      // Sarvam: the VoiceClient tears down the WebSocket, microphone and playback.
       setIsRecording(false);
-      isRecordingRef.current = false;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-      // Delay closing audio context to allow any ongoing audio playback to complete
-      setTimeout(() => {
-        if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-          try {
-            audioContextRef.current.close();
-            audioContextRef.current = null;
-            gainNodeRef.current = null;
-          } catch (error) {
-            console.error('Error closing audio context:', error);
-          }
-        }
-      }, 20000);
-      if (wsRef.current) {
-        wsRef.current.send(JSON.stringify({ type: 'end_session' }));
-      }
+      await voiceClientRef.current?.stop();
+      voiceClientRef.current = null;
     }
     
     setSessionStatus('completed');
     setIsRecording(false);
   };
 
-  const handleIncomingAudioChunk = (audioChunk: string, responseStartTime?: number) => {
-    // Track which response these chunks belong to and only buffer if it's the latest response
-    if (responseStartTime) {
-      if (!audioResponseTrackerRef.current.currentBufferResponseStart) {
-        // First chunks of a new response
-        audioResponseTrackerRef.current.currentBufferResponseStart = responseStartTime;
-        audioResponseTrackerRef.current.freshAudioBuffer = audioChunk;
-        console.log(`🎵 Starting audio buffer for response starting at ${responseStartTime}`);
-      } else if (responseStartTime === audioResponseTrackerRef.current.currentBufferResponseStart) {
-        // Continuation of current response - add to buffer
-        audioResponseTrackerRef.current.freshAudioBuffer += audioChunk;
-        console.log(`🎵 Adding chunk to buffer (${audioResponseTrackerRef.current.freshAudioBuffer.length} total chars)`);
-      } else if (responseStartTime > audioResponseTrackerRef.current.currentBufferResponseStart!) {
-        // New response is starting - replace the buffer
-        console.log(`📹 Newer response starting ${responseStartTime} vs ${audioResponseTrackerRef.current.currentBufferResponseStart} - replacing buffer`);
-        audioResponseTrackerRef.current.currentBufferResponseStart = responseStartTime;
-        audioResponseTrackerRef.current.freshAudioBuffer = audioChunk;
-      } else {
-        // This is an older/delayed response - discard it
-        console.log(`🗑️ Discarding chunk from stale response (${responseStartTime} vs current ${audioResponseTrackerRef.current.currentBufferResponseStart})`);
-      }
-    } else {
-      // Legacy behavior for chunks without response start time
-      audioResponseTrackerRef.current.freshAudioBuffer += audioChunk;
-      console.log(`Received legacy audio chunk: ${audioChunk.length} characters`);
-    }
-  };
-
-  const playAccumulatedAudio = async (responseTimestamp?: string) => {
-    // Check if this response would be stale compared to when the user last spoke
-    if (responseTimestamp && responseTimestamp.trim()) {
-      const responseTime = new Date(responseTimestamp).getTime();
-      const lastPlayedTime = audioResponseTrackerRef.current.lastPlayedResponseStart || 0;
-
-      // If we already played a newer response, skip this older one
-      if (lastPlayedTime >= responseTime) {
-        console.log(`🗑️ Skipping playback of stale audio response (${new Date(responseTime).toISOString()} vs last played ${new Date(lastPlayedTime).toISOString()})`);
-        // Clear the buffer and return without playing
-        audioResponseTrackerRef.current.freshAudioBuffer = '';
-        return;
-      }
-    }
-
-    if (!audioResponseTrackerRef.current.freshAudioBuffer || isPlayingRef.current) {
-      return;
-    }
-
-    try {
-      isPlayingRef.current = true;
-      console.log(`Playing accumulated audio: ${audioResponseTrackerRef.current.freshAudioBuffer.length} characters`);
-
-      // Decode base64 audio data from fresh buffer
-      const audioData = atob(audioResponseTrackerRef.current.freshAudioBuffer);
-      const audioBytes = new Uint8Array(audioData.length);
-      for (let i = 0; i < audioData.length; i++) {
-        audioBytes[i] = audioData.charCodeAt(i);
-      }
-
-      // Create audio context if not exists
-      if (!audioContextRef.current) {
-        audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      }
-
-      const audioContext = audioContextRef.current;
-
-      // Resume audio context if suspended
-      if (audioContext.state === 'suspended') {
-        await audioContext.resume();
-      }
-
-      // Convert PCM16 bytes to AudioBuffer
-      const audioBuffer = audioContext.createBuffer(1, audioBytes.length / 2, 24000);
-      const channelData = audioBuffer.getChannelData(0);
-
-      // Convert 16-bit PCM to float32 samples
-      for (let i = 0; i < channelData.length; i++) {
-        const byteIndex = i * 2;
-        const sample = (audioBytes[byteIndex] | (audioBytes[byteIndex + 1] << 8));
-        // Convert from signed 16-bit to float32 (-1 to 1)
-        channelData[i] = sample < 32768 ? sample / 32768 : (sample - 65536) / 32768;
-      }
-
-      // Create and play audio source
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-
-      // Connect to gain node if available, otherwise directly to destination
-      if (gainNodeRef.current) {
-        source.connect(gainNodeRef.current);
-      } else {
-        source.connect(audioContext.destination);
-      }
-
-      source.onended = () => {
-        isPlayingRef.current = false;
-        console.log('Audio playback completed');
-      };
-
-      source.start();
-
-      // Update last played time and clear the buffer after playing
-      const responseTime = responseTimestamp ? new Date(responseTimestamp).getTime() : Date.now();
-      audioResponseTrackerRef.current.lastPlayedResponseStart = responseTime;
-      audioResponseTrackerRef.current.freshAudioBuffer = '';
-
-    } catch (error) {
-      console.error('Error playing audio:', error);
-      isPlayingRef.current = false;
-      // Clear buffer on error to prevent accumulation
-      audioResponseTrackerRef.current.freshAudioBuffer = '';
-    }
-  };
-
-  const stopAgentAudio = () => {
-    // Immediately mute/stop any agent audio that's currently playing
-    if (gainNodeRef.current) {
-      console.log('Muting agent audio gain node');
-      gainNodeRef.current.gain.setValueAtTime(0, audioContextRef.current?.currentTime || 0);
-    }
-
-    // Mark audio as no longer playing to prevent new audio from starting
-    isPlayingRef.current = false;
-
-    console.log('Agent audio stopped/inactivated');
-  };
 
   const resetSession = () => {
     console.log('resetSession: Starting complete session reset');
 
-    // FIRST: Update global session context
+    // Update global session context
     contextEndSession();
 
-    // CLEANUP: Stop and clean up any existing connections
-    if (wsRef.current) {
-      console.log('resetSession: Closing existing WebSocket');
-      wsRef.current.close(1000, 'Session reset');
-      wsRef.current = null;
+    // Tear down whichever voice engine was active.
+    if (voiceClientRef.current) {
+      voiceClientRef.current.stop().catch(() => {});
+      voiceClientRef.current = null;
     }
-
     if (retellWebClientRef.current) {
-      console.log('resetSession: Cleaning up Retell Web Client');
       retellWebClientRef.current.stopCall();
       retellWebClientRef.current = null;
-    }
-
-    // CLEANUP: Stop audio processing
-    if (isRecordingRef.current) {
-      isRecordingRef.current = false;
-    }
-
-    if (streamRef.current) {
-      console.log('resetSession: Stopping media stream');
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-
-    // CLEANUP: Audio context cleanup
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      console.log('resetSession: Cleaning up audio context');
-      try {
-        audioContextRef.current.close();
-      } catch (error) {
-        console.error('Error closing audio context during reset:', error);
-      }
-      audioContextRef.current = null;
-      gainNodeRef.current = null;
     }
 
     // RESET: All state variables
@@ -1083,39 +587,38 @@ const Session: React.FC = () => {
     setTranscriptData(null);
     setShowTranscript(false);
 
-    // RESET: All audio-related buffers and trackers
-    audioBufferRef.current = '';
-    audioResponseTrackerRef.current = {
-      currentBufferResponseStart: undefined,
-      lastPlayedResponseStart: undefined,
-      freshAudioBuffer: ''
-    };
-
-    // RESET: Transcript trackers
-    transcriptTrackerRef.current = {};
-
-    // RESET: Playback states
-    isPlayingRef.current = false;
-
     console.log('resetSession: Complete session reset finished');
   };
 
   const handlePatientFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!patientName.trim()) {
-      setErrorMessage('Please enter a patient name');
+    if (!visitType) {
+      setErrorMessage('Please select whether this is the patient\'s first visit or a return visit.');
+      return;
+    }
+    if (!phone.trim()) {
+      setErrorMessage("Please enter the patient's phone number.");
+      return;
+    }
+    if (!consentGiven) {
+      setErrorMessage('Patient consent is required before starting.');
       return;
     }
 
     setShowPatientForm(false);
     setErrorMessage('');
-    startSession(patientName.trim());
+    // Name is collected by voice during onboarding — the agent asks for it. The phone number is
+    // always captured: it creates/updates the patient record and matches returning patients.
+    startSession('');
   };
 
   const handlePatientFormCancel = () => {
     setShowPatientForm(false);
     setPatientName('');
+    setPhone('');
+    setVisitType('');
+    setConsentGiven(false);
     setErrorMessage('');
   };
 
@@ -1548,28 +1051,126 @@ const Session: React.FC = () => {
           <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
             <div className="modal-content border-0 shadow">
               <div className="modal-header bg-light">
-                <h5 className="modal-title fw-semibold">Enter Patient Information</h5>
+                <h5 className="modal-title fw-semibold">Start Voice Intake</h5>
                 <button type="button" className="btn-close" onClick={handlePatientFormCancel}></button>
               </div>
               <div className="modal-body">
                 <form onSubmit={handlePatientFormSubmit}>
+                  {/* Language the agent will speak — patient picks before the call starts. */}
                   <div className="mb-3">
-                    <label htmlFor="patientName" className="form-label fw-semibold">
-                      Patient Name <span className="text-danger">*</span>
+                    <label className="form-label fw-semibold">
+                      Language / భాష / भाषा <span className="text-danger">*</span>
                     </label>
-                    <input
-                      type="text"
-                      id="patientName"
-                      className="form-control form-control-lg"
-                      value={patientName}
-                      onChange={(e) => setPatientName(e.target.value)}
-                      placeholder="Enter patient's full name"
-                      autoFocus
-                      required
-                    />
+                    <div className="btn-group w-100" role="group" aria-label="Language selection">
+                      {([
+                        { code: 'te-IN', label: 'తెలుగు', sub: 'Telugu' },
+                        { code: 'hi-IN', label: 'हिंदी', sub: 'Hindi' },
+                        { code: 'en-IN', label: 'English', sub: 'English' },
+                      ] as const).map(opt => (
+                        <button
+                          key={opt.code}
+                          type="button"
+                          className={`btn ${language === opt.code ? 'btn-primary' : 'btn-outline-primary'} d-flex flex-column py-2`}
+                          onClick={() => setLanguage(opt.code)}
+                        >
+                          <span className="fw-semibold">{opt.label}</span>
+                          <small className={language === opt.code ? 'text-white-50' : 'text-muted'}>{opt.sub}</small>
+                        </button>
+                      ))}
+                    </div>
                     <div className="form-text">
                       <i className="fas fa-info-circle me-1"></i>
-                      This information will be used to identify the session
+                      The assistant will speak and listen in this language.
+                    </div>
+                  </div>
+
+                  {/* Visit type — ask first; only returning patients are asked for a phone/ID. */}
+                  <div className="mb-3">
+                    <label className="form-label fw-semibold">
+                      Is this the patient's first visit? <span className="text-danger">*</span>
+                    </label>
+                    <div className="btn-group w-100" role="group" aria-label="Visit type">
+                      <button
+                        type="button"
+                        className={`btn ${visitType === 'new' ? 'btn-primary' : 'btn-outline-primary'} py-2`}
+                        onClick={() => setVisitType('new')}
+                      >
+                        <i className="fas fa-user-plus me-2"></i>First time
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn ${visitType === 'returning' ? 'btn-primary' : 'btn-outline-primary'} py-2`}
+                        onClick={() => setVisitType('returning')}
+                      >
+                        <i className="fas fa-user-check me-2"></i>Visited before
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Patient phone number — always collected and stored on the patient record;
+                      it also recognises returning patients and pulls up their existing history. */}
+                  <div className="mb-3">
+                    <label htmlFor="patientPhone" className="form-label fw-semibold">
+                      Patient phone number <span className="text-danger">*</span>
+                    </label>
+                    <input
+                      type="tel"
+                      id="patientPhone"
+                      className="form-control form-control-lg"
+                      value={phone}
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, ''))}
+                      placeholder="e.g. 9876543210"
+                    />
+                    <div className="form-text">
+                      <i className={`fas ${visitType === 'returning' ? 'fa-history' : 'fa-id-card'} me-1`}></i>
+                      {visitType === 'returning'
+                        ? "We'll pull up this patient's existing record and history."
+                        : 'Saved with the patient record so future visits are recognised.'}
+                    </div>
+                  </div>
+
+                  <div className="mb-3 p-2 rounded-3 bg-light border">
+                    <div className="form-text mb-0">
+                      <i className="fas fa-microphone me-1"></i>
+                      The assistant will ask the patient for their name and age by voice — no need to type them here.
+                    </div>
+                  </div>
+
+                  {/* Patient consent — required before collecting any health data */}
+                  <div className="mb-2 p-3 rounded-3 border bg-light">
+                    <div className="small text-muted mb-2" style={{ maxHeight: '140px', overflowY: 'auto' }}>
+                      <strong>Consent / సమ్మతి / सहमति</strong>
+                      <p className="mb-1 mt-1">
+                        This is an AI voice assistant that will ask health questions in {language === 'hi-IN' ? 'Hindi' : language === 'en-IN' ? 'English' : 'Telugu'} to prepare information for your doctor.
+                        Your responses and audio are recorded and processed (including by our voice provider) to create a summary for the clinician.
+                        It does not provide diagnosis or treatment. You may stop at any time.
+                      </p>
+                      {language === 'te-IN' && (
+                        <p className="mb-0" lang="te">
+                          ఇది మీ వైద్యుని కోసం సమాచారం సేకరించే AI వాయిస్ సహాయకి. మీ సమాధానాలు, ఆడియో రికార్డ్ చేసి ప్రాసెస్ చేయబడతాయి.
+                          ఇది రోగ నిర్ధారణ లేదా చికిత్స ఇవ్వదు. మీరు ఎప్పుడైనా ఆపవచ్చు.
+                        </p>
+                      )}
+                      {language === 'hi-IN' && (
+                        <p className="mb-0" lang="hi">
+                          यह आपके डॉक्टर के लिए जानकारी इकट्ठा करने वाली एक AI वॉइस सहायक है। आपके उत्तर और ऑडियो रिकॉर्ड और प्रोसेस किए जाते हैं।
+                          यह निदान या इलाज नहीं देती। आप कभी भी रोक सकते हैं।
+                        </p>
+                      )}
+                    </div>
+                    <div className="form-check">
+                      <input
+                        className="form-check-input"
+                        type="checkbox"
+                        id="consentCheck"
+                        checked={consentGiven}
+                        onChange={(e) => setConsentGiven(e.target.checked)}
+                      />
+                      <label className="form-check-label fw-semibold" htmlFor="consentCheck">
+                        The patient consents to this AI intake and data processing. / రోగి సమ్మతిస్తున్నారు.
+                      </label>
                     </div>
                   </div>
                 </form>
@@ -1586,7 +1187,7 @@ const Session: React.FC = () => {
                   type="submit"
                   className="btn btn-primary d-flex align-items-center gap-2"
                   onClick={handlePatientFormSubmit}
-                  disabled={!patientName.trim()}
+                  disabled={!consentGiven || !visitType || !phone.trim()}
                 >
                   <i className="fas fa-play"></i>
                   Start Session

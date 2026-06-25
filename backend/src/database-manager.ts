@@ -2,6 +2,8 @@ import { sql, poolPromise } from "./dbconnection.js";
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import cacheService, { CACHE_PATTERNS } from './cache-service.js';
+import { getJwtSecret, JWT_EXPIRES_IN } from './auth.js';
+import { encryptField, decryptField, decryptRows, hashIdentifier } from './crypto-service.js';
 
 // Interfaces
 export interface Session {
@@ -9,11 +11,14 @@ export interface Session {
   patient_id: number;
   patient_name: string;
   provider?: string;
+  language?: string;        // te-IN | hi-IN | en-IN (Sarvam pipeline)
   status: string;
   start_time: Date;
   end_time?: Date | null;
   red_flags_detected: number;
   created_at: Date;
+  source?: string;          // 'staff' (in-clinic) | 'remote-link' (patient self-service link)
+  patient_phone?: string | null;   // joined from patients table for list views (not a sessions column)
 }
 
 export interface Setting {
@@ -57,6 +62,38 @@ export interface IntakeResponse {
     timestamp: Date;
 }
 
+export interface Patient {
+  id: number;
+  phone?: string;          // decrypted for reads; matched via phone_hash
+  name?: string;
+  age?: string;
+  visit_count: number;
+  medical_summary?: string;
+  first_visit_at?: Date;
+  last_visit_at?: Date;
+}
+
+// A shareable, single-patient remote intake link. The `token` is the unguessable URL secret.
+export interface IntakeLink {
+  id: string;
+  token: string;
+  created_by?: string | null;
+  patient_id?: number | null;
+  patient_name?: string | null;   // encrypted at rest (PHI)
+  phone?: string | null;          // encrypted at rest (PHI)
+  phone_hash?: string | null;
+  language: string;               // te-IN | hi-IN | en-IN
+  status: string;                 // pending | in_progress | completed | revoked (expiry derived from expires_at)
+  session_id?: string | null;
+  expires_at?: Date | null;
+  created_at?: Date;
+  used_at?: Date | null;
+  completed_at?: Date | null;
+  // Derived/joined for list views (not stored columns):
+  session_status?: string | null; // live status of the linked session
+  has_report?: boolean;
+}
+
 export interface RedFlagEvent {
     id: number;
     session_id: string;
@@ -65,6 +102,7 @@ export interface RedFlagEvent {
     timestamp: Date;
     resolved: boolean;
     clinician_notified: boolean;
+    language?: string;        // joined from sessions (te-IN | hi-IN | en-IN) for the dashboard
 }
 
 export interface AuditLog {
@@ -99,6 +137,9 @@ export interface Report {
     generated_at: Date;
     cost: number | null;
     version: number;
+    status?: string;          // 'pending' | 'approved'
+    reviewed_by?: string | null;
+    reviewed_at?: Date | null;
 }
 
 export interface User {
@@ -124,6 +165,12 @@ export class DataService {
         const pool = await poolPromise;
         const result = await pool.request().query<T>(query);
         return result.recordset;
+    }
+
+    /** Lightweight DB connectivity check for health monitoring. */
+    public async ping(): Promise<boolean> {
+        try { await this.runQuery('SELECT 1 AS ok'); return true; }
+        catch { return false; }
     }
 
     private async runQueryWithInput<T>(query: string, inputs: { name: string, type: any, value: any }[]): Promise<T[]> {
@@ -167,6 +214,7 @@ export class DataService {
         if (!session) return null;
 
         const result = {...session};
+        result.patient_name = decryptField(result.patient_name);
 
         // Cache the result
         cacheService.set(cacheKey, result);
@@ -188,6 +236,7 @@ export class DataService {
       FROM sessions
       ORDER BY start_time DESC
     `);
+        decryptRows(result, 'patient_name');
 
         // Cache the result
         cacheService.set(cacheKey, result);
@@ -212,8 +261,9 @@ export class DataService {
 
         // Get paginated sessions
         let dataQuery = `
-            SELECT *
-            FROM sessions
+            SELECT s.*, p.phone AS patient_phone
+            FROM sessions s
+            LEFT JOIN patients p ON s.patient_id = p.id
             WHERE 1=1
         `;
 
@@ -223,15 +273,17 @@ export class DataService {
         ];
 
         if (status) {
-            dataQuery += ' AND status = @status';
+            dataQuery += ' AND s.status = @status';
             dataParams.push({ name: 'status', type: sql.VarChar(50), value: status });
         }
 
-        dataQuery += ' ORDER BY start_time DESC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY';
+        dataQuery += ' ORDER BY s.start_time DESC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY';
 
         const sessions = await this.runQueryWithInput<Session>(dataQuery, dataParams);
+        decryptRows(sessions, 'patient_name');
+        decryptRows(sessions, 'patient_phone');   // patient phone is stored encrypted on the patients table
 
-        // Cache each session individually for future lookups
+        // Cache each session individually for future lookups (already decrypted)
         sessions.forEach(session => {
             const sessionCacheKey = `session:${session.id}`;
             cacheService.set(sessionCacheKey, session);
@@ -310,6 +362,7 @@ export class DataService {
       WHERE status IN ('active', 'paused') AND start_time > DATEADD(HOUR, -24, GETDATE())
       ORDER BY start_time DESC
     `);
+        decryptRows(result, 'patient_name');
 
         // Cache the result
         cacheService.set(cacheKey, result);
@@ -318,17 +371,19 @@ export class DataService {
 
     public async createSession(session: Omit<Session, 'id' | 'created_at'>): Promise<Session> {
       const result = await this.runQueryWithInputByType<Session>(
-        `INSERT INTO sessions (patient_id, patient_name, provider, status, start_time, end_time, red_flags_detected, created_at)
+        `INSERT INTO sessions (patient_id, patient_name, provider, language, status, start_time, end_time, red_flags_detected, source, created_at)
         OUTPUT INSERTED.*
-        VALUES (@patient_id, @patient_name, @provider, @status, @start_time, @end_time, @red_flags_detected, GETDATE())`,
+        VALUES (@patient_id, @patient_name, @provider, @language, @status, @start_time, @end_time, @red_flags_detected, @source, GETDATE())`,
         [
           { name: 'patient_id', type: sql.BigInt, value: session.patient_id || null },
-          { name: 'patient_name', type: sql.VarChar(250), value: session.patient_name || null },
+          { name: 'patient_name', type: sql.VarChar(250), value: encryptField(session.patient_name) || null },
           { name: 'provider', type: sql.VarChar(50), value: session.provider || null },
+          { name: 'language', type: sql.VarChar(10), value: session.language || null },
           { name: 'status', type: sql.VarChar(50), value: session.status },
           { name: 'start_time', type: sql.DateTime, value: session.start_time },
           { name: 'end_time', type: sql.DateTime, value: session.end_time ?? null },
-          { name: 'red_flags_detected', type: sql.Int, value: session.red_flags_detected }
+          { name: 'red_flags_detected', type: sql.Int, value: session.red_flags_detected },
+          { name: 'source', type: sql.VarChar(20), value: session.source || 'staff' }
         ]
       );
 
@@ -337,7 +392,21 @@ export class DataService {
         cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);
         cacheService.invalidateByPattern(CACHE_PATTERNS.DASHBOARD_SUMMARY);
 
+        if (result[0]) result[0].patient_name = decryptField(result[0].patient_name);
         return result[0]; // first (and only) inserted row
+    }
+
+    /** Record that the patient gave consent for this intake session. */
+    public async recordConsent(sessionId: string): Promise<void> {
+        await this.runQueryWithInput(
+            `UPDATE sessions SET consent_given = @consent, consent_at = GETDATE() WHERE id = @id`,
+            [
+                { name: 'consent', type: sql.Bit, value: true },
+                { name: 'id', type: sql.VarChar, value: sessionId }
+            ]
+        );
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
+        cacheService.delete(`session:${sessionId}`);
     }
 
     public async updateSessionRedFlagCount(sessionId: string): Promise<void> {
@@ -371,20 +440,349 @@ export class DataService {
         cacheService.invalidateByPattern(`${CACHE_PATTERNS.TRANSCRIPT}:${sessionId}`);
     }
 
-    public async deleteSession(sessionId: string): Promise<void> {
+    public async updateSessionPatientName(sessionId: string, patientName: string): Promise<void> {
         await this.runQueryWithInput(
-            `DELETE FROM sessions WHERE id = @id`,
-            [{ name: 'id', type: sql.VarChar, value: sessionId }]
+            `UPDATE sessions SET patient_name = @patient_name WHERE id = @id`,
+            [
+                { name: 'patient_name', type: sql.VarChar(250), value: encryptField(patientName) || null },
+                { name: 'id', type: sql.VarChar, value: sessionId }
+            ]
         );
 
         // Invalidate cache for sessions and related data
         cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
         cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);
         cacheService.invalidateByPattern(CACHE_PATTERNS.DASHBOARD_SUMMARY);
-        cacheService.invalidateByPattern(`${CACHE_PATTERNS.LOGS}:${sessionId}`);
-        cacheService.invalidateByPattern(`${CACHE_PATTERNS.TRANSCRIPT}:${sessionId}`);
-        cacheService.invalidateByPattern(`${CACHE_PATTERNS.RED_FLAGS}:${sessionId}`);
-        cacheService.delete(`session:${sessionId}`);
+    }
+
+    // ─── Patients: stored + recognized across visits (keyed by hashed phone/ID) ──────────
+    public async findPatientByPhone(phone: string): Promise<Patient | null> {
+        const hash = hashIdentifier(phone);
+        if (!hash) return null;
+        const rows = await this.runQueryWithInput<Patient>(
+            `SELECT * FROM patients WHERE phone_hash = @hash`,
+            [{ name: 'hash', type: sql.VarChar(64), value: hash }]
+        );
+        const p = rows[0];
+        if (!p) return null;
+        p.phone = decryptField(p.phone as any);
+        p.name = decryptField(p.name as any);
+        p.medical_summary = decryptField(p.medical_summary as any);
+        return p;
+    }
+
+    public async createPatient(phone: string): Promise<Patient> {
+        const rows = await this.runQueryWithInputByType<Patient>(
+            `INSERT INTO patients (phone_hash, phone, visit_count) OUTPUT INSERTED.* VALUES (@hash, @phone, 0)`,
+            [
+                { name: 'hash', type: sql.VarChar(64), value: hashIdentifier(phone) },
+                { name: 'phone', type: sql.VarChar(250), value: encryptField(phone) || null }
+            ]
+        );
+        const p = rows[0];
+        if (p) { p.phone = decryptField(p.phone as any); p.name = decryptField(p.name as any); }
+        return p;
+    }
+
+    /** Mark that a (new or returning) visit is starting: bump the counter + last-seen time. */
+    public async incrementPatientVisit(patientId: number): Promise<void> {
+        await this.runQueryWithInput(
+            `UPDATE patients SET visit_count = visit_count + 1, last_visit_at = GETDATE(), updated_at = GETDATE() WHERE id = @id`,
+            [{ name: 'id', type: sql.BigInt, value: patientId }]
+        );
+    }
+
+    /** Fill the name only if we don't already have one — never overwrite a known name with a
+     *  possibly-misheard one on a return visit. */
+    public async updatePatientNameIfEmpty(patientId: number, name: string): Promise<void> {
+        const rows = await this.runQueryWithInput<{ name: string }>(
+            `SELECT name FROM patients WHERE id = @id`, [{ name: 'id', type: sql.BigInt, value: patientId }]
+        );
+        const existing = decryptField(rows[0]?.name as any);
+        if (existing && String(existing).trim()) return;
+        await this.runQueryWithInput(
+            `UPDATE patients SET name = @name, updated_at = GETDATE() WHERE id = @id`,
+            [
+                { name: 'name', type: sql.VarChar(250), value: encryptField(name) || null },
+                { name: 'id', type: sql.BigInt, value: patientId }
+            ]
+        );
+    }
+
+    public async updatePatientAge(patientId: number, age: string): Promise<void> {
+        await this.runQueryWithInput(
+            `UPDATE patients SET age = @age, updated_at = GETDATE() WHERE id = @id`,
+            [
+                { name: 'age', type: sql.VarChar(50), value: age || null },
+                { name: 'id', type: sql.BigInt, value: patientId }
+            ]
+        );
+    }
+
+    /** Append this visit's notes to the patient's rolling medical history (capped). */
+    public async appendPatientMedicalSummary(patientId: number, entry: string): Promise<void> {
+        if (!entry || !entry.trim()) return;
+        const rows = await this.runQueryWithInput<{ medical_summary: string }>(
+            `SELECT medical_summary FROM patients WHERE id = @id`, [{ name: 'id', type: sql.BigInt, value: patientId }]
+        );
+        const prev = decryptField(rows[0]?.medical_summary as any) || '';
+        let combined = (prev ? prev + '\n\n' : '') + entry.trim();
+        if (combined.length > 8000) combined = combined.slice(combined.length - 8000); // keep the most recent
+        await this.runQueryWithInput(
+            `UPDATE patients SET medical_summary = @s, updated_at = GETDATE() WHERE id = @id`,
+            [
+                { name: 's', type: sql.VarChar(sql.MAX), value: encryptField(combined) || null },
+                { name: 'id', type: sql.BigInt, value: patientId }
+            ]
+        );
+    }
+
+    public async getPatientById(patientId: number): Promise<Patient | null> {
+        const rows = await this.runQueryWithInput<Patient>(
+            `SELECT * FROM patients WHERE id = @id`, [{ name: 'id', type: sql.BigInt, value: patientId }]
+        );
+        const p = rows[0];
+        if (!p) return null;
+        p.phone = decryptField(p.phone as any);
+        p.name = decryptField(p.name as any);
+        p.medical_summary = decryptField(p.medical_summary as any);
+        return p;
+    }
+
+    /** Paginated patient directory (most recently seen first), without the bulky history. */
+    public async getPatientsPaginated(page = 1, limit = 25): Promise<{ patients: Patient[], total: number, totalPages: number, currentPage: number }> {
+        const offset = (page - 1) * limit;
+        const countResult = await this.runQuery<{ count: number }>('SELECT COUNT(*) as count FROM patients');
+        const total = countResult[0]?.count || 0;
+
+        const patients = await this.runQueryWithInput<Patient>(
+            `SELECT id, phone, name, age, visit_count, first_visit_at, last_visit_at FROM patients
+             ORDER BY last_visit_at DESC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`,
+            [
+                { name: 'offset', type: sql.Int, value: offset },
+                { name: 'limit', type: sql.Int, value: limit }
+            ]
+        );
+        decryptRows(patients, 'name');
+        decryptRows(patients, 'phone');
+        return { patients, total, totalPages: Math.ceil(total / limit), currentPage: page };
+    }
+
+    /** All sessions (visits) for one patient, newest first. */
+    public async getSessionsByPatientId(patientId: number): Promise<Session[]> {
+        const sessions = await this.runQueryWithInput<Session>(
+            `SELECT * FROM sessions WHERE patient_id = @pid ORDER BY start_time DESC`,
+            [{ name: 'pid', type: sql.BigInt, value: patientId }]
+        );
+        decryptRows(sessions, 'patient_name');
+        return sessions;
+    }
+
+    public async deleteSession(sessionId: string): Promise<void> {
+        // Remember which patient this session (visit) belonged to, so we can reconcile their
+        // record afterwards — deleting a session must also remove that visit from the patient.
+        const owner = await this.runQueryWithInput<{ patient_id: number }>(
+            `SELECT patient_id FROM sessions WHERE id = @id`,
+            [{ name: 'id', type: sql.VarChar, value: sessionId }]
+        ).catch(() => [] as { patient_id: number }[]);
+        const patientId = Number(owner?.[0]?.patient_id) || 0;
+
+        // Remove the session AND all its dependent rows (no FK cascade in this schema).
+        const childTables = ['conversation_logs', 'red_flag_events', 'intake_responses', 'reports', 'session_token_usage', 'fhir_resources'];
+        for (const t of childTables) {
+            await this.runQueryWithInput(
+                `DELETE FROM ${t} WHERE session_id = @id`,
+                [{ name: 'id', type: sql.VarChar, value: sessionId }]
+            ).catch(() => { /* table/col may not exist on older schemas */ });
+        }
+        await this.runQueryWithInput(
+            `DELETE FROM sessions WHERE id = @id`,
+            [{ name: 'id', type: sql.VarChar, value: sessionId }]
+        );
+
+        // The patient's visit LIST already reads live from `sessions`, but their cached
+        // aggregates (visit_count / first_visit_at / last_visit_at) must be recomputed so the
+        // deleted visit also disappears from the patient's record and counts.
+        if (patientId > 0) await this.reconcilePatientAggregates(patientId);
+
+        this.invalidateSessionCaches(sessionId);
+    }
+
+    /** Recompute a patient's visit_count / first_visit_at / last_visit_at from the sessions they
+     *  still have, so deleting a session keeps the patient record consistent (no orphan visits). */
+    private async reconcilePatientAggregates(patientId: number): Promise<void> {
+        await this.runQueryWithInput(
+            `UPDATE patients
+                SET visit_count    = (SELECT COUNT(*)        FROM sessions WHERE patient_id = @pid),
+                    first_visit_at = (SELECT MIN(start_time) FROM sessions WHERE patient_id = @pid),
+                    last_visit_at  = (SELECT MAX(start_time) FROM sessions WHERE patient_id = @pid),
+                    updated_at     = GETDATE()
+              WHERE id = @pid`,
+            [{ name: 'pid', type: sql.BigInt, value: patientId }]
+        ).catch((e: any) => console.error('reconcile patient aggregates failed:', e?.message || e));
+    }
+
+    /** Admin: delete a patient AND all of their sessions/visits and dependent rows. */
+    public async deletePatient(patientId: number): Promise<void> {
+        // Drop dependent rows for every session this patient owns, then the sessions, then the
+        // patient (no FK cascade in this schema). The IN-subquery is dialect-safe.
+        const childTables = ['conversation_logs', 'red_flag_events', 'intake_responses', 'reports', 'session_token_usage', 'fhir_resources'];
+        for (const t of childTables) {
+            await this.runQueryWithInput(
+                `DELETE FROM ${t} WHERE session_id IN (SELECT id FROM sessions WHERE patient_id = @pid)`,
+                [{ name: 'pid', type: sql.BigInt, value: patientId }]
+            ).catch(() => { /* table/col may not exist on older schemas */ });
+        }
+        await this.runQueryWithInput(
+            `DELETE FROM sessions WHERE patient_id = @pid`,
+            [{ name: 'pid', type: sql.BigInt, value: patientId }]
+        );
+        await this.runQueryWithInput(
+            `DELETE FROM patients WHERE id = @pid`,
+            [{ name: 'pid', type: sql.BigInt, value: patientId }]
+        );
+        // Their sessions are gone too, so refresh the session/dashboard caches.
+        this.invalidateSessionCaches();
+    }
+
+    /** Admin: delete ALL session data (keeps patients/users/settings). Returns rows removed. */
+    public async deleteAllSessions(): Promise<number> {
+        const before = await this.runQuery<{ c: number }>(`SELECT COUNT(*) AS c FROM sessions`);
+        const removed = before[0]?.c || 0;
+        const tables = ['conversation_logs', 'red_flag_events', 'intake_responses', 'reports', 'session_token_usage', 'fhir_resources', 'sessions'];
+        for (const t of tables) {
+            await this.runQuery(`DELETE FROM ${t}`).catch(() => { /* ignore missing tables */ });
+        }
+        // Patients are kept, but with no sessions left their visit aggregates must reset too.
+        await this.runQuery(
+            `UPDATE patients SET visit_count = 0, first_visit_at = NULL, last_visit_at = NULL, updated_at = GETDATE()`
+        ).catch(() => { /* patients table may not exist on older schemas */ });
+        this.invalidateSessionCaches();
+        return removed;
+    }
+
+    private invalidateSessionCaches(sessionId?: string): void {
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.DASHBOARD_SUMMARY);
+        cacheService.invalidateByPattern(CACHE_PATTERNS.RED_FLAGS);
+        if (sessionId) {
+            cacheService.invalidateByPattern(`${CACHE_PATTERNS.LOGS}:${sessionId}`);
+            cacheService.invalidateByPattern(`${CACHE_PATTERNS.TRANSCRIPT}:${sessionId}`);
+            cacheService.invalidateByPattern(`${CACHE_PATTERNS.RED_FLAGS}:${sessionId}`);
+            cacheService.delete(`session:${sessionId}`);
+        }
+    }
+
+    // --------------------- INTAKE LINKS (remote patient self-service) ---------------------
+    /** Create a shareable intake link. `token` is the unguessable URL secret; name/phone are
+     *  encrypted at rest. `expires_at` is computed by the caller (created_at + 24h). */
+    public async createIntakeLink(link: {
+        token: string;
+        created_by?: string | null;
+        patient_id?: number | null;
+        patient_name?: string | null;
+        phone?: string | null;
+        language: string;
+        expires_at: Date;
+    }): Promise<IntakeLink> {
+        const rows = await this.runQueryWithInputByType<IntakeLink>(
+            `INSERT INTO intake_links (token, created_by, patient_id, patient_name, phone, phone_hash, language, status, expires_at, created_at)
+             OUTPUT INSERTED.*
+             VALUES (@token, @created_by, @patient_id, @patient_name, @phone, @phone_hash, @language, 'pending', @expires_at, GETDATE())`,
+            [
+                { name: 'token', type: sql.VarChar(128), value: link.token },
+                { name: 'created_by', type: sql.VarChar(250), value: link.created_by ?? null },
+                { name: 'patient_id', type: sql.BigInt, value: link.patient_id || null },
+                { name: 'patient_name', type: sql.VarChar(250), value: encryptField(link.patient_name ?? null) ?? null },
+                { name: 'phone', type: sql.VarChar(250), value: encryptField(link.phone ?? null) ?? null },
+                { name: 'phone_hash', type: sql.VarChar(64), value: hashIdentifier(link.phone ?? null) },
+                { name: 'language', type: sql.VarChar(10), value: link.language },
+                { name: 'expires_at', type: sql.DateTime, value: link.expires_at }
+            ]
+        );
+        const row = rows[0];
+        if (row) { row.patient_name = decryptField(row.patient_name as any); row.phone = decryptField(row.phone as any); }
+        return row;
+    }
+
+    public async getIntakeLinkByToken(token: string): Promise<IntakeLink | null> {
+        const rows = await this.runQueryWithInput<IntakeLink>(
+            `SELECT * FROM intake_links WHERE token = @token`,
+            [{ name: 'token', type: sql.VarChar(128), value: token }]
+        );
+        const row = rows[0];
+        if (!row) return null;
+        row.patient_name = decryptField(row.patient_name as any);
+        row.phone = decryptField(row.phone as any);
+        return row;
+    }
+
+    public async getIntakeLinkById(id: string): Promise<IntakeLink | null> {
+        const rows = await this.runQueryWithInput<IntakeLink>(
+            `SELECT * FROM intake_links WHERE id = @id`,
+            [{ name: 'id', type: sql.VarChar(64), value: id }]
+        );
+        const row = rows[0];
+        if (!row) return null;
+        row.patient_name = decryptField(row.patient_name as any);
+        row.phone = decryptField(row.phone as any);
+        return row;
+    }
+
+    /** Admin list — newest first, with the linked session's live status and whether a report
+     *  exists (scalar subquery avoids row duplication if a session ever has multiple reports). */
+    public async getIntakeLinksPaginated(page = 1, limit = 25): Promise<{ links: IntakeLink[], total: number, totalPages: number, currentPage: number }> {
+        const offset = (page - 1) * limit;
+        const countResult = await this.runQuery<{ count: number }>('SELECT COUNT(*) as count FROM intake_links');
+        const total = countResult[0]?.count || 0;
+
+        const links = await this.runQueryWithInput<IntakeLink>(
+            `SELECT l.*, s.status AS session_status,
+                    (SELECT COUNT(*) FROM reports r WHERE r.session_id = l.session_id) AS has_report
+             FROM intake_links l
+             LEFT JOIN sessions s ON s.id = l.session_id
+             ORDER BY l.created_at DESC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`,
+            [
+                { name: 'offset', type: sql.Int, value: offset },
+                { name: 'limit', type: sql.Int, value: limit }
+            ]
+        );
+        decryptRows(links, 'patient_name');
+        decryptRows(links, 'phone');
+        links.forEach(l => { (l as any).has_report = Number((l as any).has_report) > 0; });
+        return { links, total, totalPages: Math.ceil(total / limit), currentPage: page };
+    }
+
+    /** Patient started the intake: bind the created session and flip to in_progress. */
+    public async setIntakeLinkSession(id: string, sessionId: string): Promise<void> {
+        await this.runQueryWithInput(
+            `UPDATE intake_links SET session_id = @session_id, status = 'in_progress', used_at = GETDATE() WHERE id = @id`,
+            [
+                { name: 'session_id', type: sql.VarChar, value: sessionId },
+                { name: 'id', type: sql.VarChar(64), value: id }
+            ]
+        );
+    }
+
+    /** Permanently remove an intake-link record. Does NOT touch the linked session / intake
+     *  data — that lives in `sessions` and the patient record and is kept. */
+    public async deleteIntakeLink(id: string): Promise<void> {
+        await this.runQueryWithInput(
+            `DELETE FROM intake_links WHERE id = @id`,
+            [{ name: 'id', type: sql.VarChar(64), value: id }]
+        );
+    }
+
+    /** Set link status ('completed' | 'revoked' | ...). Stamps completed_at on completion. */
+    public async setIntakeLinkStatus(id: string, status: string): Promise<void> {
+        await this.runQueryWithInput(
+            `UPDATE intake_links SET status = @status, completed_at = CASE WHEN @status = 'completed' THEN GETDATE() ELSE completed_at END WHERE id = @id`,
+            [
+                { name: 'status', type: sql.VarChar(50), value: status },
+                { name: 'id', type: sql.VarChar(64), value: id }
+            ]
+        );
     }
 
     // --------------------- SETTINGS ---------------------
@@ -516,15 +914,19 @@ export class DataService {
             ]
         );
 
+        // Decrypt PHI (message) before caching/returning.
+        decryptRows(result, 'message');
+
         // Cache the result
         cacheService.set(cacheKey, result);
         return result;
     }
 
     public async getRecentConversationLogs(): Promise<ConversationLog[]> {
-        return this.runQuery<ConversationLog>(`
+        const rows = await this.runQuery<ConversationLog>(`
       SELECT * FROM conversation_logs WHERE timestamp > DATEADD(HOUR, -24, GETDATE()) ORDER BY timestamp DESC
     `);
+        return decryptRows(rows, 'message');
     }
 
     // FIXED: Now accepts optional timestamp parameter to preserve chronological ordering (backward compatible)
@@ -538,7 +940,7 @@ export class DataService {
             [
                 { name: 'session_id', type: sql.VarChar, value: log.session_id },
                 { name: 'speaker', type: sql.VarChar(250), value: log.speaker },
-                { name: 'message', type: sql.VarChar(sql.MAX), value: log.message },
+                { name: 'message', type: sql.VarChar(sql.MAX), value: encryptField(log.message) },
                 { name: 'audio_data', type: sql.VarChar(sql.MAX), value: log.audio_data || null },
                 { name: 'timestamp', type: sql.DateTime, value: timestampToUse } // ✅ Uses provided timestamp or defaults to current time
             ]
@@ -581,6 +983,7 @@ export class DataService {
 
         // Fetch from database
         const result = await this.runQuery<RedFlagEvent>(`SELECT * FROM red_flag_events ORDER BY timestamp DESC`);
+        decryptRows(result, 'symptoms');
 
         // Cache the result
         cacheService.set(cacheKey, result);
@@ -603,6 +1006,7 @@ export class DataService {
                 { name: 'id', type: sql.VarChar, value: sessionId }
             ]
         );
+        decryptRows(result, 'symptoms');
 
         // Cache the result
         cacheService.set(cacheKey, result);
@@ -618,12 +1022,15 @@ export class DataService {
             return cached;
         }
 
-        // Query recent red flag events directly (much more efficient than loading all sessions)
+        // Query recent red flag events directly (much more efficient than loading all sessions),
+        // joining the session to surface its language for the dashboard.
         const result = await this.runQuery<RedFlagEvent>(`
-            SELECT * FROM red_flag_events
-            WHERE timestamp > DATEADD(HOUR, -${hoursBack}, GETDATE())
-            ORDER BY timestamp DESC
+            SELECT r.*, s.language AS language FROM red_flag_events r
+            LEFT JOIN sessions s ON s.id = r.session_id
+            WHERE r.timestamp > DATEADD(HOUR, -${hoursBack}, GETDATE())
+            ORDER BY r.timestamp DESC
         `);
+        decryptRows(result, 'symptoms');
 
         // Cache the result for 5 minutes
         cacheService.set(cacheKey, result, 5 * 60 * 1000);
@@ -657,7 +1064,7 @@ export class DataService {
        VALUES (@session_id, @symptoms, @severity, @resolved, @clinician_notified, GETDATE())`,
             [
                 { name: 'session_id', type: sql.VarChar, value: event.session_id },
-                { name: 'symptoms', type: sql.VarChar(250), value: event.symptoms },
+                { name: 'symptoms', type: sql.VarChar(250), value: encryptField(event.symptoms) },
                 { name: 'severity', type: sql.VarChar(250), value: event.severity },
                 { name: 'resolved', type: sql.Bit, value: event.resolved },
                 { name: 'clinician_notified', type: sql.Bit, value: event.clinician_notified }
@@ -816,7 +1223,9 @@ export class DataService {
             `SELECT * FROM reports WHERE session_id = @session_id`,
             [{ name: 'session_id', type: sql.VarChar, value: sessionId }]
         );
-        return result.length > 0 ? result[0] : null;
+        if (result.length === 0) return null;
+        result[0].report_content = decryptField(result[0].report_content);
+        return result[0];
     }
 
     public async saveReport(report: Omit<Report, 'id'>): Promise<void> {
@@ -825,12 +1234,36 @@ export class DataService {
              VALUES (@session_id, @report_content, @generated_at, @cost, @version)`,
             [
                 { name: 'session_id', type: sql.VarChar, value: report.session_id },
-                { name: 'report_content', type: sql.VarChar(sql.MAX), value: report.report_content },
+                { name: 'report_content', type: sql.VarChar(sql.MAX), value: encryptField(report.report_content) },
                 { name: 'generated_at', type: sql.DateTime, value: report.generated_at },
                 { name: 'cost', type: sql.Decimal(10, 6), value: report.cost },
                 { name: 'version', type: sql.Int, value: report.version }
             ]
         );
+    }
+
+    /** Doctor edits and/or approves a report. status: 'pending' | 'approved'. */
+    public async reviewReport(sessionId: string, opts: { content?: string; status: string; reviewedBy: string }): Promise<void> {
+        if (typeof opts.content === 'string') {
+            await this.runQueryWithInput(
+                `UPDATE reports SET report_content = @content, status = @status, reviewed_by = @reviewed_by, reviewed_at = GETDATE() WHERE session_id = @session_id`,
+                [
+                    { name: 'content', type: sql.VarChar(sql.MAX), value: encryptField(opts.content) },
+                    { name: 'status', type: sql.VarChar(50), value: opts.status },
+                    { name: 'reviewed_by', type: sql.VarChar(250), value: opts.reviewedBy },
+                    { name: 'session_id', type: sql.VarChar, value: sessionId }
+                ]
+            );
+        } else {
+            await this.runQueryWithInput(
+                `UPDATE reports SET status = @status, reviewed_by = @reviewed_by, reviewed_at = GETDATE() WHERE session_id = @session_id`,
+                [
+                    { name: 'status', type: sql.VarChar(50), value: opts.status },
+                    { name: 'reviewed_by', type: sql.VarChar(250), value: opts.reviewedBy },
+                    { name: 'session_id', type: sql.VarChar, value: sessionId }
+                ]
+            );
+        }
     }
 
     // --------------------- INTAKE RESPONSES ---------------------
@@ -843,7 +1276,7 @@ export class DataService {
             [
                 { name: 'session_id', type: sql.VarChar, value: response.session_id },
                 { name: 'question', type: sql.VarChar(250), value: response.question },
-                { name: 'answer', type: sql.VarChar(8000), value: response.answer },
+                { name: 'answer', type: sql.VarChar(8000), value: encryptField(response.answer) },
                 { name: 'category', type: sql.VarChar(250), value: response.category }
             ]
         );
@@ -854,16 +1287,18 @@ export class DataService {
 
     // READ all
     public async getAllIntakeResponses(): Promise<IntakeResponse[]> {
-        return this.runQuery<IntakeResponse>(`SELECT * FROM intake_responses ORDER BY timestamp DESC`);
+        const rows = await this.runQuery<IntakeResponse>(`SELECT * FROM intake_responses ORDER BY timestamp DESC`);
+        return decryptRows(rows, 'answer');
     }
 
     public async getAllIntakeResponsesBySession(sessionId: string): Promise<Session[]> {
-        return await this.runQueryWithInput<Session>(
+        const rows = await this.runQueryWithInput<Session>(
             `SELECT * FROM intake_responses WHERE session_id =  @id;`,
             [
                 { name: 'id', type: sql.VarChar, value: sessionId }
             ]
         );
+        return decryptRows(rows, 'answer');
     }
 
     // READ by ID
@@ -872,7 +1307,9 @@ export class DataService {
             `SELECT * FROM intake_responses WHERE id = @id`,
             [{ name: 'id', type: sql.BigInt, value: id }]
         );
-        return result.length > 0 ? result[0] : null;
+        if (result.length === 0) return null;
+        result[0].answer = decryptField(result[0].answer);
+        return result[0];
     }
 
     // UPDATE
@@ -905,17 +1342,22 @@ export class DataService {
         cacheService.invalidateByPattern('intake-responses');
     }
 
-    public async registerUser(username: string, email: string, password: string) {
+    public async registerUser(username: string, email: string, password: string, role: string = 'clinician') {
         const passwordHash = await bcrypt.hash(password, 10);
 
         await this.runQueryWithInput(
-            `INSERT INTO users (username, email, password_hash) VALUES (@username, @email, @password_hash)`,
+            `INSERT INTO users (username, email, password_hash, role) VALUES (@username, @email, @password_hash, @role)`,
             [
                 { name: 'username', type: sql.VarChar(250), value: username },
                 { name: 'email', type: sql.VarChar(250), value: email },
-                { name: 'password_hash', type: sql.VarChar(500), value: passwordHash }
+                { name: 'password_hash', type: sql.VarChar(500), value: passwordHash },
+                { name: 'role', type: sql.VarChar(50), value: role }
             ]
         );
+    }
+
+    public async listUsers(): Promise<{ id: string; username: string; email: string; role: string; created_at: Date }[]> {
+        return this.runQuery(`SELECT id, username, email, role, created_at FROM users ORDER BY created_at DESC`);
     }
 
     // --------------------- SESSION TOKEN USAGE ---------------------
@@ -1058,23 +1500,19 @@ export class DataService {
         let successful = false;
 
         if (user) {
-            let passwordMatch = false;
-
-            // Check if password_hash is a valid bcrypt hash (starts with $2b$ or $2a$)
-            if (user.password_hash.startsWith('$2b$') || user.password_hash.startsWith('$2a$')) {
-                // It's a proper bcrypt hash
-                passwordMatch = await bcrypt.compare(password, user.password_hash);
-            } else {
-                // It's plain text (temporary fallback for existing users)
-                passwordMatch = password === user.password_hash;
-            }
+            // Passwords are ALWAYS verified against a bcrypt hash. No plaintext fallback.
+            const isBcrypt = user.password_hash.startsWith('$2b$') || user.password_hash.startsWith('$2a$') || user.password_hash.startsWith('$2y$');
+            const passwordMatch = isBcrypt ? await bcrypt.compare(password, user.password_hash) : false;
 
             if (passwordMatch) {
                 successful = true;
 
-                // Generate JWT token
-                // Extended expiration for better user experience
-                const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, 'A7f9K2dL8qX3pV0b' , { expiresIn: '7d' });
+                // Sign with the shared, env-provided secret (same one auth.ts verifies with).
+                const token = jwt.sign(
+                    { id: user.id, username: user.username, role: user.role },
+                    getJwtSecret(),
+                    { expiresIn: JWT_EXPIRES_IN as any }
+                );
 
                 // Save login history
                 await this.runQueryWithInput(
@@ -1148,47 +1586,17 @@ export class DataService {
     // Database optimization methods
     public async createPerformanceIndexes(): Promise<void> {
         const indexes = [
-            {
-                name: 'IX_sessions_start_time_status',
-                table: 'sessions',
-                columns: 'start_time DESC, status'
-            },
-            {
-                name: 'IX_sessions_status',
-                table: 'sessions',
-                columns: 'status'
-            },
-            {
-                name: 'IX_conversation_logs_session_id_timestamp',
-                table: 'conversation_logs',
-                columns: 'session_id, timestamp'
-            },
-            {
-                name: 'IX_red_flag_events_timestamp',
-                table: 'red_flag_events',
-                columns: 'timestamp DESC'
-            }
+            { name: 'IX_sessions_start_time_status', table: 'sessions', columns: 'start_time DESC, status' },
+            { name: 'IX_sessions_status', table: 'sessions', columns: 'status' },
+            { name: 'IX_conversation_logs_session_id_timestamp', table: 'conversation_logs', columns: 'session_id, timestamp' },
+            { name: 'IX_red_flag_events_timestamp', table: 'red_flag_events', columns: 'timestamp DESC' }
         ];
 
         for (const index of indexes) {
             try {
-                // Check if index exists
-                const existingIndex = await this.runQuery(`
-                    SELECT name FROM sys.indexes
-                    WHERE object_id = OBJECT_ID('${index.table}')
-                    AND name = '${index.name}'
-                `);
-
-                if (existingIndex.length === 0) {
-                    await this.runQuery(`
-                        CREATE NONCLUSTERED INDEX ${index.name}
-                        ON ${index.table} (${index.columns})
-                        WITH (ONLINE = ON, FILLFACTOR = 90)
-                    `);
-                    console.log(`✅ Created index: ${index.name}`);
-                } else {
-                    console.log(`✓ Index already exists: ${index.name}`);
-                }
+                // SQLite creates the index only if it does not already exist.
+                await this.runQuery(`CREATE INDEX IF NOT EXISTS ${index.name} ON ${index.table} (${index.columns})`);
+                console.log(`✓ Index ensured: ${index.name}`);
             } catch (error: any) {
                 console.error(`Failed to create index ${index.name}:`, error.message);
                 // Continue with other indexes if one fails

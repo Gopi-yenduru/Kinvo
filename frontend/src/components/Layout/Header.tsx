@@ -1,5 +1,6 @@
 import React, {useState, useEffect} from 'react';
 import UserMenu from './UserMenu';
+import NotificationBell from './NotificationBell';
 
 interface HeaderProps {
   onToggleSidebar?: () => void;
@@ -64,13 +65,8 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
           {/* User actions - responsive */}
           <div className="col-12 col-lg-3 order-2 order-lg-3">
             <div className="d-flex align-items-center justify-content-end gap-2">
-              {/* Notifications */}
-              <button
-                className="btn btn-outline-secondary btn-sm rounded-circle p-2 flex-shrink-0 header-notification-btn"
-                type="button"
-              >
-                <i className="fas fa-bell"></i>
-              </button>
+              {/* Notifications — red-flag alerts + completed remote intakes */}
+              <NotificationBell />
 
               {/* User menu */}
               <UserMenu userName={userName} onLogout={onLogout} status="online" />

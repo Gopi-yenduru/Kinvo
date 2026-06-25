@@ -14,7 +14,11 @@ interface Alert {
   description: string;
   timeAgo: string;
   sessionId?: string;
+  language?: string;
 }
+
+// Short language badge label from the session's language code.
+const LANG_LABEL: Record<string, string> = { 'te-IN': 'తెలుగు', 'hi-IN': 'हिंदी', 'en-IN': 'English' };
 
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
@@ -53,18 +57,21 @@ const Dashboard: React.FC = () => {
         redFlags: totalRedFlagsCount
       });
 
-      // Create alerts
+      // Create alerts. `symptoms` is stored as a plain string by the agent; tolerate a legacy
+      // JSON-array form too, but never let a parse error hide the alert.
       const recentAlerts: Alert[] = redFlagsData.redFlags.map((flag: any) => {
-        const symptoms = JSON.parse(flag.symptoms || '[]');
+        let symptoms = String(flag.symptoms || '');
+        try { const p = JSON.parse(flag.symptoms); if (Array.isArray(p)) symptoms = p.join(', '); } catch { /* plain string */ }
         const timeAgo = getTimeAgo(flag.timestamp);
 
         return {
           id: `red-flag-${flag.id}`,
           type: flag.severity === 'critical' ? 'critical' : 'warning',
           title: `Red Flag Detected`,
-          description: `Patient symptoms: ${symptoms.join(', ')} in Session #${flag.session_id.substring(0, 8)}`,
+          description: `Patient symptoms: ${symptoms || 'reported'} in Session #${flag.session_id.substring(0, 8)}`,
           timeAgo: timeAgo,
-          sessionId: flag.session_id
+          sessionId: flag.session_id,
+          language: flag.language
         };
       });
 
@@ -182,10 +189,6 @@ const Dashboard: React.FC = () => {
               <div className="stat-content">
                 <div className="stat-number">{stats.totalSessions}</div>
                 <div className="stat-label">Total Sessions</div>
-                <div className="stat-change positive">
-                  <i className="fas fa-arrow-up me-1"></i>
-                  +12% from last week
-                </div>
               </div>
             </div>
           </div>
@@ -198,10 +201,6 @@ const Dashboard: React.FC = () => {
               <div className="stat-content">
                 <div className="stat-number">{stats.completedToday}</div>
                 <div className="stat-label">Completed Today</div>
-                <div className="stat-change positive">
-                  <i className="fas fa-arrow-up me-1"></i>
-                  +5 from yesterday
-                </div>
               </div>
             </div>
           </div>
@@ -245,7 +244,12 @@ const Dashboard: React.FC = () => {
                         )}
                       </div>
                       <div className="alert-content flex-grow-1 min-w-0">
-                        <div className="alert-title fw-semibold">{alert.title}</div>
+                        <div className="alert-title fw-semibold">
+                          {alert.title}
+                          {alert.language && (
+                            <span className="badge bg-secondary ms-2 fw-normal">{LANG_LABEL[alert.language] || alert.language}</span>
+                          )}
+                        </div>
                         <div className="alert-description text-muted small">{alert.description}</div>
                         <div className="alert-time text-muted" style={{ fontSize: '0.75rem' }}>{alert.timeAgo}</div>
                       </div>

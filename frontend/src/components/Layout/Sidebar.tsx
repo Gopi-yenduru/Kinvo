@@ -10,6 +10,11 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
   const { hasActiveSession, currentSessionProvider } = useSession();
 
+  // Current user's role (stored at login) — gates admin-only nav items.
+  const role = (() => {
+    try { return JSON.parse(localStorage.getItem('user') || '{}').role || ''; } catch { return ''; }
+  })();
+
   const menuItems = [
     {
       path: '/',
@@ -30,11 +35,29 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
       description: 'View All Sessions'
     },
     {
+      path: '/patients',
+      icon: 'fas fa-user-injured',
+      label: 'Patients',
+      description: 'Records & History'
+    },
+    {
       path: '/analytics',
       icon: 'fas fa-chart-bar',
       label: 'Analytics',
       description: 'Reports & Insights'
     },
+    // Admin-only
+    ...(role === 'admin' ? [{
+      path: '/intake-links',
+      icon: 'fas fa-link',
+      label: 'Intake Links',
+      description: 'Remote Patient Links'
+    }, {
+      path: '/users',
+      icon: 'fas fa-users',
+      label: 'Users',
+      description: 'Manage Staff Accounts'
+    }] : []),
     {
       path: '/settings',
       icon: 'fas fa-cog',

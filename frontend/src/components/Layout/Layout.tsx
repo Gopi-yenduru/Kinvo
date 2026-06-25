@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Header from './Header';
+import HelpBot from '../HelpBot/HelpBot';
 
 interface LayoutProps {
   onLogout: () => void;
@@ -61,6 +62,9 @@ const Layout: React.FC<LayoutProps> = ({ onLogout }) => {
           <Outlet />
         </main>
       </div>
+
+      {/* Multilingual help assistant (English / Hindi / Telugu) — floating, on every screen */}
+      <HelpBot />
     </div>
   );
 };

@@ -1,9 +1,10 @@
 import { BaseProvider } from './BaseProvider.js';
 import OpenAIProvider from './OpenAIProvider.js';
 import RetellAIProvider from './RetellAIProvider.js';
+import SarvamProvider from './SarvamProvider.js';
 // import VAPIProvider from './VAPIProvider.js';
 
-export type ProviderType = 'openai' | 'retellai' | 'vapi';
+export type ProviderType = 'openai' | 'retellai' | 'vapi' | 'sarvam';
 
 class ProviderFactory {
   private static instances: Map<ProviderType, BaseProvider> = new Map();
@@ -17,6 +18,9 @@ class ProviderFactory {
         case 'retellai':
           this.instances.set(type, new RetellAIProvider());
           break;
+        case 'sarvam':
+          this.instances.set(type, new SarvamProvider());
+          break;
         case 'vapi':
           // this.instances.set(type, new VAPIProvider());
           throw new Error('VAPI provider not yet implemented');
@@ -29,7 +33,7 @@ class ProviderFactory {
   }
 
   static getAvailableProviders(): ProviderType[] {
-    return ['openai', 'retellai'];
+    return ['openai', 'retellai', 'sarvam'];
   }
 }
 
