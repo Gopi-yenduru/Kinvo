@@ -50,6 +50,13 @@ import { emergencyMessage, detectEmergency, Lang } from '../emergency.js';
 // ── Fixed deployment configuration ───────────────────────────────────────────────
 const DEFAULT_LANG: Lang = 'te-IN';       // used when the frontend doesn't pass a choice
 const CHAT_MODEL = 'sarvam-30b';          // reasoning disabled per-call for voice latency
+// LLM engine for the reasoning step. 'sarvam' → sarvam-30b (default, native Indic); 'openai' →
+// gpt-4o-mini via the OpenAI-compatible chat API. Selectable per language from Settings.
+type LlmEngine = 'sarvam' | 'openai';
+// gpt-4o (not -mini): the mini model is noticeably weaker at Telugu/Hindi and produces awkward,
+// over-literal replies. 4o is far more fluent and natural in Indic languages, which matters a lot
+// for a warm spoken intake. Override with OPENAI_LLM_MODEL in backend/.env if needed.
+const OPENAI_LLM_MODEL = (process.env.OPENAI_LLM_MODEL || 'gpt-4o').trim();
 const STT_SAMPLE_RATE = 16000;            // Sarvam streaming STT input rate
 const TTS_SAMPLE_RATE = 24000;            // matches the browser's playback AudioContext
 const DEFAULT_TTS_SPEAKER = 'neha';        // warm, soft v3 female — best for a gentle, caring tone
@@ -126,6 +133,11 @@ const toneProsody = (t: string) => (PROSODY as Record<string, typeof PROSODY[Ton
 // transcript segments and finalize as soon as we have END_SPEECH + a transcript.
 // The timer below is only a safety net for the rare case END_SPEECH never arrives.
 const NO_END_SIGNAL_FALLBACK_MS = 2500;
+
+// Voice barge-in self-heal: if the patient interrupts the agent (talk-over) but then no
+// real speech is transcribed within this window (i.e. it was a false trigger — a cough, a
+// door, residual echo), the agent re-asks its question instead of going silent.
+const RESUME_AFTER_INTERRUPT_MS = 3500;
 
 // Speakers that belong to bulbul:v3 — everything else uses bulbul:v2.
 const V3_SPEAKERS = new Set([
@@ -294,6 +306,8 @@ type ChatMessage = {
 interface SarvamSession {
   config: RealtimeConfig;
   lang: Lang;                // patient-chosen language (te-IN | hi-IN | en-IN) for STT/TTS/prompt
+  ttsEngine: TtsEngine;      // resolved from Settings engineMap (per lang), else env default
+  llmEngine: LlmEngine;      // resolved from Settings engineMap (per lang), else 'sarvam'
   plan: IntakeStep[];        // INTAKE_QUESTIONS (new) or FOLLOWUP_QUESTIONS (returning patient)
   isFollowup: boolean;       // true when running a follow-up for a known returning patient
   client: SarvamAIClient;
@@ -314,6 +328,10 @@ interface SarvamSession {
   lastSegment: string;       // last appended segment (de-dupes repeated STT data frames)
   endSpeechSeen: boolean;    // Sarvam VAD fired END_SPEECH for the current utterance
   endTurnTimer: NodeJS.Timeout | null; // safety-net only (END_SPEECH didn't arrive)
+  // Barge-in resume: re-ask if a talk-over interrupt turns out to be a false trigger
+  lastAgentReply: string;    // the last question the agent asked (to re-speak on a false barge-in)
+  lastAgentTone: ToneKey;    // its tone, so the re-spoken line keeps the same emotion
+  resumeTimer: NodeJS.Timeout | null; // fires after an interrupt if no real speech follows
   // STT lifecycle
   sttConnecting: boolean;
   // Safety
@@ -339,6 +357,19 @@ class SarvamProvider implements BaseProvider {
       this.openai = new OpenAI({ apiKey: key });
     }
     return this.openai;
+  }
+
+  /** Resolve the TTS engine for this session: Settings mapping (per language) wins, else the
+   *  env-driven default (TTS_ENGINE_*), else Sarvam. Validated against the supported engines. */
+  private resolveTtsEngine(config: RealtimeConfig, lang: Lang): TtsEngine {
+    const choice = String(config.engineMap?.[lang]?.tts || '').toLowerCase();
+    if (choice === 'sarvam' || choice === 'openai' || choice === 'elevenlabs') return choice;
+    return TTS_ENGINE[lang] || 'sarvam';
+  }
+
+  /** Resolve the LLM engine for this session from the Settings mapping; defaults to Sarvam. */
+  private resolveLlmEngine(config: RealtimeConfig, lang: Lang): LlmEngine {
+    return String(config.engineMap?.[lang]?.llm || '').toLowerCase() === 'openai' ? 'openai' : 'sarvam';
   }
 
   /** Pull the leading hidden [tone:xxx] tag the model emits and return the spoken text without it. */
@@ -492,14 +523,23 @@ class SarvamProvider implements BaseProvider {
 
     const sessionId = config.sessionId;
     const lang = toLang(config.language);
+    // Per-language engine selection from Settings (Telugu/Hindi configurable in the UI). Falls back
+    // to the env-driven TTS default and Sarvam LLM when no/invalid mapping is stored. STT stays
+    // Sarvam — it's the only streaming STT wired into this half-duplex loop today.
+    const ttsEngine = this.resolveTtsEngine(config, lang);
+    const llmEngine = this.resolveLlmEngine(config, lang);
     // A returning patient WITH prior history → run the follow-up plan (don't re-ask the intake).
     const isFollowup = !!(config.isReturning && config.patientHistory && String(config.patientHistory).trim());
     const plan = isFollowup ? FOLLOWUP_QUESTIONS : INTAKE_QUESTIONS;
     console.log(`🟣 Creating Sarvam session ${sessionId} (lang=${lang}, ${isFollowup ? 'FOLLOW-UP' : 'new intake'})`);
 
+    console.log(`   engines (lang=${lang}): stt=sarvam llm=${llmEngine} tts=${ttsEngine}`);
+
     const session: SarvamSession = {
       config,
       lang,
+      ttsEngine,
+      llmEngine,
       plan,
       isFollowup,
       client: new SarvamAIClient({ apiSubscriptionKey: apiKey }),
@@ -518,6 +558,9 @@ class SarvamProvider implements BaseProvider {
       lastSegment: '',
       endSpeechSeen: false,
       endTurnTimer: null,
+      lastAgentReply: '',
+      lastAgentTone: 'calm',
+      resumeTimer: null,
       sttConnecting: false,
       lastEmergencyTurn: -1,
       visitNotes: [],
@@ -568,6 +611,7 @@ class SarvamProvider implements BaseProvider {
     s.ended = true;
     s.turnId++; // invalidate any in-flight turn / TTS callbacks
     this.clearEndTurnTimer(s);
+    this.clearResumeTimer(s);
     this.send(s, { type: 'session_ended', reason: 'completed' });
     try { s.stt?.close?.(); } catch { /* ignore */ }
 
@@ -611,7 +655,8 @@ class SarvamProvider implements BaseProvider {
     return s ? { sessionId, model: CHAT_MODEL, durationMs: Date.now() - s.startTime } : null;
   }
 
-  /** User-initiated barge-in: abort the current spoken turn and return the floor. */
+  /** Barge-in (talk-over OR mic-button): abort the current spoken turn and hand the floor
+   *  back to the patient. Self-heals: if no real speech follows (false trigger), re-ask. */
   interrupt(sessionId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s || s.ended) return;
@@ -620,8 +665,40 @@ class SarvamProvider implements BaseProvider {
     const aborted = s.turnId;
     s.turnId++;            // any pending TTS/chat callbacks for `aborted` become stale
     s.pendingUserText = null;
+    s.utterance = '';      // start the patient's interrupting utterance clean
+    s.lastSegment = '';
+    s.endSpeechSeen = false;
     this.send(s, { type: 'agent_interrupt', responseId: aborted });
     this.setStatus(s, 'listening');
+
+    // If this was a false barge-in (cough/echo) and no real speech is transcribed soon,
+    // re-ask the question rather than leaving the patient in silence.
+    this.clearResumeTimer(s);
+    if (s.lastAgentReply) {
+      s.resumeTimer = setTimeout(() => this.speakAgain(sessionId).catch(() => {}), RESUME_AFTER_INTERRUPT_MS);
+    }
+  }
+
+  private clearResumeTimer(s: SarvamSession): void {
+    if (s.resumeTimer) { clearTimeout(s.resumeTimer); s.resumeTimer = null; }
+  }
+
+  /** Re-speak the last question after a false barge-in (no real speech followed). */
+  private async speakAgain(sessionId: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.ended) return;
+    this.clearResumeTimer(s);
+    if (s.status !== 'listening' || !s.lastAgentReply) return; // a real turn already took over
+    const turnId = ++s.turnId;
+    const isCurrent = () => !s.ended && s.turnId === turnId;
+    console.log(`🔁 Resume after false barge-in (${sessionId})`);
+    this.setStatus(s, 'speaking');
+    // Re-play the audio only (no new transcript line — the question is already on screen).
+    await this.streamTts(s, s.lastAgentReply, turnId, isCurrent, s.lastAgentTone);
+    if (isCurrent()) {
+      this.send(s, { type: 'agent_audio_end', responseId: turnId });
+      this.setStatus(s, 'listening');
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────────
@@ -765,6 +842,7 @@ class SarvamProvider implements BaseProvider {
     const s = this.sessions.get(sessionId);
     if (!s || s.ended) return;
     this.clearEndTurnTimer(s);
+    this.clearResumeTimer(s);  // real speech arrived → no need to re-ask
     s.endSpeechSeen = false;
     const text = s.utterance.trim();
     s.utterance = '';
@@ -794,6 +872,7 @@ class SarvamProvider implements BaseProvider {
 
     const turnId = ++s.turnId;          // claim this turn
     const isCurrent = () => !s.ended && s.turnId === turnId;
+    this.clearResumeTimer(s);           // a real turn is starting → cancel any pending re-ask
     this.setStatus(s, 'thinking');
 
     const L = LANGS[s.lang];
@@ -897,6 +976,10 @@ class SarvamProvider implements BaseProvider {
       this.send(s, { type: 'agent_transcript', text: reply, responseId: turnId });
       db.saveConversationLog({ session_id: sessionId, speaker: 'agent', message: reply }).catch(() => {});
 
+      // Remember a normal question so a false barge-in can re-ask it (not for the closing
+      // line or an emergency message — those end the conversation, nothing to resume).
+      if (!completing && !emergency) { s.lastAgentReply = reply; s.lastAgentTone = tone; }
+
       this.setStatus(s, 'speaking');
       await this.streamTts(s, reply, turnId, isCurrent, tone);
 
@@ -921,23 +1004,33 @@ class SarvamProvider implements BaseProvider {
     }
   }
 
+  /** One raw chat completion, dispatched to the session's configured LLM engine. Both engines
+   *  speak the OpenAI chat-completions shape (same messages + function tools), so only the
+   *  client and a couple of engine-specific params differ. Returns the raw response object. */
+  private async completeChat(s: SarvamSession, messages: ChatMessage[], toolChoice: 'auto' | 'none'): Promise<any> {
+    const common = {
+      temperature: INTAKE_TEMPERATURE, // low → deterministic, on-script
+      max_tokens: 220,                 // a short empathetic sentence + one question; caps any runaway
+      frequency_penalty: 0.6,
+      presence_penalty: 0.3,
+      messages: messages as any,
+      tools: this.getFunctionTools(),
+      tool_choice: toolChoice
+    };
+    if (s.llmEngine === 'openai') {
+      // OpenAI gpt-4o-mini via the official SDK (.create), no reasoning_effort param.
+      return this.getOpenAI().chat.completions.create({ model: OPENAI_LLM_MODEL, ...common } as any);
+    }
+    // Sarvam (sarvam-30b): reasoning disabled per-call for voice latency.
+    return s.client.chat.completions({ model: CHAT_MODEL, reasoning_effort: null, ...common } as any);
+  }
+
   /** One chat completion against the given (transient) message array; runs any tool
    *  calls, then returns the final spoken text. Tool/assistant scaffolding is pushed
    *  onto `messages` only, so the persistent history (s.messages) stays clean. */
   private async chat(s: SarvamSession, sessionId: string, messages: ChatMessage[]): Promise<string> {
-    const params = {
-      model: CHAT_MODEL,
-      temperature: INTAKE_TEMPERATURE, // low → deterministic, on-script
-      max_tokens: 220,                 // a short empathetic sentence + one question; caps any runaway
-      reasoning_effort: null,          // disable hidden "thinking" → returns content + low latency
-      frequency_penalty: 0.6,
-      presence_penalty: 0.3
-    };
-
-    console.log(`🧠 chat (${sessionId}) q#${s.questionIndex + 1} ${messages.length} msgs`);
-    const resp: any = await s.client.chat.completions({
-      ...params, messages: messages as any, tools: this.getFunctionTools(), tool_choice: 'auto'
-    } as any);
+    console.log(`🧠 chat (${sessionId}) engine=${s.llmEngine} q#${s.questionIndex + 1} ${messages.length} msgs`);
+    const resp: any = await this.completeChat(s, messages, 'auto');
     this.recordUsage(s, resp?.usage);
 
     const message = resp?.choices?.[0]?.message;
@@ -956,9 +1049,7 @@ class SarvamProvider implements BaseProvider {
         messages.push({ role: 'tool', tool_call_id: call.id, name, content: JSON.stringify(result) });
       }
 
-      const followup: any = await s.client.chat.completions({
-        ...params, messages: messages as any, tools: this.getFunctionTools(), tool_choice: 'none'
-      } as any);
+      const followup: any = await this.completeChat(s, messages, 'none');
       this.recordUsage(s, followup?.usage);
 
       if (shouldEnd) setTimeout(() => this.endSession(sessionId).catch(() => {}), 6000);
@@ -974,7 +1065,7 @@ class SarvamProvider implements BaseProvider {
   // ───────────────────────────────────────────────────────────────────────────────
   private async streamTts(s: SarvamSession, text: string, turnId: number, isCurrent: () => boolean, tone: ToneKey = 'gentle'): Promise<void> {
     if (!text || s.ended) return;
-    let engine = TTS_ENGINE[s.lang] || 'sarvam';
+    let engine = s.ttsEngine || 'sarvam';
     // Safety: if a language is configured for OpenAI but no key is set, fall back to Sarvam
     // so the patient still hears a voice (silent audio would be worse than a less-emotional one).
     if (engine === 'openai' && !process.env.OPENAI_API_KEY) {

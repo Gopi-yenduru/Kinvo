@@ -133,6 +133,7 @@ if (DB_CLIENT === 'postgres' || DB_CLIENT === 'postgresql' || DB_CLIENT === 'pg'
         voice TEXT NOT NULL DEFAULT 'alloy',
         temperature DOUBLE PRECISION NOT NULL DEFAULT 0.6,
         max_response_length BIGINT NOT NULL DEFAULT 200,
+        engine_map TEXT,
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS conversation_logs (
@@ -212,6 +213,7 @@ if (DB_CLIENT === 'postgres' || DB_CLIENT === 'postgresql' || DB_CLIENT === 'pg'
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS consent_at TIMESTAMP;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language TEXT;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'staff';
+      ALTER TABLE settings ADD COLUMN IF NOT EXISTS engine_map TEXT;
     `);
 
     // Seed settings + bcrypt admin (idempotent)
@@ -253,7 +255,7 @@ if (DB_CLIENT === 'postgres' || DB_CLIENT === 'postgresql' || DB_CLIENT === 'pg'
   db.exec(`
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY DEFAULT (${UUID}), patient_id INTEGER, patient_name TEXT, provider TEXT, status TEXT NOT NULL, start_time TEXT NOT NULL DEFAULT (datetime('now')), end_time TEXT, red_flags_detected INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS patients (id INTEGER PRIMARY KEY AUTOINCREMENT, phone_hash TEXT UNIQUE, phone TEXT, name TEXT, age TEXT, visit_count INTEGER NOT NULL DEFAULT 0, medical_summary TEXT, first_visit_at TEXT NOT NULL DEFAULT (datetime('now')), last_visit_at TEXT NOT NULL DEFAULT (datetime('now')), created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, provider TEXT, model TEXT NOT NULL, openai_api_key TEXT, retellai_api_key TEXT, retellai_agent_id TEXT, medical_instructions TEXT, voice TEXT NOT NULL DEFAULT 'alloy', temperature REAL NOT NULL DEFAULT 0.6, max_response_length INTEGER NOT NULL DEFAULT 200, updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, provider TEXT, model TEXT NOT NULL, openai_api_key TEXT, retellai_api_key TEXT, retellai_agent_id TEXT, medical_instructions TEXT, voice TEXT NOT NULL DEFAULT 'alloy', temperature REAL NOT NULL DEFAULT 0.6, max_response_length INTEGER NOT NULL DEFAULT 200, engine_map TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS conversation_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, speaker TEXT NOT NULL, message TEXT, audio_data TEXT, timestamp TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS red_flag_events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, symptoms TEXT, severity TEXT, resolved INTEGER NOT NULL DEFAULT 0, clinician_notified INTEGER NOT NULL DEFAULT 0, timestamp TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_id INTEGER, action TEXT NOT NULL, resource_type TEXT, details TEXT, ip_address TEXT, user_agent TEXT, timestamp TEXT NOT NULL DEFAULT (datetime('now')));
@@ -281,6 +283,8 @@ CREATE TABLE IF NOT EXISTS intake_links (id TEXT PRIMARY KEY DEFAULT (${UUID}), 
   if (!sessCols.includes('consent_at')) db.exec("ALTER TABLE sessions ADD COLUMN consent_at TEXT");
   if (!sessCols.includes('language')) db.exec("ALTER TABLE sessions ADD COLUMN language TEXT");
   if (!sessCols.includes('source')) db.exec("ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'staff'");
+  const settingsCols = (db.prepare("PRAGMA table_info(settings)").all() as any[]).map(c => c.name);
+  if (!settingsCols.includes('engine_map')) db.exec("ALTER TABLE settings ADD COLUMN engine_map TEXT");
   const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
   const adminHash = bcrypt.hashSync(adminPassword, 10);
   const adminRow = db.prepare("SELECT id, password_hash FROM users WHERE username='admin'").get() as any;

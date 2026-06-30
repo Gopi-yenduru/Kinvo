@@ -140,6 +140,12 @@ const Session: React.FC = () => {
         else if (status === 'listening') { setSpeaker('Patient'); setIsSpeakingAgent(false); setIsRecording(true); }
         else { setSpeaker(''); setIsSpeakingAgent(false); }
       },
+      onBargeIn: () => {
+        // Patient talked over the agent → flip the UI to "your turn" instantly (the
+        // backend status event follows a moment later and confirms it).
+        setIsSpeakingAgent(false);
+        setSpeaker('Patient');
+      },
       onPatientTranscript: (text) => addSentenceToConversationLog('You', text, 'text'),
       onAgentTranscript: (text) => addSentenceToConversationLog('Agent', text, 'text'),
       onRedFlag: (symptoms, severity) => {

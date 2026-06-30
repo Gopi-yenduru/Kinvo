@@ -1670,6 +1670,34 @@ h1, .h1, h2, .h2, h3, .h3, h4, .h4, h5, .h5, h6, .h6 {
   box-shadow: 0 0 0 0.2rem rgba(32, 201, 151, 0.25);
 }
 
+/* Per-language engine mapping (Settings → Language Engine Mapping) */
+.engine-map-lang {
+  margin-bottom: 1.25rem;
+  padding: 1rem;
+  border: 1px solid #e9ecef;
+  border-radius: 0.5rem;
+  background: #f8f9fa;
+}
+.engine-map-lang-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 0.75rem;
+  color: #343a40;
+}
+.engine-map-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+.engine-map-row .settings-field {
+  margin-bottom: 0;
+}
+@media (max-width: 640px) {
+  .engine-map-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Indicators */
 .field-indicator {
   margin-left: 0.5rem;

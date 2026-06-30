@@ -32,6 +32,8 @@ export interface Setting {
   voice: string;
   temperature: number;
   max_response_length: number;
+  /** Per-language STT/LLM/TTS engine mapping (JSON), e.g. {"te-IN":{"stt":"sarvam","llm":"sarvam","tts":"sarvam"}}. */
+  engine_map?: string | null;
   updated_at: Date;
 }
 
@@ -825,6 +827,7 @@ export class DataService {
           "voice = @voice",
           "temperature = @temperature",
           "max_response_length = @max_response_length",
+          "engine_map = @engine_map",
           "updated_at = GETDATE()"
         ].join(", ");
 
@@ -838,7 +841,8 @@ export class DataService {
           { name: "medical_instructions", type: sql.VarChar(sql.MAX), value: setting.medical_instructions ?? null },
           { name: "voice", type: sql.VarChar(250), value: setting.voice ?? "alloy" },
           { name: "temperature", type: sql.Decimal(5, 1), value: temperature },
-          { name: "max_response_length", type: sql.BigInt, value: maxLength }
+          { name: "max_response_length", type: sql.BigInt, value: maxLength },
+          { name: "engine_map", type: sql.VarChar(sql.MAX), value: setting.engine_map ?? null }
         ];
 
         await this.runQueryWithInput(
@@ -860,12 +864,13 @@ export class DataService {
           { name: "medical_instructions", type: sql.VarChar(sql.MAX), value: setting.medical_instructions ?? null },
           { name: "voice", type: sql.VarChar(250), value: setting.voice ?? "alloy" },
           { name: "temperature", type: sql.Decimal(5, 1), value: temperature },
-          { name: "max_response_length", type: sql.BigInt, value: maxLength }
+          { name: "max_response_length", type: sql.BigInt, value: maxLength },
+          { name: "engine_map", type: sql.VarChar(sql.MAX), value: setting.engine_map ?? null }
         ];
 
         await this.runQueryWithInput(
-          `INSERT INTO settings (id, provider, model, openai_api_key, retellai_api_key, retellai_agent_id, medical_instructions, voice, temperature, max_response_length, updated_at)
-        VALUES (@id, @provider, @model, @openai_api_key, @retellai_api_key, @retellai_agent_id, @medical_instructions, @voice, @temperature, @max_response_length, GETDATE())`,
+          `INSERT INTO settings (id, provider, model, openai_api_key, retellai_api_key, retellai_agent_id, medical_instructions, voice, temperature, max_response_length, engine_map, updated_at)
+        VALUES (@id, @provider, @model, @openai_api_key, @retellai_api_key, @retellai_agent_id, @medical_instructions, @voice, @temperature, @max_response_length, @engine_map, GETDATE())`,
           inputs
         );
       }

@@ -16,6 +16,18 @@ import realtimeManager from './realtime.js';
 import ProviderFactory from './providers/ProviderFactory.js';
 import { MEDICAL_INTAKE_INSTRUCTIONS } from './constants.js';
 
+/** Tolerantly parse the settings.engine_map JSON into the per-language map the Sarvam pipeline
+ *  reads. Returns undefined on null/bad JSON so the provider falls back to its env defaults. */
+function parseEngineMapSetting(raw: string | null | undefined): Record<string, { stt?: string; llm?: string; tts?: string }> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class IntakeSessionError extends Error {
   httpStatus: number;
   payload: any;
@@ -204,6 +216,7 @@ export async function createIntakeSession(opts: CreateIntakeSessionOptions): Pro
       maxResponseLength: setting?.max_response_length || 200,
       model: setting?.model || 'sarvam-30b',
       language: sessionLanguage,
+      engineMap: parseEngineMapSetting((setting as any)?.engine_map),
       patientId,
       isReturning,
       patientName: (isReturning && existingPatient?.name) ? existingPatient.name : undefined,

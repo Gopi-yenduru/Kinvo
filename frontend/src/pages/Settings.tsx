@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 
+type EngineChoice = { stt: string; llm: string; tts: string };
+type EngineMap = { [lang: string]: EngineChoice };
+
 interface SettingsConfig {
   provider?: string;
   model: string;
@@ -9,8 +12,34 @@ interface SettingsConfig {
   medicalInstructions: string;
   voice: string;
   temperature: number;
+  engineMap?: EngineMap;
   id?: number;
 }
+
+// Per-language STT/LLM/TTS engine mapping is configurable for Telugu & Hindi (English keeps
+// built-in defaults). Option lists mirror what the Sarvam pipeline actually supports today.
+const MAPPED_LANGUAGES: { code: string; label: string }[] = [
+  { code: 'te-IN', label: 'Telugu' },
+  { code: 'hi-IN', label: 'Hindi' }
+];
+const STT_ENGINE_OPTIONS = [
+  { value: 'sarvam', label: 'Sarvam (saaras)' },
+  { value: 'openai', label: 'OpenAI (coming soon)', disabled: true },
+  { value: 'elevenlabs', label: 'ElevenLabs (coming soon)', disabled: true }
+];
+const LLM_ENGINE_OPTIONS = [
+  { value: 'sarvam', label: 'Sarvam (sarvam-30b)' },
+  { value: 'openai', label: 'OpenAI (gpt-4o-mini)' }
+];
+const TTS_ENGINE_OPTIONS = [
+  { value: 'sarvam', label: 'Sarvam (bulbul)' },
+  { value: 'openai', label: 'OpenAI (gpt-4o-mini-tts)' },
+  { value: 'elevenlabs', label: 'ElevenLabs' }
+];
+const DEFAULT_ENGINE_MAP: EngineMap = {
+  'te-IN': { stt: 'sarvam', llm: 'sarvam', tts: 'sarvam' },
+  'hi-IN': { stt: 'sarvam', llm: 'sarvam', tts: 'openai' }
+};
 
 const Settings: React.FC = () => {
   const [config, setConfig] = useState<SettingsConfig>({
@@ -21,7 +50,8 @@ const Settings: React.FC = () => {
     retellAIAgentId: '',
     medicalInstructions: '',
     voice: 'alloy',
-    temperature: 0.6
+    temperature: 0.6,
+    engineMap: DEFAULT_ENGINE_MAP
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
@@ -65,7 +95,8 @@ const Settings: React.FC = () => {
           retellAIAgentId: data.retellAIAgentId || '',
           medicalInstructions: data.medicalInstructions || '',
           voice: data.voice || 'alloy',
-          temperature: data.temperature || 0.7
+          temperature: data.temperature || 0.7,
+          engineMap: { ...DEFAULT_ENGINE_MAP, ...(data.engineMap || {}) }
         });
 
         // Reset modification tracking - nothing has been modified yet
@@ -185,6 +216,20 @@ const Settings: React.FC = () => {
     if (error) setError('');
   };
 
+
+  // Update one engine (stt/llm/tts) for one language in the mapping.
+  const handleEngineChange = (lang: string, stage: keyof EngineChoice, value: string) => {
+    setModifiedFields(prev => new Set([...prev, 'engineMap']));
+    setConfig(prev => {
+      const base = prev.engineMap || DEFAULT_ENGINE_MAP;
+      const current = base[lang] || DEFAULT_ENGINE_MAP[lang];
+      return {
+        ...prev,
+        engineMap: { ...base, [lang]: { ...current, [stage]: value } }
+      };
+    });
+    if (error) setError('');
+  };
 
   const handleResetToDefaults = () => {
     if (confirm('Are you sure you want to reset all settings to their default values? This will replace your custom configurations with the system defaults.')) {
@@ -309,6 +354,78 @@ const Settings: React.FC = () => {
                 "v3" voices are newer and more natural. Changes apply to the next session.
               </small>
             </div>
+          </div>
+        )}
+
+        {/* Per-language engine mapping (Telugu & Hindi). English keeps built-in defaults. */}
+        {config.provider === 'sarvam' && (
+          <div className="settings-section">
+            <div className="section-header">
+              <h2>🧩 Language Engine Mapping</h2>
+              <div className="section-description">
+                For Telugu and Hindi, map each stage of the voice pipeline — Speech-to-Text,
+                the LLM, and Text-to-Speech — to a provider. Changes apply to the next session.
+              </div>
+            </div>
+
+            {MAPPED_LANGUAGES.map((lng) => {
+              const choice = (config.engineMap || DEFAULT_ENGINE_MAP)[lng.code] || DEFAULT_ENGINE_MAP[lng.code];
+              return (
+                <div key={lng.code} className="engine-map-lang">
+                  <h3 className="engine-map-lang-title">{lng.label}</h3>
+                  <div className="engine-map-row">
+                    <div className="settings-field">
+                      <label className="field-label">STT (Speech → Text)</label>
+                      <select
+                        className="field-input"
+                        value={choice.stt}
+                        onChange={(e) => handleEngineChange(lng.code, 'stt', e.target.value)}
+                      >
+                        {STT_ENGINE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value} disabled={(o as any).disabled}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="settings-field">
+                      <label className="field-label">LLM (Reasoning)</label>
+                      <select
+                        className="field-input"
+                        value={choice.llm}
+                        onChange={(e) => handleEngineChange(lng.code, 'llm', e.target.value)}
+                      >
+                        {LLM_ENGINE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value} disabled={(o as any).disabled}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="settings-field">
+                      <label className="field-label">TTS (Text → Speech)</label>
+                      <select
+                        className="field-input"
+                        value={choice.tts}
+                        onChange={(e) => handleEngineChange(lng.code, 'tts', e.target.value)}
+                      >
+                        {TTS_ENGINE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value} disabled={(o as any).disabled}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            <small className="text-muted d-block mt-1">
+              STT currently supports Sarvam only. OpenAI/ElevenLabs require their API keys to be
+              configured on the server; if a key is missing the pipeline falls back to Sarvam.
+            </small>
           </div>
         )}
 

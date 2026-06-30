@@ -10,6 +10,8 @@ interface RealtimeConfig {
   apiKey?: string;
   /** Patient-chosen language for the Sarvam pipeline: 'te-IN' | 'hi-IN' | 'en-IN'. */
   language?: string;
+  /** Per-language STT/LLM/TTS engine mapping from Settings (Sarvam pipeline). Keyed by lang code. */
+  engineMap?: Record<string, { stt?: string; llm?: string; tts?: string }>;
   /** Persistent patient record id (0/undefined for anonymous), to update across the visit. */
   patientId?: number;
   /** Returning-patient context so the agent runs a follow-up instead of re-asking the intake. */

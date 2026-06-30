@@ -1279,6 +1279,36 @@ app.get('/api/sessions/:sessionId/token-usage', async (req: any, res: any) => {
   }
 });
 
+// Per-language STT/LLM/TTS engine mapping. Only Telugu/Hindi are configurable from the UI;
+// English keeps its built-in defaults. Unknown/invalid stored values fall back to these.
+const ENGINE_MAP_DEFAULTS = {
+  'te-IN': { stt: 'sarvam', llm: 'sarvam', tts: 'sarvam' },
+  'hi-IN': { stt: 'sarvam', llm: 'sarvam', tts: 'openai' }
+};
+const VALID_ENGINES = {
+  stt: ['sarvam'],                          // only Sarvam streaming STT is wired today
+  llm: ['sarvam', 'openai'],
+  tts: ['sarvam', 'openai', 'elevenlabs']
+} as const;
+
+// Parse the stored engine_map JSON into a sanitized, fully-populated map (always te-IN + hi-IN,
+// each with a valid stt/llm/tts). Tolerates null, bad JSON, missing keys and invalid engines.
+const parseEngineMap = (raw: string | null | undefined) => {
+  let parsed: any = {};
+  if (raw) { try { parsed = JSON.parse(raw) || {}; } catch { parsed = {}; } }
+  const out: any = {};
+  for (const lang of ['te-IN', 'hi-IN'] as const) {
+    const def = ENGINE_MAP_DEFAULTS[lang];
+    const cur = parsed[lang] || {};
+    out[lang] = {
+      stt: (VALID_ENGINES.stt as readonly string[]).includes(cur.stt) ? cur.stt : def.stt,
+      llm: (VALID_ENGINES.llm as readonly string[]).includes(cur.llm) ? cur.llm : def.llm,
+      tts: (VALID_ENGINES.tts as readonly string[]).includes(cur.tts) ? cur.tts : def.tts
+    };
+  }
+  return out;
+};
+
 // Settings configuration endpoint
 app.get('/api/settings/config', async (req: any, res: any) => {
   try {
@@ -1295,7 +1325,8 @@ app.get('/api/settings/config', async (req: any, res: any) => {
         medicalInstructions: setting.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS, // Use constants as default
         voice: setting.voice,
         temperature: setting.temperature,
-        maxResponseLength: setting.max_response_length
+        maxResponseLength: setting.max_response_length,
+        engineMap: parseEngineMap((setting as any).engine_map)
       });
     } else {
       // No settings table exists yet, return defaults
@@ -1306,7 +1337,8 @@ app.get('/api/settings/config', async (req: any, res: any) => {
         medicalInstructions: MEDICAL_INTAKE_INSTRUCTIONS, // Use constants as default
         voice: 'alloy',
         temperature: 0.6,
-        maxResponseLength: 200
+        maxResponseLength: 200,
+        engineMap: parseEngineMap(null)
       });
     }
   } catch (error: any) {
@@ -1373,6 +1405,10 @@ app.post('/api/settings/config', async (req: any, res: any) => {
       voice: String(settingsData.voice ?? 'alloy'),
       temperature: Number(settingsData.temperature ?? 0.6), // ensure number
       max_response_length: Number(settingsData.maxResponseLength ?? 200),
+      // Sanitize before storing so the DB only ever holds a valid map.
+      engine_map: JSON.stringify(parseEngineMap(
+        settingsData.engineMap ? JSON.stringify(settingsData.engineMap) : null
+      )),
     };
 
     // Save to DB
@@ -1394,6 +1430,7 @@ app.post('/api/settings/config', async (req: any, res: any) => {
         voice: savedSettings.voice,
         temperature: savedSettings.temperature,
         maxResponseLength: savedSettings.max_response_length,
+        engineMap: parseEngineMap((savedSettings as any).engine_map),
         message: 'Settings saved successfully'
       });
     } else {
