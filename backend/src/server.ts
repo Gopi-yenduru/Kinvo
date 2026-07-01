@@ -21,7 +21,7 @@ const wss = new WebSocketServer({ server });
 
 // Import our modules
 import realtimeManager from './realtime.js';
-import { MEDICAL_INTAKE_INSTRUCTIONS, REALTIME_CONFIG } from './constants.js';
+import { MEDICAL_INTAKE_INSTRUCTIONS_NEW, REALTIME_CONFIG } from './constants.js';
 import db from './database-manager.js';
 import ProviderFactory from './providers/ProviderFactory.js';
 import RetellAIProvider from './providers/RetellAIProvider.js';
@@ -348,7 +348,8 @@ app.post('/api/sessions/:sessionId/start-web-call', authenticateJWT, async (req:
       // Create web call
       const webCallResponse = await retellProvider.createWebCall({
         sessionId: sessionId,
-        agentId: retellAgentId
+        agentId: retellAgentId,
+        instructions: (setting as any)?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW
       });
 
       // Log audit event
@@ -1322,7 +1323,7 @@ app.get('/api/settings/config', async (req: any, res: any) => {
         openaiApiKey: process.env.OPENAI_API_KEY || '', // Use .env value as default
         retellAIApiKey: (setting as any).retellai_api_key || '',
         retellAIAgentId: (setting as any).retellai_agent_id || '',
-        medicalInstructions: setting.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS, // Use constants as default
+        medicalInstructions: setting.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW, // Use constants as default
         voice: setting.voice,
         temperature: setting.temperature,
         maxResponseLength: setting.max_response_length,
@@ -1334,7 +1335,7 @@ app.get('/api/settings/config', async (req: any, res: any) => {
         id: 1,
         model: 'gpt-4o-realtime-preview',
         openaiApiKey: process.env.OPENAI_API_KEY || '', // Use .env value as default
-        medicalInstructions: MEDICAL_INTAKE_INSTRUCTIONS, // Use constants as default
+        medicalInstructions: MEDICAL_INTAKE_INSTRUCTIONS_NEW, // Use constants as default
         voice: 'alloy',
         temperature: 0.6,
         maxResponseLength: 200,
@@ -1633,7 +1634,11 @@ app.get('/api/public/intake/:token', async (req: any, res: any) => {
   try {
     const r = await loadUsableIntakeLink(req.params.token);
     if (!r.link) return res.status(r.httpStatus!).json(r.body);
-    res.json({ valid: true, status: r.link.status, language: r.link.language });
+    // Expose the configured provider so the patient page can hide Telugu/Hindi on English-only
+    // providers (OpenAI/Retell) — only the Sarvam pipeline supports te/hi.
+    const settings = await db.getAllSettings();
+    const provider = (settings && settings.length > 0 ? (settings[0] as any).provider : '') || 'openai';
+    res.json({ valid: true, status: r.link.status, language: r.link.language, provider });
   } catch (error: any) {
     console.error('Failed to validate intake link:', error);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });

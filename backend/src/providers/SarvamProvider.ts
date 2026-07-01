@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { SarvamAIClient } from 'sarvamai';
-import OpenAI from 'openai';
+import OpenAI, { toFile } from 'openai';
 import db from '../database-manager.js';
 import { BaseProvider, RealtimeConfig } from './BaseProvider.js';
 import { emergencyMessage, detectEmergency, Lang } from '../emergency.js';
@@ -53,6 +53,16 @@ const CHAT_MODEL = 'sarvam-30b';          // reasoning disabled per-call for voi
 // LLM engine for the reasoning step. 'sarvam' → sarvam-30b (default, native Indic); 'openai' →
 // gpt-4o-mini via the OpenAI-compatible chat API. Selectable per language from Settings.
 type LlmEngine = 'sarvam' | 'openai';
+type SttEngine = 'sarvam' | 'openai';
+// English is a FIXED full-OpenAI pipeline (STT+LLM+TTS), per product decision. Telugu/Hindi stay
+// Sarvam-STT (the only wired streaming STT) with their LLM/TTS configurable in Settings.
+const OPENAI_STT_MODEL = (process.env.OPENAI_STT_MODEL || 'gpt-4o-transcribe').trim();
+// Server-side silence VAD for the OpenAI STT path (Sarvam gives us VAD signals; OpenAI transcription
+// does not, so we detect end-of-turn ourselves from mic energy). All override-able via env.
+const STT_VAD_RMS = Number(process.env.STT_VAD_RMS || 0.02);        // normalized [0..1] speech floor
+const STT_SILENCE_HANG_MS = Number(process.env.STT_SILENCE_HANG_MS || 600);  // trailing silence = turn end (lower = snappier replies)
+const STT_MIN_SPEECH_MS = Number(process.env.STT_MIN_SPEECH_MS || 300);      // ignore blips shorter than this
+const STT_MAX_UTTERANCE_MS = Number(process.env.STT_MAX_UTTERANCE_MS || 20000); // hard cap → force finalize
 // gpt-4o (not -mini): the mini model is noticeably weaker at Telugu/Hindi and produces awkward,
 // over-literal replies. 4o is far more fluent and natural in Indic languages, which matters a lot
 // for a warm spoken intake. Override with OPENAI_LLM_MODEL in backend/.env if needed.
@@ -306,8 +316,15 @@ type ChatMessage = {
 interface SarvamSession {
   config: RealtimeConfig;
   lang: Lang;                // patient-chosen language (te-IN | hi-IN | en-IN) for STT/TTS/prompt
+  sttEngine: SttEngine;      // 'sarvam' (streaming) or 'openai' (buffered, English)
   ttsEngine: TtsEngine;      // resolved from Settings engineMap (per lang), else env default
   llmEngine: LlmEngine;      // resolved from Settings engineMap (per lang), else 'sarvam'
+  // OpenAI STT (buffered) state — unused on the Sarvam STT path.
+  oaAudio: number[];         // accumulated PCM16 samples for the current utterance
+  oaRate: number;            // sample rate of the accumulated audio (from the browser frames)
+  oaSpeechMs: number;        // ms of voiced audio seen this utterance
+  oaSilenceMs: number;       // ms of trailing silence since the last voiced frame
+  oaTranscribing: boolean;   // a transcription request is in flight (don't double-fire)
   plan: IntakeStep[];        // INTAKE_QUESTIONS (new) or FOLLOWUP_QUESTIONS (returning patient)
   isFollowup: boolean;       // true when running a follow-up for a known returning patient
   client: SarvamAIClient;
@@ -359,16 +376,25 @@ class SarvamProvider implements BaseProvider {
     return this.openai;
   }
 
-  /** Resolve the TTS engine for this session: Settings mapping (per language) wins, else the
-   *  env-driven default (TTS_ENGINE_*), else Sarvam. Validated against the supported engines. */
+  /** STT engine: English is fixed to OpenAI (buffered transcription); everything else uses the
+   *  Sarvam streaming STT (the only wired streaming path). */
+  private resolveSttEngine(_config: RealtimeConfig, lang: Lang): SttEngine {
+    return lang === 'en-IN' ? 'openai' : 'sarvam';
+  }
+
+  /** Resolve the TTS engine for this session. English is fixed to OpenAI; for te/hi the Settings
+   *  mapping wins, else the env-driven default (TTS_ENGINE_*), else Sarvam. */
   private resolveTtsEngine(config: RealtimeConfig, lang: Lang): TtsEngine {
+    if (lang === 'en-IN') return 'openai';
     const choice = String(config.engineMap?.[lang]?.tts || '').toLowerCase();
     if (choice === 'sarvam' || choice === 'openai' || choice === 'elevenlabs') return choice;
     return TTS_ENGINE[lang] || 'sarvam';
   }
 
-  /** Resolve the LLM engine for this session from the Settings mapping; defaults to Sarvam. */
+  /** Resolve the LLM engine for this session. English is fixed to OpenAI; for te/hi the Settings
+   *  mapping decides, defaulting to Sarvam. */
   private resolveLlmEngine(config: RealtimeConfig, lang: Lang): LlmEngine {
+    if (lang === 'en-IN') return 'openai';
     return String(config.engineMap?.[lang]?.llm || '').toLowerCase() === 'openai' ? 'openai' : 'sarvam';
   }
 
@@ -422,7 +448,14 @@ class SarvamProvider implements BaseProvider {
   }
 
   private buildSystemPrompt(config: RealtimeConfig, lang: Lang, isFollowup = false): string {
-    const base = (config.instructions || '').trim();
+    // The clinic-wide instructions constant is written for the English-only OpenAI/Retell
+    // flows and includes an "English only, never switch languages" directive — drop any
+    // such line here so it doesn't fight this provider's own te-IN/hi-IN speaking rules below.
+    const base = (config.instructions || '')
+      .split('\n')
+      .filter(line => !/english\s*only/i.test(line))
+      .join('\n')
+      .trim();
     const L = LANGS[lang];
     const followup = isFollowup ? [
       '',
@@ -518,31 +551,41 @@ class SarvamProvider implements BaseProvider {
   // Session lifecycle
   // ───────────────────────────────────────────────────────────────────────────────
   async createRealtimeSession(config: RealtimeConfig): Promise<WebSocket | null> {
-    const apiKey = config.apiKey || process.env.SARVAM_API_KEY;
-    if (!apiKey) throw new Error('Sarvam API key is required (set SARVAM_API_KEY or settings).');
-
     const sessionId = config.sessionId;
     const lang = toLang(config.language);
     // Per-language engine selection from Settings (Telugu/Hindi configurable in the UI). Falls back
     // to the env-driven TTS default and Sarvam LLM when no/invalid mapping is stored. STT stays
-    // Sarvam — it's the only streaming STT wired into this half-duplex loop today.
+    // Sarvam for te/hi; English runs fully on OpenAI.
+    const sttEngine = this.resolveSttEngine(config, lang);
     const ttsEngine = this.resolveTtsEngine(config, lang);
     const llmEngine = this.resolveLlmEngine(config, lang);
+
+    // The Sarvam key is only required when a stage actually uses a Sarvam engine. A fully-OpenAI
+    // pipeline (e.g. English, or the OpenAI provider routed here) needs no Sarvam key at all.
+    const usesSarvam = sttEngine === 'sarvam' || llmEngine === 'sarvam' || ttsEngine === 'sarvam';
+    const apiKey = config.apiKey || process.env.SARVAM_API_KEY;
+    if (usesSarvam && !apiKey) throw new Error('Sarvam API key is required (set SARVAM_API_KEY or settings).');
     // A returning patient WITH prior history → run the follow-up plan (don't re-ask the intake).
     const isFollowup = !!(config.isReturning && config.patientHistory && String(config.patientHistory).trim());
     const plan = isFollowup ? FOLLOWUP_QUESTIONS : INTAKE_QUESTIONS;
     console.log(`🟣 Creating Sarvam session ${sessionId} (lang=${lang}, ${isFollowup ? 'FOLLOW-UP' : 'new intake'})`);
 
-    console.log(`   engines (lang=${lang}): stt=sarvam llm=${llmEngine} tts=${ttsEngine}`);
+    console.log(`   engines (lang=${lang}): stt=${sttEngine} llm=${llmEngine} tts=${ttsEngine}`);
 
     const session: SarvamSession = {
       config,
       lang,
+      sttEngine,
       ttsEngine,
       llmEngine,
+      oaAudio: [],
+      oaRate: TTS_SAMPLE_RATE,
+      oaSpeechMs: 0,
+      oaSilenceMs: 0,
+      oaTranscribing: false,
       plan,
       isFollowup,
-      client: new SarvamAIClient({ apiSubscriptionKey: apiKey }),
+      client: new SarvamAIClient({ apiSubscriptionKey: apiKey || '' }),
       stt: null,
       frontendWs: null,
       messages: [{ role: 'system', content: this.buildSystemPrompt(config, lang, isFollowup) }],
@@ -571,20 +614,24 @@ class SarvamProvider implements BaseProvider {
     };
     this.sessions.set(sessionId, session);
 
-    // Connect STT now so it's ready the instant the patient is given the floor.
-    // (TTS uses a fresh connection per utterance — Sarvam closes the TTS socket
-    //  after each response, so a persistent TTS socket goes silent after a few turns.)
-    await this.ensureStt(session);
+    // Sarvam STT: connect now so it's ready the instant the patient is given the floor.
+    // (TTS uses a fresh connection per utterance — Sarvam closes the TTS socket after each
+    //  response, so a persistent TTS socket goes silent after a few turns.) The OpenAI STT path
+    //  has no persistent socket — it buffers mic audio and transcribes per utterance instead.
+    if (session.sttEngine === 'sarvam') await this.ensureStt(session);
 
-    // The greeting is triggered from linkFrontendSocket(), once the browser is
-    // actually listening — otherwise the greeting audio is produced before anything
-    // can play it and is lost.
-    return session.stt as unknown as WebSocket;
+    // The greeting is triggered from linkFrontendSocket(), once the browser is actually
+    // listening. Return a truthy handle so session creation is considered successful even when
+    // there is no Sarvam STT socket (OpenAI STT) — callers only test truthiness.
+    return (session.stt || (session as unknown)) as WebSocket;
   }
 
   getSession(sessionId: string): WebSocket | null {
     const s = this.sessions.get(sessionId);
-    return s && !s.ended ? (s.stt as unknown as WebSocket) : null;
+    if (!s || s.ended) return null;
+    // Truthy sentinel: the OpenAI STT path has no stt socket, but the session is still live and
+    // callers (link/audio/interrupt gating) only check for a non-null value.
+    return (s.stt || (s as unknown)) as WebSocket;
   }
 
   linkFrontendSocket(sessionId: string, frontendWs: any): void {
@@ -668,6 +715,9 @@ class SarvamProvider implements BaseProvider {
     s.utterance = '';      // start the patient's interrupting utterance clean
     s.lastSegment = '';
     s.endSpeechSeen = false;
+    s.oaAudio = [];        // drop any buffered OpenAI-STT audio from before the barge-in
+    s.oaSpeechMs = 0;
+    s.oaSilenceMs = 0;
     this.send(s, { type: 'agent_interrupt', responseId: aborted });
     this.setStatus(s, 'listening');
 
@@ -715,6 +765,9 @@ class SarvamProvider implements BaseProvider {
     const pcm16: number[] = audioData?.pcm16;
     if (!Array.isArray(pcm16) || pcm16.length === 0) return;
 
+    // English → OpenAI STT: buffer + detect end-of-turn ourselves (no streaming STT socket).
+    if (s.sttEngine === 'openai') { this.handleOpenAiAudio(s, pcm16, Number(audioData?.sampleRate) || TTS_SAMPLE_RATE); return; }
+
     if (!s.stt || s.stt.readyState !== WebSocket.OPEN) {
       if (!s.sttConnecting) this.ensureStt(s).catch(e => console.error('STT reconnect failed:', e?.message || e));
       return;
@@ -731,6 +784,94 @@ class SarvamProvider implements BaseProvider {
     } catch (e: any) {
       console.error(`STT send failed (${sessionId}):`, e?.message || e);
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────────
+  // OpenAI STT (English): buffer mic PCM, detect end-of-turn from energy, then transcribe
+  // the whole utterance with gpt-4o-transcribe. Sarvam gives VAD signals for free; OpenAI
+  // transcription doesn't, so we roll a simple silence detector here.
+  // ───────────────────────────────────────────────────────────────────────────────
+  private handleOpenAiAudio(s: SarvamSession, pcm16: number[], sampleRate: number): void {
+    if (s.oaTranscribing) return;      // a turn is already being transcribed; drop until it resolves
+    if (s.status !== 'listening') return; // only capture during the patient's turn (never pre-greeting/noise)
+
+    // RMS of this frame, normalized to [0..1] (samples are int16).
+    let sum = 0;
+    for (let i = 0; i < pcm16.length; i++) { const v = pcm16[i] / 32768; sum += v * v; }
+    const rms = Math.sqrt(sum / pcm16.length);
+    const frameMs = (pcm16.length / sampleRate) * 1000;
+    const voiced = rms >= STT_VAD_RMS;
+
+    // Only start buffering once real speech begins (skip leading room noise/silence).
+    if (!voiced && s.oaSpeechMs === 0) return;
+
+    s.oaRate = sampleRate;
+    for (let i = 0; i < pcm16.length; i++) s.oaAudio.push(pcm16[i]);
+
+    if (voiced) {
+      s.oaSpeechMs += frameMs;
+      s.oaSilenceMs = 0;
+    } else {
+      s.oaSilenceMs += frameMs;
+    }
+
+    const totalMs = (s.oaAudio.length / sampleRate) * 1000;
+    const endOfTurn = s.oaSpeechMs >= STT_MIN_SPEECH_MS && s.oaSilenceMs >= STT_SILENCE_HANG_MS;
+    if (endOfTurn || totalMs >= STT_MAX_UTTERANCE_MS) {
+      this.finalizeOpenAiUtterance(s).catch(e => console.error('OpenAI STT finalize failed:', e?.message || e));
+    }
+  }
+
+  /** Transcribe the buffered utterance with OpenAI, then hand the text to the normal turn path. */
+  private async finalizeOpenAiUtterance(s: SarvamSession): Promise<void> {
+    if (s.ended || s.oaTranscribing) return;
+    const samples = s.oaAudio;
+    const rate = s.oaRate;
+    // Reset the buffer immediately so incoming frames start a fresh utterance.
+    s.oaAudio = [];
+    s.oaSpeechMs = 0;
+    s.oaSilenceMs = 0;
+    if (samples.length === 0) return;
+    s.oaTranscribing = true;
+    try {
+      const wav = this.pcm16ToWav(samples, rate);
+      const file = await toFile(wav, 'audio.wav', { type: 'audio/wav' });
+      const resp: any = await this.getOpenAI().audio.transcriptions.create({
+        model: OPENAI_STT_MODEL, file, language: 'en'
+      } as any);
+      const text = String(resp?.text || '').trim();
+      if (!text || s.ended) return;
+      // Reuse the existing turn machinery: stage the text as the current utterance and finalize.
+      s.utterance = text;
+      s.lastSegment = '';
+      this.finalizeUserTurn(s.config.sessionId);
+    } finally {
+      s.oaTranscribing = false;
+    }
+  }
+
+  /** Wrap PCM16 mono samples in a minimal 44-byte WAV header (what the transcription API wants). */
+  private pcm16ToWav(samples: number[], sampleRate: number): Buffer {
+    const data = Buffer.alloc(samples.length * 2);
+    for (let i = 0; i < samples.length; i++) {
+      const v = Math.max(-32768, Math.min(32767, samples[i] | 0));
+      data.writeInt16LE(v, i * 2);
+    }
+    const header = Buffer.alloc(44);
+    header.write('RIFF', 0);
+    header.writeUInt32LE(36 + data.length, 4);
+    header.write('WAVE', 8);
+    header.write('fmt ', 12);
+    header.writeUInt32LE(16, 16);          // PCM fmt chunk size
+    header.writeUInt16LE(1, 20);           // audio format = PCM
+    header.writeUInt16LE(1, 22);           // channels = mono
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(sampleRate * 2, 28); // byte rate (mono, 16-bit)
+    header.writeUInt16LE(2, 32);           // block align
+    header.writeUInt16LE(16, 34);          // bits per sample
+    header.write('data', 36);
+    header.writeUInt32LE(data.length, 40);
+    return Buffer.concat([header, data]);
   }
 
   /** (Re)connect the STT socket if it isn't open — Sarvam closes it on idle. */
@@ -1095,9 +1236,10 @@ class SarvamProvider implements BaseProvider {
     if (isCurrent()) this.send(s, { type: 'agent_audio_end', responseId: turnId });
   }
 
-  /** OpenAI expressive voice (gpt-4o-mini-tts) for hi/en: the tone steers the delivery via
-   *  `instructions`. Returns PCM (24kHz, 16-bit mono) which we slice into the same
-   *  `agent_audio` chunks the browser already plays. */
+  /** OpenAI expressive voice (gpt-4o-mini-tts) for en/hi: the tone steers the delivery via
+   *  `instructions`. STREAMS PCM (24kHz, 16-bit mono) chunk-by-chunk as it is synthesised, so the
+   *  browser starts playing the first words while the rest is still being generated — this is the
+   *  main latency win over buffering the whole reply. Rejects BEFORE any audio so the caller retries. */
   private async streamOpenAiTtsOnce(
     s: SarvamSession, text: string, turnId: number, tone: ToneKey, isCurrent: () => boolean
   ): Promise<void> {
@@ -1114,16 +1256,37 @@ class SarvamProvider implements BaseProvider {
       instructions, response_format: 'pcm'
     });
     if (!isCurrent()) return;
-    const buf = Buffer.from(await resp.arrayBuffer());
-    if (buf.length < 2) throw new Error('OpenAI TTS returned no audio');
-    // Forward as PCM16@24k chunks (even byte offsets keep samples aligned). ~0.2s per chunk.
-    const CHUNK = 9600;
-    let seq = 0;
-    for (let off = 0; off < buf.length; off += CHUNK) {
-      if (!isCurrent()) return;
-      const slice = buf.subarray(off, Math.min(off + CHUNK, buf.length));
-      this.send(s, { type: 'agent_audio', audio: slice.toString('base64'), responseId: turnId, seq: seq++ });
+    const body: any = resp?.body;
+    if (!body || typeof body.getReader !== 'function') {
+      // No streamable body — fall back to a single buffered send so audio still plays.
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length < 2) throw new Error('OpenAI TTS returned no audio');
+      this.send(s, { type: 'agent_audio', audio: buf.toString('base64'), responseId: turnId, seq: 0 });
+      return;
     }
+    // Forward PCM16@24k chunks as they arrive. Carry a stray odd byte so we never split a sample.
+    const reader = body.getReader();
+    let seq = 0, gotAudio = false;
+    let leftover = Buffer.alloc(0);
+    try {
+      while (true) {
+        if (!isCurrent()) break;
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.length) {
+          const buf = Buffer.concat([leftover, Buffer.from(value)]);
+          const even = buf.length - (buf.length % 2);
+          leftover = Buffer.from(buf.subarray(even));
+          if (even > 0) {
+            gotAudio = true;
+            this.send(s, { type: 'agent_audio', audio: buf.subarray(0, even).toString('base64'), responseId: turnId, seq: seq++ });
+          }
+        }
+      }
+    } finally {
+      try { await reader.cancel(); } catch { /* already closed */ }
+    }
+    if (!gotAudio) throw new Error('OpenAI TTS returned no audio');
   }
 
   /** ElevenLabs expressive voice (any language). Streams pcm_24000 (24kHz, 16-bit mono LE) — the

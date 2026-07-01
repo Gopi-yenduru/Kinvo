@@ -76,6 +76,9 @@ const PatientIntake: React.FC = () => {
   const [phase, setPhase] = useState<Phase>('loading');
   const [blocked, setBlocked] = useState<{ title: string; message: string }>({ title: '', message: '' });
   const [language, setLanguage] = useState<Lang>('te-IN');
+  const [provider, setProvider] = useState<string>(''); // configured AI provider (from link info)
+  // Telugu/Hindi are only supported by the Sarvam pipeline; OpenAI/Retell are English-only.
+  const multilingual = provider === 'sarvam';
   const [consent, setConsent] = useState(false);
   const [log, setLog] = useState<Msg[]>([]);
   const [status, setStatus] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
@@ -97,7 +100,13 @@ const PatientIntake: React.FC = () => {
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
         if (res.ok && data.valid) {
-          if (data.language && ['te-IN', 'hi-IN', 'en-IN'].includes(data.language)) setLanguage(data.language);
+          if (data.provider) setProvider(data.provider);
+          // Force a valid language for the provider: English-only providers → English; Sarvam →
+          // te/hi only (fall back to Telugu if a stale link stored English).
+          let forced = data.language;
+          if (data.provider && data.provider !== 'sarvam') forced = 'en-IN';
+          else if (data.provider === 'sarvam' && data.language === 'en-IN') forced = 'te-IN';
+          if (forced && ['te-IN', 'hi-IN', 'en-IN'].includes(forced)) setLanguage(forced);
           setPhase('consent');
         } else {
           setBlocked({ title: titleForError(data.error), message: data.message || 'This link cannot be used.' });
@@ -279,7 +288,7 @@ const PatientIntake: React.FC = () => {
 
             <label className="form-label fw-semibold">{t.langLabel}</label>
             <div className="btn-group w-100 mb-3" role="group">
-              {LANG_OPTIONS.map(opt => (
+              {LANG_OPTIONS.filter(opt => multilingual ? opt.code !== 'en-IN' : opt.code === 'en-IN').map(opt => (
                 <button key={opt.code} type="button"
                   className={`btn ${language === opt.code ? 'btn-primary' : 'btn-outline-primary'} d-flex flex-column py-2`}
                   onClick={() => setLanguage(opt.code as Lang)}>

@@ -62,6 +62,9 @@ const IntakeLinks: React.FC = () => {
   const [genLanguage, setGenLanguage] = useState<'te-IN' | 'hi-IN' | 'en-IN'>('te-IN');
   const [generating, setGenerating] = useState(false);
   const [generatedUrl, setGeneratedUrl] = useState<string | null>(null);
+  const [provider, setProvider] = useState<string>(''); // configured AI provider (settings)
+  // Telugu/Hindi are only supported by the Sarvam pipeline; OpenAI/Retell are English-only.
+  const multilingual = provider === 'sarvam';
 
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
@@ -70,6 +73,22 @@ const IntakeLinks: React.FC = () => {
   const navigate = useNavigate();
 
   useEffect(() => { fetchLinks(); }, []);
+
+  // Load the configured provider so English-only providers (OpenAI/Retell) don't offer te/hi.
+  useEffect(() => {
+    fetch('/api/settings/config')
+      .then(r => r.ok ? r.json() : null)
+      .then(cfg => { if (cfg?.provider) setProvider(cfg.provider); })
+      .catch(() => {});
+  }, []);
+
+  // Keep the generated-link language valid: Sarvam offers te/hi only (no English); English-only
+  // providers (OpenAI/Retell) offer English only.
+  useEffect(() => {
+    if (!provider) return;
+    if (multilingual && genLanguage === 'en-IN') setGenLanguage('te-IN');
+    if (!multilingual && genLanguage !== 'en-IN') setGenLanguage('en-IN');
+  }, [provider, multilingual, genLanguage]);
 
   const fetchLinks = async (page = 1, limit = 25) => {
     try {
@@ -356,7 +375,7 @@ const IntakeLinks: React.FC = () => {
                     <div className="mb-2">
                       <label className="form-label fw-semibold">Language / భాష / भाषा</label>
                       <div className="btn-group w-100" role="group" aria-label="Language selection">
-                        {LANG_OPTIONS.map(opt => (
+                        {LANG_OPTIONS.filter(opt => multilingual ? opt.code !== 'en-IN' : opt.code === 'en-IN').map(opt => (
                           <button key={opt.code} type="button"
                             className={`btn ${genLanguage === opt.code ? 'btn-primary' : 'btn-outline-primary'} d-flex flex-column py-2`}
                             onClick={() => setGenLanguage(opt.code)}>

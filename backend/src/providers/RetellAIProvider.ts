@@ -27,6 +27,9 @@ class RetellAIProvider implements BaseProvider, WebCallProvider {
 
        const webCallResponse = await this.retellClient.call.createWebCall({
          agent_id: process.env.RETELLAI_AGENT_ID,
+         // Requires the agent's prompt in the Retell dashboard to reference
+         // {{medical_instructions}} — Retell has no per-call raw prompt override.
+         retell_llm_dynamic_variables: config.instructions ? { medical_instructions: config.instructions } : undefined,
        });
 
        // Store the call mapping

@@ -249,7 +249,7 @@ const Settings: React.FC = () => {
   ];
 
   const providerOptions = [
-    { value: 'openai', label: 'OpenAI Realtime' },
+    { value: 'openai', label: 'OpenAI (English)' },
     { value: 'retellai', label: 'RetellAI' },
     { value: 'sarvam', label: 'Sarvam AI (Telugu)' }
   ];

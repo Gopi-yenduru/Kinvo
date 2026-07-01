@@ -4,6 +4,7 @@ interface WebCallConfig {
   sessionId: string;
   agentId: string;
   apiKey?: string;
+  instructions?: string;
 }
 
 interface WebCallResponse {

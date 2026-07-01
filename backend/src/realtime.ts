@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import db from './database-manager.js';
-import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY, MEDICAL_INTAKE_INSTRUCTIONS, MEDICAL_INTAKE_INSTRUCTIONS_NEW } from './constants.js';
+import { RED_FLAG_PATTERNS, RED_FLAG_SEVERITY_MAP, RED_FLAG_SEVERITY, MEDICAL_INTAKE_INSTRUCTIONS_NEW } from './constants.js';
 import { BaseProvider } from './providers/BaseProvider.js';
 import ProviderFactory from './providers/ProviderFactory.js';
 
@@ -61,7 +61,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   private validateInstructions(instructions: string): string {
     if (!instructions || instructions.trim().length === 0) {
       console.warn('Empty instructions, using defaults');
-      return MEDICAL_INTAKE_INSTRUCTIONS;
+      return MEDICAL_INTAKE_INSTRUCTIONS_NEW;
     }
 
     // Truncate if too long (OpenAI has limits)
@@ -84,7 +84,7 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
         return cleaned;
       } catch (e2) {
         console.error('Still invalid after cleanup, using fallback');
-        return MEDICAL_INTAKE_INSTRUCTIONS;
+        return MEDICAL_INTAKE_INSTRUCTIONS_NEW;
       }
     }
   }

@@ -26,7 +26,7 @@ const Session: React.FC = () => {
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [pendingSentence, setPendingSentence] = useState<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
   const [speaker, setSpeaker] = useState<string>(''); // Current speaker indicator
-  const [provider, setProvider] = useState<string>('openai'); // AI provider type
+  const [provider, setProvider] = useState<string>(''); // AI provider type — from /api/settings/config, then the started session's response
   const [isSpeakingAgent, setIsSpeakingAgent] = useState<boolean>(false); // Track when agent is actively speaking
 
 
@@ -35,6 +35,8 @@ const Session: React.FC = () => {
   const [consentGiven, setConsentGiven] = useState<boolean>(false);
   const [showPatientForm, setShowPatientForm] = useState<boolean>(false);
   const [language, setLanguage] = useState<'te-IN' | 'hi-IN' | 'en-IN'>('te-IN'); // patient's chosen language
+  // Telugu/Hindi are only supported by the Sarvam pipeline; OpenAI/Retell are English-only.
+  const multilingual = provider === 'sarvam';
   const [phone, setPhone] = useState<string>(''); // phone / patient ID — key to recognise returning patients
   const [visitType, setVisitType] = useState<'new' | 'returning' | ''>(''); // first-time vs returning patient
   const pendingSentenceRef = useRef<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
@@ -48,6 +50,23 @@ const Session: React.FC = () => {
   const retellWebClientRef = useRef<RetellWebClient | null>(null);
   const voiceClientRef = useRef<VoiceClient | null>(null); // Sarvam voice loop (WS + mic + playback)
   const sessionStartTime = useRef<number | null>(null);
+
+  // Load the configured provider so the language picker can hide Telugu/Hindi when the
+  // provider is English-only (OpenAI/Retell). Falls back to showing all languages on error.
+  useEffect(() => {
+    fetch('/api/settings/config', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(cfg => { if (cfg?.provider) setProvider(cfg.provider); })
+      .catch(() => {});
+  }, [token]);
+
+  // Keep the selected language valid for the provider: Sarvam offers te/hi only (no English);
+  // English-only providers (OpenAI/Retell) offer English only.
+  useEffect(() => {
+    if (!provider) return;
+    if (multilingual && language === 'en-IN') setLanguage('te-IN');       // Sarvam: no English
+    if (!multilingual && language !== 'en-IN') setLanguage('en-IN');      // OpenAI/Retell: English only
+  }, [provider, multilingual, language]);
 
   // Timer effect
   useEffect(() => {
@@ -588,7 +607,8 @@ const Session: React.FC = () => {
     setErrorMessage('');
     setSessionDuration(0);
     sessionStartTime.current = null;
-    setProvider('openai'); // Reset to default provider
+    // provider is the clinic's configured AI provider (from /api/settings/config), not
+    // per-session state — leave it as-is so the language picker doesn't reset after a call.
     setSpeaker('');
     setTranscriptData(null);
     setShowTranscript(false);
@@ -1072,7 +1092,7 @@ const Session: React.FC = () => {
                         { code: 'te-IN', label: 'తెలుగు', sub: 'Telugu' },
                         { code: 'hi-IN', label: 'हिंदी', sub: 'Hindi' },
                         { code: 'en-IN', label: 'English', sub: 'English' },
-                      ] as const).map(opt => (
+                      ] as const).filter(opt => multilingual ? opt.code !== 'en-IN' : opt.code === 'en-IN').map(opt => (
                         <button
                           key={opt.code}
                           type="button"

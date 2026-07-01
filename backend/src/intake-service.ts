@@ -14,7 +14,7 @@
 import db from './database-manager.js';
 import realtimeManager from './realtime.js';
 import ProviderFactory from './providers/ProviderFactory.js';
-import { MEDICAL_INTAKE_INSTRUCTIONS } from './constants.js';
+import { MEDICAL_INTAKE_INSTRUCTIONS_NEW } from './constants.js';
 
 /** Tolerantly parse the settings.engine_map JSON into the per-language map the Sarvam pipeline
  *  reads. Returns undefined on null/bad JSON so the provider falls back to its env defaults. */
@@ -183,34 +183,44 @@ export async function createIntakeSession(opts: CreateIntakeSessionOptions): Pro
 
   // Initialize the realtime pipeline based on provider type.
   if (providerType === 'openai') {
+    // OpenAI's Realtime Beta API is retired, so the old speech-to-speech provider no longer
+    // connects. Instead we route the OpenAI provider through the SAME orchestrated pipeline as
+    // Sarvam, but with English forced — which makes every stage OpenAI (gpt-4o-transcribe STT →
+    // gpt-4o LLM → gpt-4o-mini-tts TTS). This reuses the working voice loop + WS contract.
+    realtimeManager.setProvider(ProviderFactory.getProvider('sarvam'));
     const config = {
       sessionId,
-      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
-      voice: setting?.voice || 'alloy',
+      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW,
+      voice: setting?.voice || 'coral',
       temperature: setting?.temperature || 0.6,
       maxResponseLength: setting?.max_response_length || 200,
-      model: setting?.model || 'gpt-4o-realtime-preview',
-      apiKey: setting?.openai_api_key || process.env.OPENAI_API_KEY
+      model: setting?.model || 'gpt-4o',
+      language: 'en-IN',                 // English pipeline = 100% OpenAI (STT/LLM/TTS)
+      patientId,
+      isReturning,
+      patientName: (isReturning && existingPatient?.name) ? existingPatient.name : undefined,
+      patientHistory: (isReturning && existingPatient?.medical_summary) ? existingPatient.medical_summary : undefined,
+      apiKey: process.env.SARVAM_API_KEY  // unused by the all-OpenAI English path
     };
     try {
       const conn = await realtimeManager.createRealtimeSession(config);
-      if (!conn) throw new Error('Realtime connection failed to initialize');
-      console.log(`📝 Session ${sessionId} started successfully with Realtime connection`);
+      if (!conn) throw new Error('OpenAI pipeline failed to initialize');
+      console.log(`📝 Session ${sessionId} started successfully with OpenAI pipeline`);
     } catch (error: any) {
-      console.error('Failed to create Realtime session:', error);
+      console.error('Failed to create OpenAI session:', error);
       await db.updateSessionStatus(sessionId, 'error');
       await db.insertAuditLog({ action: 'session_start_failed', details: JSON.stringify({ error: error.message }), session_id: sessionId, ip_address: ip });
       throw new IntakeSessionError(500, {
         error: 'Failed to create session',
         message: error.message,
-        details: 'Check your OpenAI API key and Realtime API access'
+        details: 'Check your OpenAI API key (OPENAI_API_KEY).'
       });
     }
   } else if (providerType === 'sarvam') {
     // Sarvam: orchestrated STT -> LLM -> TTS pipeline behind the same realtime contract.
     const config = {
       sessionId,
-      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS,
+      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW,
       voice: setting?.voice || 'anushka',
       temperature: setting?.temperature || 0.6,
       maxResponseLength: setting?.max_response_length || 200,
