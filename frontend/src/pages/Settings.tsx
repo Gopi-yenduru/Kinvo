@@ -29,7 +29,7 @@ const STT_ENGINE_OPTIONS = [
 ];
 const LLM_ENGINE_OPTIONS = [
   { value: 'sarvam', label: 'Sarvam (sarvam-30b)' },
-  { value: 'openai', label: 'OpenAI (gpt-4o-mini)' }
+  { value: 'openai', label: 'OpenAI (gpt-4o)' }
 ];
 const TTS_ENGINE_OPTIONS = [
   { value: 'sarvam', label: 'Sarvam (bulbul)' },
@@ -290,6 +290,77 @@ const Settings: React.FC = () => {
     );
   }
 
+  // Shared System Prompt (medical intake instructions) editor — used by both the OpenAI and
+  // Sarvam layouts. Only one provider renders at a time, so reusing the single editorRef is safe.
+  const systemPromptSection = (
+    <div className="settings-section">
+      <div className="section-header">
+        <h2>🏥 System Prompt</h2>
+        <div className="section-description">
+          Configure the medical intake system prompt and guidelines
+        </div>
+      </div>
+      <div className="settings-field">
+        <label className="field-label">
+          Medical Intake Instructions
+          {config.medicalInstructions && config.medicalInstructions === defaults.medicalInstructions && !modifiedFields.has('medicalInstructions') && (
+            <span className="field-indicator default-indicator">📋 Default</span>
+          )}
+          {modifiedFields.has('medicalInstructions') && (
+            <span className="field-indicator user-indicator">✏️ Modified</span>
+          )}
+        </label>
+
+        {/* Rich Text Formatting Toolbar */}
+        <div className="rich-text-toolbar">
+          <button type="button" className="format-btn" onClick={() => formatText('bold')} title="Bold">
+            <strong>B</strong>
+          </button>
+          <button type="button" className="format-btn" onClick={() => formatText('italic')} title="Italic">
+            <em>I</em>
+          </button>
+          <button type="button" className="format-btn" onClick={() => formatText('underline')} title="Underline">
+            <u>U</u>
+          </button>
+          <button type="button" className="format-btn" onClick={() => formatText('insertUnorderedList')} title="Bullet List">
+            •
+          </button>
+          <button type="button" className="format-btn" onClick={() => formatText('insertOrderedList')} title="Numbered List">
+            1.
+          </button>
+        </div>
+
+        {/* Rich Text Editor */}
+        <div
+          ref={editorRef}
+          className={`field-input instructions-editor ${!config.medicalInstructions ? 'empty' : ''}`}
+          contentEditable
+          dangerouslySetInnerHTML={{ __html: config.medicalInstructions ? config.medicalInstructions.replace(/\n/g, '<br>') : '<span class="editor-placeholder">Enter the medical intake instructions...</span>' }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { return; }
+          }}
+          onBlur={() => {
+            if (editorRef.current) {
+              const html = editorRef.current.innerHTML;
+              const plainText = getPlainText(html);
+              handleInputChange('medicalInstructions', plainText);
+            }
+          }}
+          suppressContentEditableWarning={true}
+        />
+
+        <div className="field-meta">
+          <span className="character-count">
+            {config.medicalInstructions.length} characters
+          </span>
+          <span className="word-count">
+            {config.medicalInstructions.split(/\s+/).filter(word => word.length > 0).length} words
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="settings-page">
       <div className="page-title">
@@ -429,6 +500,9 @@ const Settings: React.FC = () => {
           </div>
         )}
 
+        {/* System Prompt — shown for Sarvam too (at the bottom), same editor as OpenAI. */}
+        {config.provider === 'sarvam' && systemPromptSection}
+
         {/* OpenAI-specific sections */}
         {config.provider === 'openai' && (
           <>
@@ -484,102 +558,7 @@ const Settings: React.FC = () => {
               </div>
             </div>
 
-            {/* System Prompt Configuration */}
-            <div className="settings-section">
-              <div className="section-header">
-                <h2>🏥 System Prompt</h2>
-                <div className="section-description">
-                  Configure the medical intake system prompt and guidelines
-                </div>
-              </div>
-              <div className="settings-field">
-                <label className="field-label">
-                  Medical Intake Instructions
-                  {config.medicalInstructions && config.medicalInstructions === defaults.medicalInstructions && !modifiedFields.has('medicalInstructions') && (
-                    <span className="field-indicator default-indicator">📋 Default</span>
-                  )}
-                  {modifiedFields.has('medicalInstructions') && (
-                    <span className="field-indicator user-indicator">✏️ Modified</span>
-                  )}
-                </label>
-
-                {/* Rich Text Formatting Toolbar */}
-                <div className="rich-text-toolbar">
-                  <button
-                    type="button"
-                    className="format-btn"
-                    onClick={() => formatText('bold')}
-                    title="Bold"
-                  >
-                    <strong>B</strong>
-                  </button>
-                  <button
-                    type="button"
-                    className="format-btn"
-                    onClick={() => formatText('italic')}
-                    title="Italic"
-                  >
-                    <em>I</em>
-                  </button>
-                  <button
-                    type="button"
-                    className="format-btn"
-                    onClick={() => formatText('underline')}
-                    title="Underline"
-                  >
-                    <u>U</u>
-                  </button>
-                  <button
-                    type="button"
-                    className="format-btn"
-                    onClick={() => formatText('insertUnorderedList')}
-                    title="Bullet List"
-                  >
-                    •
-                  </button>
-                  <button
-                    type="button"
-                    className="format-btn"
-                    onClick={() => formatText('insertOrderedList')}
-                    title="Numbered List"
-                  >
-                    1.
-                  </button>
-                </div>
-
-                {/* Rich Text Editor */}
-                <div
-                  ref={editorRef}
-                  className={`field-input instructions-editor ${!config.medicalInstructions ? 'empty' : ''}`}
-                  contentEditable
-                  dangerouslySetInnerHTML={{ __html: config.medicalInstructions ? config.medicalInstructions.replace(/\n/g, '<br>') : '<span class="editor-placeholder">Enter the medical intake instructions...</span>' }}
-                  onKeyDown={(e) => {
-                    // Ensure Enter key works for new lines
-                    if (e.key === 'Enter') {
-                      // Allow default behavior for Enter
-                      return;
-                    }
-                  }}
-                  onBlur={() => {
-                    if (editorRef.current) {
-                      const html = editorRef.current.innerHTML;
-                      const plainText = getPlainText(html);
-                      handleInputChange('medicalInstructions', plainText);
-                    }
-                  }}
-                  suppressContentEditableWarning={true}
-                />
-
-                <div className="field-meta">
-                  <span className="character-count">
-                    {config.medicalInstructions.length} characters
-                  </span>
-                  <span className="word-count">
-                    {config.medicalInstructions.split(/\s+/).filter(word => word.length > 0).length} words
-                  </span>
-                </div>
-              </div>
-            </div>
+            {systemPromptSection}
           </>
         )}
 

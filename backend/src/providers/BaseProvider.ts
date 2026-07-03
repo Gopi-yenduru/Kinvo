@@ -30,8 +30,9 @@ interface BaseProvider {
   getFunctionTools(): any[];
   getSession(sessionId: string): WebSocket | null;
   getSessionTokenUsage(sessionId: string): any;
-  /** Optional: user-initiated barge-in — abort the agent's current spoken turn. */
-  interrupt?(sessionId: string): void;
+  /** Optional: user-initiated barge-in — abort the agent's current spoken turn.
+   *  `source` distinguishes a voice talk-over ('voice') from the manual mic button ('manual'). */
+  interrupt?(sessionId: string, source?: string): void;
 }
 
 export type { BaseProvider, RealtimeConfig };

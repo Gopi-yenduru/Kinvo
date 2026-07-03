@@ -392,8 +392,8 @@ private saveAgentTranscriptImmediate(sessionId: string, transcript: string, ts: 
   }
 
   // User-initiated barge-in: abort the agent's current spoken turn (if supported).
-  interrupt(sessionId: string) {
-    return this.provider.interrupt?.(sessionId);
+  interrupt(sessionId: string, source?: string) {
+    return this.provider.interrupt?.(sessionId, source);
   }
 
   // Old implementation

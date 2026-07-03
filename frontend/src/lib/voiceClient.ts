@@ -11,7 +11,7 @@
  *   • Playback   — StreamingPcmPlayer schedules incoming PCM chunks sample-accurately and
  *                  gaplessly, so audio is smooth and starts the instant the first chunk
  *                  arrives (low latency) instead of waiting for the whole reply.
- *   • Barge-in   — VOICE talk-over: a local EchoSafeVad detects sustained real speech over
+ *   • Barge-in   — VOICE talk-over: a local BargeInDetector detects sustained real speech over
  *                  the agent (echo-cancelled mic + adaptive floor + sustained frames), then
  *                  stops playback, tells the backend to abort, and flushes a short pre-roll
  *                  so the patient's first words aren't lost. interrupt() also serves the
@@ -40,15 +40,19 @@ const PLAYBACK_SAMPLE_RATE = 24000; // must match the backend TTS output rate
 const MIC_FRAME_SIZE = 2048;        // ~85 ms — finer granularity for snappy barge-in detection
 
 // ── Voice barge-in (talk-over) tuning ──────────────────────────────────────────────
-// The mic stays OPEN while the agent speaks. We trust the browser echo canceller to strip
-// the agent's own voice, then a local energy VAD with an ADAPTIVE floor + a SUSTAINED-speech
-// requirement decides the patient is really talking over the agent (not residual echo or a
-// transient noise) before interrupting. Raise these if barge-in is too eager; lower if sluggish.
-const BARGE_MIN_RMS = 0.045;        // absolute floor: speech must be at least this loud
-const BARGE_FLOOR_FACTOR = 2.2;     // …and this many× above the learned echo/noise residual
-const BARGE_FLOOR_MARGIN = 0.012;   // …plus this margin
-const BARGE_FRAMES_TO_TRIGGER = 3;  // sustained frames (~255 ms) before declaring barge-in
-const BARGE_PREROLL_MAX = 8;        // recent voiced frames flushed to STT so words aren't lost
+// The mic stays OPEN while the agent speaks. To decide the patient is really talking OVER the
+// agent (not residual echo of the agent's own voice), we compare the mic level to the agent's
+// LIVE PLAYBACK level, sampled in real time from the audio output (see playbackRms). The echo at
+// the mic is at most a fraction of what's currently playing, so:
+//   threshold = max(BARGE_MIN_RMS, playbackLevel * ECHO_RESIDUAL_FACTOR + BARGE_MARGIN)
+// This makes barge-in reliable in BOTH directions: during the agent's natural gaps between words
+// the playback level ≈ 0, so the threshold drops and the patient can break in easily; during loud
+// playback the threshold rises so echo can't trip it (only the patient's clearly-louder voice does).
+const BARGE_MIN_RMS = 0.035;        // base gate during silence/gaps (real speech easily exceeds this)
+const ECHO_RESIDUAL_FACTOR = 0.65;  // mic must beat this fraction of the LIVE playback level (echo residual)
+const BARGE_MARGIN = 0.015;         // small constant headroom above the echo estimate
+const BARGE_FRAMES_TO_TRIGGER = 4;  // sustained frames (~340 ms) of real over-threshold speech
+const BARGE_PREROLL_MAX = 10;       // recent voiced frames flushed to STT so words aren't lost
 
 /**
  * Gapless streaming player for raw little-endian PCM16 chunks. Each chunk is scheduled
@@ -116,29 +120,27 @@ class StreamingPcmPlayer {
 }
 
 /**
- * Echo-safe voice-activity detector for barge-in. Fed the RMS of each mic frame WHILE the
- * agent is speaking. It keeps an ADAPTIVE floor of the residual (post-echo-cancellation)
- * level and only reports a barge-in once speech stays clearly above that floor for a few
- * consecutive frames — so neither leftover echo nor a one-off noise can false-trigger.
+ * Barge-in detector referenced to the agent's LIVE playback level. Each mic frame WHILE the agent
+ * speaks is compared to a threshold derived from what the speakers are actually outputting right
+ * now (`echoLevel`), so residual echo can't trip it but the patient's real voice — especially in
+ * the agent's natural gaps, where echoLevel≈0 — does. Requires a few sustained frames of real
+ * over-threshold speech so a single click/cough doesn't interrupt.
  */
-class EchoSafeVad {
-  private floor = 0.01;   // learned residual/echo level
+class BargeInDetector {
   private voiced = 0;     // consecutive above-threshold frames
 
   reset(): void { this.voiced = 0; }
 
-  threshold(): number {
-    return Math.max(BARGE_MIN_RMS, this.floor * BARGE_FLOOR_FACTOR + BARGE_FLOOR_MARGIN);
-  }
-
-  /** Returns true when sustained human speech (talk-over) is detected. */
-  push(rms: number): boolean {
-    if (rms > this.threshold()) {
+  /** @param micRms  RMS of the current mic frame.
+   *  @param echoLevel  RMS the agent is playing out right now (the echo source).
+   *  @returns true once sustained talk-over is detected. */
+  push(micRms: number, echoLevel: number): boolean {
+    const threshold = Math.max(BARGE_MIN_RMS, echoLevel * ECHO_RESIDUAL_FACTOR + BARGE_MARGIN);
+    if (micRms > threshold) {
       this.voiced += 1;
       if (this.voiced >= BARGE_FRAMES_TO_TRIGGER) { this.voiced = 0; return true; }
     } else {
       this.voiced = 0;
-      this.floor = this.floor * 0.95 + rms * 0.05; // slowly learn the quiet/echo level
     }
     return false;
   }
@@ -151,6 +153,8 @@ export class VoiceClient {
   private processor: ScriptProcessorNode | null = null;
   private micSource: MediaStreamAudioSourceNode | null = null;
   private player: StreamingPcmPlayer | null = null;
+  private playbackAnalyser: AnalyserNode | null = null;   // taps the live agent playback (echo source)
+  private analyserBuf: Float32Array | null = null;
 
   private micEnabled = true;             // manual mute toggle (UI mic button)
   private agentHoldsFloor = false;       // true while status is thinking/speaking
@@ -159,7 +163,7 @@ export class VoiceClient {
   private readonly cb: VoiceClientCallbacks;
   // Voice barge-in (talk-over)
   private bargeInEnabled = true;
-  private readonly vad = new EchoSafeVad();
+  private readonly vad = new BargeInDetector();
   private preRoll: number[][] = [];      // recent voiced frames, flushed to STT on barge-in
 
   constructor(cb: VoiceClientCallbacks = {}) {
@@ -175,6 +179,12 @@ export class VoiceClient {
     const playbackGain = this.ctx.createGain();
     playbackGain.gain.value = 1.0;
     playbackGain.connect(this.ctx.destination);
+    // Tap the playback with an analyser so barge-in can read the LIVE output level (= echo source)
+    // in real time. It's a passive sink — no effect on what the patient hears.
+    this.playbackAnalyser = this.ctx.createAnalyser();
+    this.playbackAnalyser.fftSize = 1024;
+    this.analyserBuf = new Float32Array(this.playbackAnalyser.fftSize);
+    playbackGain.connect(this.playbackAnalyser);
     this.player = new StreamingPcmPlayer(this.ctx, playbackGain);
 
     // --- Microphone ------------------------------------------------------------
@@ -213,7 +223,7 @@ export class VoiceClient {
   interrupt(): void {
     this.player?.stop();
     this.agentHoldsFloor = false;
-    this.send({ type: 'interrupt' });
+    this.send({ type: 'interrupt', source: 'manual' });
   }
 
   /** End the session and tear down all audio + the socket. */
@@ -231,6 +241,7 @@ export class VoiceClient {
 
     this.ws = null; this.ctx = null; this.stream = null;
     this.processor = null; this.micSource = null; this.player = null;
+    this.playbackAnalyser = null; this.analyserBuf = null;
   }
 
   // ── internals ────────────────────────────────────────────────────────────────
@@ -239,22 +250,30 @@ export class VoiceClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.ctx) return;
 
     const input = e.inputBuffer.getChannelData(0);
-    const agentTalking = this.agentHoldsFloor || !!this.player?.isActive();
+    const agentSpeaking = !!this.player?.isActive();   // audio actually coming out of the speakers
 
-    if (agentTalking) {
+    // Agent is THINKING (holds the floor but nothing is playing yet): gate the mic but do NOT
+    // barge-in. There's no audio to interrupt, and treating the patient's trailing sound/breath as
+    // a barge-in here would abort the very response being generated (the "interrupt during thinking"
+    // bug that made the agent re-ask instead of answer). Just wait for it to start speaking.
+    if (this.agentHoldsFloor && !agentSpeaking) { this.vad.reset(); this.preRoll.length = 0; return; }
+
+    if (agentSpeaking) {
       // Full-duplex barge-in: listen for the patient talking OVER the agent. This audio is
       // NOT streamed to STT (it's mostly the agent's echo) — it only decides whether to
       // interrupt. We keep a short pre-roll of the patient's onset so, on barge-in, their
       // first words are flushed to STT and not clipped.
       if (!this.bargeInEnabled) return;          // half-duplex fallback
-      const level = this.rms(input);
-      if (level > this.vad.threshold()) {
+      const micLevel = this.rms(input);
+      const echoLevel = this.playbackRms();      // what the agent is playing right now
+      const threshold = Math.max(BARGE_MIN_RMS, echoLevel * ECHO_RESIDUAL_FACTOR + BARGE_MARGIN);
+      if (micLevel > threshold) {
         this.preRoll.push(this.toPcm16(input));
         if (this.preRoll.length > BARGE_PREROLL_MAX) this.preRoll.shift();
       } else {
         this.preRoll.length = 0;
       }
-      if (this.vad.push(level)) this.bargeIn();
+      if (this.vad.push(micLevel, echoLevel)) this.bargeIn();
       return;
     }
 
@@ -269,7 +288,7 @@ export class VoiceClient {
     this.player?.stop();
     this.agentHoldsFloor = false;
     this.vad.reset();
-    this.send({ type: 'interrupt' });
+    this.send({ type: 'interrupt', source: 'voice' });
     const roll = this.preRoll;
     this.preRoll = [];
     const rate = this.ctx?.sampleRate ?? PLAYBACK_SAMPLE_RATE;
@@ -277,6 +296,18 @@ export class VoiceClient {
   }
 
   private rms(buf: Float32Array): number {
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    return Math.sqrt(sum / buf.length);
+  }
+
+  /** RMS of the agent's live playback (the echo source), sampled from the output analyser. 0 when
+   *  nothing is playing — including the gaps between the agent's words, which is when it's easiest
+   *  (and correct) to let the patient break in. */
+  private playbackRms(): number {
+    const a = this.playbackAnalyser, buf = this.analyserBuf;
+    if (!a || !buf) return 0;
+    a.getFloatTimeDomainData(buf);
     let sum = 0;
     for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
     return Math.sqrt(sum / buf.length);

@@ -1798,7 +1798,7 @@ wss.on('connection', (ws: any, req: any) => {
           // User-initiated barge-in: abort the agent's current spoken turn.
           const sessionIdForInterrupt = ws.sessionId || currentSessionId;
           if (sessionIdForInterrupt && realtimeManager.getSession(sessionIdForInterrupt)) {
-            try { realtimeManager.interrupt(sessionIdForInterrupt); }
+            try { realtimeManager.interrupt(sessionIdForInterrupt, message.source); }
             catch (error: any) { console.error('Error handling interrupt:', error.message); }
           }
           break;

@@ -59,10 +59,11 @@ type SttEngine = 'sarvam' | 'openai';
 const OPENAI_STT_MODEL = (process.env.OPENAI_STT_MODEL || 'gpt-4o-transcribe').trim();
 // Server-side silence VAD for the OpenAI STT path (Sarvam gives us VAD signals; OpenAI transcription
 // does not, so we detect end-of-turn ourselves from mic energy). All override-able via env.
-const STT_VAD_RMS = Number(process.env.STT_VAD_RMS || 0.02);        // normalized [0..1] speech floor
-const STT_SILENCE_HANG_MS = Number(process.env.STT_SILENCE_HANG_MS || 600);  // trailing silence = turn end (lower = snappier replies)
-const STT_MIN_SPEECH_MS = Number(process.env.STT_MIN_SPEECH_MS || 300);      // ignore blips shorter than this
+const STT_VAD_RMS = Number(process.env.STT_VAD_RMS || 0.035);       // normalized [0..1] speech floor (above echo/noise)
+const STT_SILENCE_HANG_MS = Number(process.env.STT_SILENCE_HANG_MS || 500);  // trailing silence = turn end (lower = snappier replies)
+const STT_MIN_SPEECH_MS = Number(process.env.STT_MIN_SPEECH_MS || 450);      // need this much real speech before finalizing (rejects echo/noise blips)
 const STT_MAX_UTTERANCE_MS = Number(process.env.STT_MAX_UTTERANCE_MS || 20000); // hard cap → force finalize
+const STT_NOISE_RESET_MS = Number(process.env.STT_NOISE_RESET_MS || 1200);   // clear a buffer that never reached real speech and went quiet (it was noise/echo)
 // gpt-4o (not -mini): the mini model is noticeably weaker at Telugu/Hindi and produces awkward,
 // over-literal replies. 4o is far more fluent and natural in Indic languages, which matters a lot
 // for a warm spoken intake. Override with OPENAI_LLM_MODEL in backend/.env if needed.
@@ -148,6 +149,15 @@ const NO_END_SIGNAL_FALLBACK_MS = 2500;
 // real speech is transcribed within this window (i.e. it was a false trigger — a cough, a
 // door, residual echo), the agent re-asks its question instead of going silent.
 const RESUME_AFTER_INTERRUPT_MS = 3500;
+
+// Echo-settle: when the agent finishes speaking and hands the floor to the patient, ignore mic /
+// STT input for this brief window so the TAIL of the agent's own audio (room reverb / playback
+// still draining) isn't transcribed as a spurious tiny "patient turn". Does NOT apply to a
+// barge-in hand-off (there the patient is already talking and we want their words immediately).
+const FLOOR_SETTLE_MS = 450;
+// Ignore a finalized utterance shorter than this — almost certainly residual echo or a noise
+// blip, not a real answer (kept low so genuine short answers like "అవును"/"18" still pass).
+const MIN_UTTERANCE_CHARS = 2;
 
 // Speakers that belong to bulbul:v3 — everything else uses bulbul:v2.
 const V3_SPEAKERS = new Set([
@@ -345,6 +355,7 @@ interface SarvamSession {
   lastSegment: string;       // last appended segment (de-dupes repeated STT data frames)
   endSpeechSeen: boolean;    // Sarvam VAD fired END_SPEECH for the current utterance
   endTurnTimer: NodeJS.Timeout | null; // safety-net only (END_SPEECH didn't arrive)
+  floorGuardUntil: number;   // ignore mic/STT until this ts (echo-settle after the agent speaks)
   // Barge-in resume: re-ask if a talk-over interrupt turns out to be a false trigger
   lastAgentReply: string;    // the last question the agent asked (to re-speak on a false barge-in)
   lastAgentTone: ToneKey;    // its tone, so the re-spoken line keeps the same emotion
@@ -366,12 +377,18 @@ class SarvamProvider implements BaseProvider {
   private sessions = new Map<string, SarvamSession>();
   private openai: OpenAI | null = null;   // lazily created; used for hi/en expressive TTS
 
-  /** Lazy OpenAI client for the expressive (gpt-4o-mini-tts) hi/en voice path. */
+  /** Lazy OpenAI client for the English/Hindi OpenAI pipeline (STT + LLM + TTS). Configured with a
+   *  voice-appropriate per-request timeout and automatic retries so a transient network blip (common
+   *  on high-latency links to OpenAI) retries instead of silently dropping the turn. */
   private getOpenAI(): OpenAI {
     if (!this.openai) {
       const key = process.env.OPENAI_API_KEY;
-      if (!key) throw new Error('OPENAI_API_KEY is required for the Hindi/English expressive voice.');
-      this.openai = new OpenAI({ apiKey: key });
+      if (!key) throw new Error('OPENAI_API_KEY is required for the English/Hindi OpenAI pipeline.');
+      this.openai = new OpenAI({
+        apiKey: key,
+        timeout: Number(process.env.OPENAI_TIMEOUT_MS || 20000), // fail a stuck request in 20s, then retry
+        maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 3)  // auto-retry timeouts / 429 / 5xx / conn errors
+      });
     }
     return this.openai;
   }
@@ -601,6 +618,7 @@ class SarvamProvider implements BaseProvider {
       lastSegment: '',
       endSpeechSeen: false,
       endTurnTimer: null,
+      floorGuardUntil: 0,
       lastAgentReply: '',
       lastAgentTone: 'calm',
       resumeTimer: null,
@@ -704,11 +722,19 @@ class SarvamProvider implements BaseProvider {
 
   /** Barge-in (talk-over OR mic-button): abort the current spoken turn and hand the floor
    *  back to the patient. Self-heals: if no real speech follows (false trigger), re-ask. */
-  interrupt(sessionId: string): void {
+  interrupt(sessionId: string, source?: string): void {
     const s = this.sessions.get(sessionId);
     if (!s || s.ended) return;
     if (s.status !== 'speaking' && s.status !== 'thinking') return;
-    console.log(`✋ Interrupt (${sessionId}) during ${s.status}`);
+    // A VOICE talk-over only makes sense while the agent is actually SPEAKING. During 'thinking'
+    // there is no audio to interrupt, so a voice barge-in there is a false trigger (the patient's
+    // trailing sound) — honoring it would abort the response being generated. Ignore it. The manual
+    // mic button (source !== 'voice') can still stop a thinking turn if the user really wants to.
+    if (source === 'voice' && s.status === 'thinking') {
+      console.log(`🛈 Ignoring voice barge-in during thinking (${sessionId})`);
+      return;
+    }
+    console.log(`✋ Interrupt (${sessionId}) during ${s.status}${source ? ` [${source}]` : ''}`);
     const aborted = s.turnId;
     s.turnId++;            // any pending TTS/chat callbacks for `aborted` become stale
     s.pendingUserText = null;
@@ -747,7 +773,7 @@ class SarvamProvider implements BaseProvider {
     await this.streamTts(s, s.lastAgentReply, turnId, isCurrent, s.lastAgentTone);
     if (isCurrent()) {
       this.send(s, { type: 'agent_audio_end', responseId: turnId });
-      this.setStatus(s, 'listening');
+      this.giveFloorToPatient(s);  // echo-settle + ensure STT after re-speaking
     }
   }
 
@@ -761,6 +787,8 @@ class SarvamProvider implements BaseProvider {
     // Half-duplex: ignore mic audio while the agent holds the floor. The frontend
     // already gates the mic; this is defence-in-depth so the agent never hears itself.
     if (s.status === 'speaking' || s.status === 'thinking') return;
+    // Echo-settle: drop the tail of the agent's own audio right after it finishes speaking.
+    if (Date.now() < s.floorGuardUntil) return;
 
     const pcm16: number[] = audioData?.pcm16;
     if (!Array.isArray(pcm16) || pcm16.length === 0) return;
@@ -813,6 +841,13 @@ class SarvamProvider implements BaseProvider {
       s.oaSilenceMs = 0;
     } else {
       s.oaSilenceMs += frameMs;
+    }
+
+    // Discard a buffer that never reached real speech and has since gone quiet — it was a noise/echo
+    // blip, not a turn. Prevents 3–9 char "phantom" turns and avoids sending near-silence to OpenAI.
+    if (s.oaSpeechMs < STT_MIN_SPEECH_MS && s.oaSilenceMs >= STT_NOISE_RESET_MS) {
+      s.oaAudio = []; s.oaSpeechMs = 0; s.oaSilenceMs = 0;
+      return;
     }
 
     const totalMs = (s.oaAudio.length / sampleRate) * 1000;
@@ -932,6 +967,9 @@ class SarvamProvider implements BaseProvider {
     // Half-duplex: while the agent holds the floor, ignore anything from STT (it can
     // only be echo of the agent's own voice) so it can't trigger a spurious turn.
     if (s.status === 'thinking' || s.status === 'speaking') return;
+    // Echo-settle: also ignore STT for a beat after the agent finishes, so the tail of its own
+    // audio (already in flight to Sarvam) can't register as a tiny fake patient turn.
+    if (Date.now() < s.floorGuardUntil) return;
 
     if (msg?.type === 'events') {
       const signal = msg?.data?.signal_type;
@@ -983,11 +1021,18 @@ class SarvamProvider implements BaseProvider {
     const s = this.sessions.get(sessionId);
     if (!s || s.ended) return;
     this.clearEndTurnTimer(s);
-    this.clearResumeTimer(s);  // real speech arrived → no need to re-ask
-    s.endSpeechSeen = false;
     const text = s.utterance.trim();
     s.utterance = '';
     s.lastSegment = '';
+    s.endSpeechSeen = false;
+    // Drop echo/noise blips: an ultra-short "utterance", or anything captured during the echo-settle
+    // window right after the agent spoke, is almost certainly the agent's own tail — NOT a real
+    // answer. Ignore it and leave the floor with the patient (don't clear the barge-in resume).
+    if (text.length < MIN_UTTERANCE_CHARS || Date.now() < s.floorGuardUntil) {
+      if (text) console.log(`🔇 Dropping echo/noise blip (${sessionId}): ${text.length} chars`);
+      return;
+    }
+    this.clearResumeTimer(s);  // real speech arrived → no need to re-ask
     if (!text) return;
 
     // PHI: log length only, never the text.
@@ -1133,7 +1178,7 @@ class SarvamProvider implements BaseProvider {
       if (isCurrent()) this.send(s, { type: 'error', message: 'Agent failed to respond.' });
     } finally {
       if (isCurrent() && !completing) {
-        this.setStatus(s, 'listening');
+        this.giveFloorToPatient(s);  // listening + echo-settle guard + ensure STT is connected
         // Process a patient utterance that arrived mid-turn (rare with mic gating).
         if (s.pendingUserText && !s.ended) {
           const next = s.pendingUserText;
@@ -1186,7 +1231,7 @@ class SarvamProvider implements BaseProvider {
         let args: any = {};
         try { args = JSON.parse(call?.function?.arguments || '{}'); } catch { /* ignore */ }
         const result = await this.handleToolCall(sessionId, name, args);
-        if (name === 'end_session') shouldEnd = true; // patient asked to stop early
+        if (name === 'end_session' && this.shouldHonorEndSession(s, args)) shouldEnd = true;
         messages.push({ role: 'tool', tool_call_id: call.id, name, content: JSON.stringify(result) });
       }
 
@@ -1271,7 +1316,17 @@ class SarvamProvider implements BaseProvider {
     try {
       while (true) {
         if (!isCurrent()) break;
-        const { done, value } = await reader.read();
+        let chunk: { done: boolean; value: any };
+        try {
+          chunk = await reader.read();
+        } catch (e) {
+          // A mid-stream read error AFTER we've already sent audio must NOT bubble up — the caller
+          // would retry and replay the whole reply (duplicate/overlapping voice). Stop cleanly
+          // instead; only rethrow if nothing has played yet so a fresh attempt can run.
+          if (gotAudio) break;
+          throw e;
+        }
+        const { done, value } = chunk;
         if (done) break;
         if (value && value.length) {
           const buf = Buffer.concat([leftover, Buffer.from(value)]);
@@ -1413,6 +1468,12 @@ class SarvamProvider implements BaseProvider {
   private sanitizeForSpeech(text: string): string {
     if (!text) return '';
     let t = text
+      // Strip a LEAKED tool/function call the model sometimes writes as plain TEXT instead of a
+      // proper structured call, e.g. `functions.endsession({ consent_given: true, reason: "..." })`
+      // or a bare `end_session({...})` — otherwise it gets spoken/shown in the closing line.
+      .replace(/\bfunctions?\s*\.\s*\w+\s*\([\s\S]*?\)\s*;?/gi, '')
+      .replace(/\b(?:end[_\s]?session|red[_\s]?flag[_\s]?detected)\s*\([\s\S]*?\)\s*;?/gi, '')
+      .replace(/<\/?function[^>]*>/gi, '')          // stray <function=...> / </function> tags
       .replace(/[*_#`>]/g, '')
       .replace(/^\s*[\wఅ-౯ఀ-౿\s]{0,25}:\s*/, '')   // a short leading "Name:" label
       .replace(/\n{2,}/g, ' ')
@@ -1495,6 +1556,18 @@ class SarvamProvider implements BaseProvider {
     this.send(s, { type: 'red_flag', symptoms: text, severity });
   }
 
+  /** Decide whether to actually END the session on an LLM `end_session` tool call. The backend
+   *  drives real completion deterministically by the intake plan, so the tool is only for a
+   *  genuine patient-initiated stop or when the interview is essentially done. This guards against
+   *  weaker models (e.g. gpt-4o-mini) that prematurely fire end_session mid-interview. */
+  private shouldHonorEndSession(s: SarvamSession, args: any): boolean {
+    const reason = String(args?.reason || '').toLowerCase();
+    const nearComplete = s.questionIndex >= s.plan.length - 1;
+    if (reason === 'patient_request' || reason === 'patient_uncomfortable' || nearComplete) return true;
+    console.warn(`⚠️ Ignoring premature end_session (reason="${reason}", q#${s.questionIndex + 1}/${s.plan.length})`);
+    return false;
+  }
+
   private async handleToolCall(sessionId: string, name: string, args: any): Promise<any> {
     try {
       switch (name) {
@@ -1522,6 +1595,17 @@ class SarvamProvider implements BaseProvider {
     if (s.status === state) return;
     s.status = state;
     this.send(s, { type: 'status', state });
+  }
+
+  /** Natural hand-off of the floor to the patient after the agent finishes speaking. Adds an
+   *  echo-settle guard (so the agent's own audio tail isn't transcribed as a tiny fake turn) and
+   *  proactively (re)opens the Sarvam STT socket (it idle-closes during long agent turns, which
+   *  otherwise drops the patient's first words). Use this instead of setStatus('listening') on a
+   *  NORMAL turn end — NOT for a barge-in, where the patient's pre-roll must go through immediately. */
+  private giveFloorToPatient(s: SarvamSession): void {
+    s.floorGuardUntil = Date.now() + FLOOR_SETTLE_MS;
+    if (s.sttEngine === 'sarvam') this.ensureStt(s).catch(() => {});
+    this.setStatus(s, 'listening');
   }
 
   private send(s: SarvamSession, payload: any): void {
