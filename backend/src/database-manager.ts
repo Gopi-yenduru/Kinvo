@@ -663,6 +663,24 @@ export class DataService {
         return removed;
     }
 
+    /** Admin: delete ALL patient records plus every session/visit/data belonging to a patient
+     *  (no FK cascade in this schema). Anonymous, patient-less sessions are left untouched.
+     *  Returns the number of patients removed. */
+    public async deleteAllPatients(): Promise<number> {
+        const before = await this.runQuery<{ c: number }>(`SELECT COUNT(*) AS c FROM patients`).catch(() => []);
+        const removed = before[0]?.c || 0;
+        // Child rows of patient-owned sessions first, then those sessions, then the patients.
+        const patientSessions = `SELECT id FROM sessions WHERE patient_id IS NOT NULL AND patient_id <> 0`;
+        const childTables = ['conversation_logs', 'red_flag_events', 'intake_responses', 'reports', 'session_token_usage', 'fhir_resources'];
+        for (const t of childTables) {
+            await this.runQuery(`DELETE FROM ${t} WHERE session_id IN (${patientSessions})`).catch(() => { /* table may not exist */ });
+        }
+        await this.runQuery(`DELETE FROM sessions WHERE patient_id IS NOT NULL AND patient_id <> 0`).catch(() => {});
+        await this.runQuery(`DELETE FROM patients`).catch(() => { /* table may not exist on older schemas */ });
+        this.invalidateSessionCaches();
+        return removed;
+    }
+
     private invalidateSessionCaches(sessionId?: string): void {
         cacheService.invalidateByPattern(CACHE_PATTERNS.SESSIONS);
         cacheService.invalidateByPattern(CACHE_PATTERNS.SESSION_COUNTS);

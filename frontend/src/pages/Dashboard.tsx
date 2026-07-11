@@ -163,17 +163,20 @@ const Dashboard: React.FC = () => {
               </div>
             </div>
             <div className="col-12 col-lg-4">
-              <div className="dashboard-actions d-flex flex-column flex-sm-row gap-2 justify-content-lg-end">
-                <button className="btn btn-primary d-flex align-items-center justify-content-center gap-2" onClick={() => navigate('/session')}>
-                  <i className="fas fa-microphone"></i>
-                  <span className="d-none d-sm-inline">Start New Session</span>
-                  <span className="d-sm-none">New Session</span>
-                </button>
-                <button className="btn btn-outline-secondary d-flex align-items-center justify-content-center gap-2" onClick={() => navigate('/analytics')}>
-                  <i className="fas fa-chart-bar"></i>
-                  <span className="d-none d-sm-inline">Generate Report</span>
-                  <span className="d-sm-none">Reports</span>
-                </button>
+              <div className="dashboard-actions d-flex flex-column gap-2 align-items-lg-end">
+                {/* The voice-engine picker moved to Settings → AI Provider Selection. */}
+                <div className="d-flex flex-column flex-sm-row gap-2 justify-content-lg-end w-100">
+                  <button className="btn btn-primary d-flex align-items-center justify-content-center gap-2" onClick={() => navigate('/session')}>
+                    <i className="fas fa-microphone"></i>
+                    <span className="d-none d-sm-inline">Start New Session</span>
+                    <span className="d-sm-none">New Session</span>
+                  </button>
+                  <button className="btn btn-outline-secondary d-flex align-items-center justify-content-center gap-2" onClick={() => navigate('/analytics')}>
+                    <i className="fas fa-chart-bar"></i>
+                    <span className="d-none d-sm-inline">Generate Report</span>
+                    <span className="d-sm-none">Reports</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

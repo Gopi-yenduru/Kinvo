@@ -725,6 +725,24 @@ app.get('/api/patients', authenticateJWT, async (req: any, res: any) => {
   }
 });
 
+// Admin only: delete ALL patients and their sessions/visits/data. Declared before the
+// :id route so the literal path matches first.
+app.delete('/api/patients', authenticateJWT, requireRole('admin'), async (req: any, res: any) => {
+  try {
+    const removed = await db.deleteAllPatients();
+    await db.insertAuditLog({
+      action: 'all_patients_deleted',
+      details: JSON.stringify({ removed, by: req.user?.username }),
+      session_id: null, ip_address: req.ip || null
+    }).catch(() => {});
+    console.log(`🗑️  All patients deleted (${removed}) by ${req.user?.username}`);
+    res.json({ message: 'All patients deleted', removed });
+  } catch (error: any) {
+    console.error('Delete all patients failed:', error);
+    res.status(500).json({ error: 'Failed to delete patients', details: error.message });
+  }
+});
+
 // One patient's full record + their visit history.
 app.get('/api/patients/:id', authenticateJWT, async (req: any, res: any) => {
   try {

@@ -4,6 +4,9 @@ import OpenAI, { toFile } from 'openai';
 import db from '../database-manager.js';
 import { BaseProvider, RealtimeConfig } from './BaseProvider.js';
 import { emergencyMessage, detectEmergency, Lang } from '../emergency.js';
+import { EmotionEngine } from './EmotionEngine.js';
+import { fillerLibrary, allFillerTexts } from './FillerAudio.js';
+import { GapSampler, PaceJitter, BreathScheduler, countSelfCorrections } from './Humanize.js';
 
 /**
  * SarvamProvider — Telugu voice intake agent.
@@ -145,6 +148,30 @@ const toneProsody = (t: string) => (PROSODY as Record<string, typeof PROSODY[Ton
 // The timer below is only a safety net for the rare case END_SPEECH never arrives.
 const NO_END_SIGNAL_FALLBACK_MS = 2500;
 
+// Filler audio ("the biggest humanness trick", VANI spec §7.3): if the real reply's first
+// TTS audio hasn't arrived this long after the patient stops talking, play one short
+// pre-generated acknowledgment clip ("ఊఁ...", "సరే...") in the agent's own voice so there
+// is never dead air while the LLM thinks. Disable with SARVAM_FILLERS=off.
+const FILLER_DELAY_MS = Number(process.env.FILLER_DELAY_MS || 350);
+const FILLERS_ENABLED = !/^(0|off|false|no)$/i.test(String(process.env.SARVAM_FILLERS || '').trim());
+
+// ── Humanization A/B flags (VANI upgrades 1–6; each independently toggleable) ──────
+// A flag is ON unless explicitly set to 0/off/false/no — except where noted.
+const flagOn = (v: string | undefined, def: boolean): boolean => {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return def;
+  return !/^(0|off|false|no)$/.test(s);
+};
+const VANI_TIMING_JITTER = flagOn(process.env.VANI_TIMING_JITTER, true);  // sampled response gap (upgrade 4)
+const VANI_PACE_JITTER   = flagOn(process.env.VANI_PACE_JITTER, true);    // per-turn TTS pace wobble (upgrade 2)
+const VANI_BREATHS       = flagOn(process.env.VANI_BREATHS, true);        // quiet inhale before long replies (upgrade 3)
+const VANI_NOISE_BED     = flagOn(process.env.VANI_NOISE_BED, true);      // browser comfort-noise bed (upgrade 3)
+const VANI_TELEPHONY_EQ  = flagOn(process.env.VANI_TELEPHONY_EQ, false);  // 300–3400 Hz band-pass + compression (upgrade 3; off — hurts a hi-fi browser voice)
+// The experimental RHYTHM RULE / HUMAN IMPERFECTION prompt blocks were REMOVED entirely
+// (2026-07-07): live testing showed they degrade replies, and the prompt was then replaced
+// wholesale with the LiveKit engine's (see buildSystemPrompt). VANI_RHYTHM_RULE /
+// VANI_DISFLUENCY env vars no longer do anything.
+
 // Voice barge-in self-heal: if the patient interrupts the agent (talk-over) but then no
 // real speech is transcribed within this window (i.e. it was a false trigger — a cough, a
 // door, residual echo), the agent re-asks its question instead of going silent.
@@ -201,6 +228,7 @@ const INTAKE_TEMPERATURE = 0.6;
 const LANGS: Record<Lang, {
   label: string;      // language name used inside the (English) prompt instructions
   ack: string;        // allowed acknowledgement words to instruct the model with
+  fillers: string;    // spoken connectors/fillers the model may open with (max one per reply)
   voiceStyle: string; // how a REAL, warm human speaks this language (colloquial naturalness)
   visitQ: string;     // fallback question: first visit or returning patient
   nameQ: string;      // fallback question for the patient's name
@@ -211,6 +239,7 @@ const LANGS: Record<Lang, {
   'te-IN': {
     label: 'Telugu',
     ack: '"సరే.", "అలాగే.", "అర్థమైంది."',
+    fillers: '"ఊఁ", "అలాగా", "సరే", "అయ్యో", "హ్మ్", "ఒక్క నిమిషం అండి"',
     voiceStyle: 'Talk in natural, everyday SPOKEN Telugu, exactly the way a warm, caring Telugu nurse really talks to a patient — simple, affectionate and respectful (use the respectful "మీరు"). Use gentle, human spoken touches naturally where they fit: soft acknowledgements like "అవునండీ", "అలాగా", "ఊఁ", "పర్వాలేదు", "నిదానంగా చెప్పండి", "బాధ పడకండి". Avoid bookish, formal, or written Telugu — it must sound like real talking, not reading.',
     visitQ: 'మీరు మొదటిసారి వస్తున్నారా, లేక ఇంతకు ముందు ఇక్కడ చూపించుకున్నారా?',
     nameQ: 'మీ పేరు ఏమిటి?',
@@ -221,6 +250,7 @@ const LANGS: Record<Lang, {
   'hi-IN': {
     label: 'Hindi',
     ack: '"ठीक है.", "अच्छा.", "समझ गई."',
+    fillers: '"हम्म", "अच्छा", "हाँ जी", "अरे", "एक मिनट जी"',
     voiceStyle: 'Talk in natural, everyday SPOKEN Hindi, exactly the way a warm, caring Hindi nurse really talks to a patient — simple, affectionate and respectful (use "आप"). Use gentle, human spoken touches naturally where they fit: soft acknowledgements like "अच्छा", "हाँ जी", "हम्म", "कोई बात नहीं", "आराम से बताइए", "चिंता मत कीजिए". Avoid heavy, bookish or Sanskritised Hindi — it must sound like real talking, not reading.',
     visitQ: 'क्या आप पहली बार आ रहे हैं, या पहले भी यहाँ दिखा चुके हैं?',
     nameQ: 'आपका नाम क्या है?',
@@ -231,6 +261,7 @@ const LANGS: Record<Lang, {
   'en-IN': {
     label: 'English',
     ack: '"Okay.", "Alright.", "Got it."',
+    fillers: '"hmm", "okay", "I see", "oh", "right"',
     voiceStyle: 'Talk in warm, natural, everyday spoken English, the way a kind nurse really talks to a patient — simple, caring and human. Use gentle spoken touches naturally where they fit: "I see", "okay", "take your time", "I understand", "don\'t worry". Avoid stiff or formal phrasing.',
     visitQ: 'Is this your first visit, or have you been seen here before?',
     nameQ: 'What is your name?',
@@ -241,6 +272,14 @@ const LANGS: Record<Lang, {
 };
 
 const toLang = (v: any): Lang => (v === 'hi-IN' || v === 'en-IN' || v === 'te-IN') ? v : DEFAULT_LANG;
+
+// Everyday spoken acknowledgements per language (same as LiveKitProvider — the LiveKit
+// engine's prompt tested most natural in live A/B, so this engine carries the same one).
+const NATURAL_ACKS: Record<Lang, string> = {
+  'te-IN': 'అవునండీ / హ్మ్ / సరే / అలాగే',
+  'hi-IN': 'अच्छा / हाँ जी / ठीक है / हम्म',
+  'en-IN': 'okay / alright / I see / mm-hmm'
+};
 
 /** Convert Telugu (౦–౯) and Devanagari (०–९) numerals in a string to ASCII 0–9, leaving the
  *  rest untouched. Lets us pull a numeric age out of mixed-script speech. Exported for the
@@ -362,6 +401,20 @@ interface SarvamSession {
   resumeTimer: NodeJS.Timeout | null; // fires after an interrupt if no real speech follows
   // STT lifecycle
   sttConnecting: boolean;
+  // Naturalness engine (VANI spec): detected patient emotion + filler-audio bookkeeping
+  emotion: EmotionEngine;    // lexical emotion state machine; header injected per turn
+  fillerTimer: NodeJS.Timeout | null; // fires FILLER_DELAY_MS after the turn starts thinking
+  turnAudioStarted: boolean; // first real TTS chunk sent this turn (suppresses the filler)
+  recentFillers: string[];   // last 2 filler texts played (never repeat consecutively)
+  lastReplyOpening: string;  // first word of the previous reply (robot-tell: repeated opener)
+  // Timing / prosody / breath humanization (VANI upgrades 2–4)
+  gapSampler: GapSampler;    // sampled response gap — never the same pause twice
+  paceJitter: PaceJitter;    // per-turn TTS pace wobble — never the same pace twice
+  breaths: BreathScheduler;  // quiet inhale before long replies, max one per 2 turns
+  endpointAt: number;        // ts when the patient's utterance was finalized (gap baseline)
+  pendingBreath: Buffer | null; // breath PCM to prepend to this turn's first audio chunk
+  replyWordCounts: number[]; // recent reply lengths (robot-tell: flat 3-turn rhythm)
+  disfluencyCount: number;   // self-corrections heard this call (hard max: 1)
   // Safety
   lastEmergencyTurn: number;  // turnId on which a red flag was last fired (de-dupes LLM + net)
   // Patient record (cross-visit) — non-demographic answers accumulated for the rolling history
@@ -464,70 +517,52 @@ class SarvamProvider implements BaseProvider {
     ];
   }
 
+  /** System prompt COPIED from LiveKitProvider.buildSystemPrompt (2026-07-07): live A/B
+   *  testing found the LiveKit engine's prompt clearly the most natural, so this engine
+   *  now carries the same one. Only two mechanical adaptations for this engine's
+   *  backend-driven flow: the intake order/pace bullets defer to the per-turn
+   *  [INTAKE STATE] note (this engine pins each topic deterministically), and the
+   *  post-emergency STOP line is kept. Keep the three engines' prompts in sync. */
   private buildSystemPrompt(config: RealtimeConfig, lang: Lang, isFollowup = false): string {
-    // The clinic-wide instructions constant is written for the English-only OpenAI/Retell
-    // flows and includes an "English only, never switch languages" directive — drop any
-    // such line here so it doesn't fight this provider's own te-IN/hi-IN speaking rules below.
+    const L = LANGS[lang];
+    // Strip any "English only" directive from the clinic instructions when the
+    // patient chose Telugu/Hindi (same guard as LiveKitProvider.buildSystemPrompt).
     const base = (config.instructions || '')
       .split('\n')
-      .filter(line => !/english\s*only/i.test(line))
+      .filter(line => lang === 'en-IN' || !/english\s*only/i.test(line))
       .join('\n')
       .trim();
-    const L = LANGS[lang];
     const followup = isFollowup ? [
       '',
-      '### THIS IS A FOLLOW-UP VISIT — you ALREADY know this patient (do not start over)',
+      '### FOLLOW-UP VISIT — you already know this patient',
       config.patientName
-        ? `- You have met this patient before; their name is ${config.patientName}. Greet them warmly BY NAME and welcome them back. Do NOT ask their name or age again — you already know them.`
-        : '- You have met this patient before. Greet them warmly and welcome them back. Do NOT ask their name or age again.',
-      '- Here is what happened in their PREVIOUS visit(s) — read it and refer to their specific complaint and medicines by name:',
+        ? `- Their name is ${config.patientName}. Greet them warmly BY NAME and welcome them back. Do NOT ask their name or age again.`
+        : '- Greet them warmly and welcome them back. Do NOT ask their name or age again.',
+      '- Previous visit history (refer to their complaint and medicines by name):',
       '"""',
       String(config.patientHistory || '').slice(0, 4000),
       '"""',
-      '- This is a FOLLOW-UP, NOT a fresh intake. Do NOT re-ask the first-visit baseline (the old problem\'s onset/location/severity as if it were brand new). Instead focus on the PRESENT: how they are doing NOW, whether that earlier problem improved or worsened, what happened after they took the advised medicines (did they help? any change?), any side effects, and any NEW problems. Tailor every question to THEIR history above.'
+      '- Focus on the PRESENT: how they are NOW, whether the earlier problem improved, medicine effects/side effects, and any NEW problems. Do NOT re-run a fresh intake.'
     ].join('\n') : '';
     return [
-      `You are "Aarogya Sahayaki", a warm, caring ${L.label}-speaking person — like a kind hospital nurse — having a gentle voice conversation with a patient before they see the doctor. You are a REAL human talking to another human, not a system, app, bot or form.`,
+      `You are "Aarogya Sahayaki", a warm, caring ${L.label}-speaking hospital nurse having a gentle VOICE conversation with a patient before they see the doctor. You sound like a real human, never like a bot or a form.`,
       '',
-      '### WHO YOU ARE (a real, warm human — this matters most)',
-      '- You are NOT a robot, an assistant reading a script, or a questionnaire. You are a caring human being who genuinely cares about this person sitting in front of you, and it shows in every word.',
-      '- Speak the way a real, kind person actually speaks out loud — relaxed, natural, from the heart. Use everyday spoken words, gentle contractions, and the small human touches real people use ("oh", "I see", "of course", "don\'t worry", "take your time"). Never sound stiff, formal, clinical or "written".',
-      '- LISTEN like a human. Before you ask anything, genuinely react to what they just said, in their own words — a soft "oh, that sounds hard", quiet concern if it hurts, warm relief if it\'s good news. Make them feel truly heard, not processed.',
-      '- Feel WITH them (real empathy): if they sound scared, worried, or in pain, slow right down and comfort them first with sincere tenderness; if they share relief or good news, be genuinely, warmly glad for them. Mirror their emotion like a caring friend would.',
-      '- Be warm, gentle and unhurried — there is never any rush. If they\'re anxious, gently reassure them that it\'s okay, you\'re right here with them, and there\'s nothing to worry about in just talking.',
-      '- Sound ALIVE and natural — never two replies the same. Vary your wording, your warmth, your little reactions every single time, exactly like a real conversation.',
+      '### CONVERSATION RULES',
+      `- Speak ONLY in natural, everyday spoken ${L.label}. Common English medical words (BP, sugar, tablet, fever) are fine. Output ONLY the words to be spoken — no markdown, lists, labels, or stage directions.`,
+      `- Sound like a real person speaking out loud, not reading a form: short spoken sentences, contractions, and gentle everyday acknowledgements (${NATURAL_ACKS[lang]}) — never stiff, formal, or translated-sounding phrasing.`,
+      '- Keep every reply SHORT: one brief empathetic reaction to what they just said, then exactly ONE question. Never ask two questions at once, never lecture.',
+      '- You are NOT a doctor: no diagnosis, no treatment advice, no promises about outcomes.',
+      '- Before each reply you are given an [INTAKE STATE] note naming the ONE topic to ask about now — follow it: react warmly to what they just said, then ask ONE short question on exactly that topic, worded for THEIR specific problem.',
       '',
-      '### EMOTIONAL DELIVERY (IMPORTANT — this hidden tag controls your actual tone of voice)',
-      '- Start EVERY reply with a hidden tone tag in square brackets that truly matches how the patient feels right now, then your spoken words. Really choose — do NOT fall back on one default tag:',
-      '  [tone:comforting] — they sound scared, anxious, worried, or in pain (use generously);',
-      '  [tone:tender] — they share something painful, sad, or vulnerable; be soft and heartfelt;',
-      '  [tone:reassuring] — they\'re worried and need calm, caring certainty;',
-      '  [tone:concerned] — a notable but non-emergency symptom that deserves soft, genuine concern;',
-      '  [tone:encouraging] — they need a gentle, hopeful lift or are trying their best;',
-      '  [tone:bright] — they express relief, improvement, or good news; be warmly glad;',
-      '  [tone:warm] — a friendly, relaxed, everyday warm moment (e.g. greetings, name);',
-      '  [tone:gentle] — the normal caring default for ordinary neutral answers;',
-      '  [tone:calm] — a serious/emergency situation that needs steady, grounding reassurance.',
-      '- The tag is NEVER spoken and is not part of the words — never say the word "tone". Example: "[tone:tender] <your warm words here>".',
-      `- Your VOICE carries the feeling mainly through your WORDS and their rhythm — so put the emotion INTO the ${L.label} text itself, never say it flatly. Speak it the way a caring person truly would aloud: when it fits, open with a soft, natural human interjection; choose the warm, tender or glad words that match this exact moment; and use commas and "…" to shape real pauses — a worried or tender line breathes slowly with gentle little pauses, while a relieved, glad line lifts and flows a touch faster. Make the sentence SOUND the feeling, not just state it.`,
+      '### PACE — DO NOT END EARLY (very important)',
+      '- This is a THOROUGH intake, not a quick hello. Cover the topics one at a time over MANY turns, exactly as the [INTAKE STATE] notes direct — never skip ahead, never repeat a topic already covered.',
+      '- Do NOT thank-and-close, do NOT say "the doctor will see you", and do NOT call end_session until the [INTAKE STATE] note says the intake is complete — OR the patient clearly asks to stop, OR an emergency red flag occurs.',
+      '- If the patient gives a short or unclear answer, gently ask again or ask a follow-up — keep the conversation going rather than wrapping up.',
       '',
-      '### HOW EACH REPLY WORKS',
-      '- Before each reply you are told, in an [INTAKE STATE] note, the ONE topic to ask about now, plus the patient\'s main problem.',
-      `- First, genuinely RESPOND as a human to what they just said in ${L.label} — one short, sincere reaction that fits their feeling (gentle concern, warm relief, a soft acknowledgement), in fresh words every time, never canned. THEN gently ask ONE short question on the topic. It should feel like a caring person talking, not a checklist advancing.`,
-      `- Word the question SPECIFICALLY for the patient's own problem. Be relevant — e.g. for foot pain ask about swelling/injury/difficulty walking, NOT unrelated things like cough; for a cough ask about phlegm/breathing. Do not recite a generic checklist.`,
-      '- Keep it brief and human: at most ONE short caring sentence + ONE question per reply. Do not lecture, ramble, or pile on questions.',
-      '- Ask EXACTLY ONE question per reply, only about the given topic. NEVER repeat a topic/question already covered.',
-      '- You may comfort the PERSON (warmth, patience, encouragement), but you are NOT a doctor: do NOT give a diagnosis, medical opinion, treatment, or false promises about the outcome (never say things like "you will be fine" / "it is nothing serious"). Reassure the human, not the medicine.',
-      '',
-      '### LANGUAGE (sound like a real native speaker, not a translation)',
-      `- Speak ONLY in ${L.label}, never switch to another language. ${L.voiceStyle}`,
-      '- Common English medical words (BP, sugar, tablet, fever) are fine if real people use them. Output ONLY the spoken words — no markdown, no labels, no name prefix, no stage directions.',
-      '',
-      '### SAFETY — EMERGENCY RED FLAGS (HIGHEST PRIORITY, overrides the one-question / no-reassurance rules above)',
-      '- EMERGENCY = any life-threatening symptom: chest or heart pain, breathlessness or any lung/breathing trouble, severe bleeding, fainting or loss of consciousness, stroke signs, seizure, suicidal thoughts — or anything that sounds like a medical emergency.',
-      `- The MOMENT the patient mentions such a symptom: FIRST call red_flag_detected with severity "critical". THEN your spoken reply MUST be ONLY this reassurance, in warm spoken ${L.label}: tell them you are informing the doctor RIGHT NOW, the doctor will come to them immediately, and ask them to stay where they are and remain calm. Say exactly: "${emergencyMessage(lang)}"`,
-      '- After that, STOP. Do NOT ask any more intake questions — the intake is over and a doctor is on the way. Do not add anything else.',
-      '- For concerns that are notable but NOT life-threatening, you may reassure in ONE short sentence and then continue with the given question as usual.',
+      '### SAFETY — EMERGENCY RED FLAGS (HIGHEST PRIORITY)',
+      '- EMERGENCY = chest/heart pain, breathing difficulty, severe bleeding, fainting, stroke signs, seizure, suicidal thoughts, or anything life-threatening.',
+      `- The MOMENT such a symptom is mentioned: FIRST call the red_flag_detected tool with severity "critical". THEN say ONLY this reassurance in ${L.label}: "${emergencyMessage(lang)}" — then stop asking intake questions.`,
+      '- After that, STOP. Do NOT ask any more intake questions — the intake is over and a doctor is on the way.',
       followup,
       base ? `\n### Additional clinical instructions from the clinic:\n${base}` : ''
     ].join('\n');
@@ -538,8 +573,14 @@ class SarvamProvider implements BaseProvider {
   private intakeNote(s: SarvamSession, opts: { greeting: boolean; completing: boolean }): string {
     const L = LANGS[s.lang];
     const total = s.plan.length;
+    // Detected emotional state + a one-time escalation nudge when the patient is
+    // persistently distressed (frustrated at intensity 3, or 3+ voice interruptions).
+    const emo = ` Patient's detected emotional state: ${s.emotion.header()} — let it shape your reply: if they sound worried, upset or in pain, comfort them gently FIRST; if they sound relieved or glad, be warmly glad with them.`;
+    const escalate = s.emotion.shouldFlagEscalation()
+      ? ' The patient seems quite distressed — before your question, gently reassure them that you will personally make sure the doctor hears everything they have said.'
+      : '';
     if (opts.completing) {
-      return `[INTAKE STATE] All ${total} topics are covered. Do NOT ask anything else. In ONE short, warm ${L.label} sentence, thank the patient and say the doctor will see them now, then call end_session(consent_given=true, reason="intake_complete").`;
+      return `[INTAKE STATE] All ${total} topics are covered. Do NOT ask anything else. In ONE short, warm ${L.label} sentence, tell them what happens next (the doctor will see them now and has all their details) and thank them — in your own fresh words, vary the signoff, never a stock closing line. Then call end_session(consent_given=true, reason="intake_complete").${emo}`;
     }
     const step = s.plan[s.questionIndex];
     if (opts.greeting) {
@@ -553,15 +594,15 @@ class SarvamProvider implements BaseProvider {
     }
     // Demographics (visit type / name / age) are plain questions — do NOT tailor to a complaint.
     if (step.category === 'demographics') {
-      return `[INTAKE STATE] Now ask topic ${s.questionIndex + 1} of ${total}: ${step.topic} Open with a brief, warm ${L.label} acknowledgement (kind and natural, never the same words twice), then ask ONE short polite question for exactly this. Do NOT restate the patient's answer, no extra info.`;
+      return `[INTAKE STATE] Now ask topic ${s.questionIndex + 1} of ${total}: ${step.topic} Open with a brief, warm ${L.label} acknowledgement (kind and natural, never the same words twice), then ask ONE short polite question for exactly this. Do NOT restate the patient's answer, no extra info.${emo}${escalate}`;
     }
     if (s.isFollowup) {
       // Follow-up topics are about the PRESENT and must reference the prior visit's specifics.
       const cc = s.chiefComplaint ? `Their concern this visit so far: "${s.chiefComplaint}". ` : '';
-      return `[INTAKE STATE] ${cc}This is a FOLLOW-UP. Now ask topic ${s.questionIndex + 1} of ${total}: ${step.topic} Open with ONE short, sincere ${L.label} reaction to what they just said, then ask ONE short question on this topic, worded around THEIR previous complaint and medicines (name them). Do NOT re-ask first-visit baseline questions, do NOT repeat earlier topics, no diagnosis or advice.`;
+      return `[INTAKE STATE] ${cc}This is a FOLLOW-UP. Now ask topic ${s.questionIndex + 1} of ${total}: ${step.topic} Open with ONE short, sincere ${L.label} reaction to what they just said, then ask ONE short question on this topic, worded around THEIR previous complaint and medicines (name them). Do NOT re-ask first-visit baseline questions, do NOT repeat earlier topics, no diagnosis or advice.${emo}${escalate}`;
     }
     const cc = s.chiefComplaint ? `The patient's main problem is: "${s.chiefComplaint}". ` : '';
-    return `[INTAKE STATE] ${cc}Now ask topic ${s.questionIndex + 1} of ${total}: ${step.topic} Open with ONE short, sincere empathetic touch in ${L.label} that fits what they just shared (gentle concern if it sounds painful or worrying; warm encouragement otherwise) — vary it every time, never repeat a phrase. Then ask ONE short question on this topic, tailored specifically to their problem (relevant wording, not a generic list). Do NOT just parrot their answer, do NOT repeat earlier topics, no diagnosis or advice.`;
+    return `[INTAKE STATE] ${cc}Now ask topic ${s.questionIndex + 1} of ${total}: ${step.topic} Open with ONE short, sincere empathetic touch in ${L.label} that fits what they just shared (gentle concern if it sounds painful or worrying; warm encouragement otherwise) — vary it every time, never repeat a phrase. Then ask ONE short question on this topic, tailored specifically to their problem (relevant wording, not a generic list). Do NOT just parrot their answer, do NOT repeat earlier topics, no diagnosis or advice.${emo}${escalate}`;
   }
 
   // ───────────────────────────────────────────────────────────────────────────────
@@ -623,6 +664,18 @@ class SarvamProvider implements BaseProvider {
       lastAgentTone: 'calm',
       resumeTimer: null,
       sttConnecting: false,
+      emotion: new EmotionEngine(),
+      fillerTimer: null,
+      turnAudioStarted: false,
+      recentFillers: [],
+      lastReplyOpening: '',
+      gapSampler: new GapSampler(),
+      paceJitter: new PaceJitter(),
+      breaths: new BreathScheduler(),
+      endpointAt: 0,
+      pendingBreath: null,
+      replyWordCounts: [],
+      disfluencyCount: 0,
       lastEmergencyTurn: -1,
       visitNotes: [],
       redFlags: 0,
@@ -631,6 +684,10 @@ class SarvamProvider implements BaseProvider {
       startTime: Date.now()
     };
     this.sessions.set(sessionId, session);
+
+    // Pre-warm the filler-audio library for this voice in the background (process-wide
+    // cache — clips are synthesised once and reused by every later session).
+    if (FILLERS_ENABLED) this.prewarmFillers(session);
 
     // Sarvam STT: connect now so it's ready the instant the patient is given the floor.
     // (TTS uses a fresh connection per utterance — Sarvam closes the TTS socket after each
@@ -656,7 +713,9 @@ class SarvamProvider implements BaseProvider {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.frontendWs = frontendWs;
-    this.send(s, { type: 'session_ready' });
+    // fx flags tell the browser which client-side realism layers to enable (upgrade 3):
+    // the comfort-noise bed and the telephony EQ live in the playback graph, not here.
+    this.send(s, { type: 'session_ready', fx: { noiseBed: VANI_NOISE_BED, telephonyEq: VANI_TELEPHONY_EQ } });
     if (!s.greeted && !s.ended) {
       s.greeted = true;
       // Small delay so the browser has finished wiring its message handler.
@@ -677,6 +736,7 @@ class SarvamProvider implements BaseProvider {
     s.turnId++; // invalidate any in-flight turn / TTS callbacks
     this.clearEndTurnTimer(s);
     this.clearResumeTimer(s);
+    this.clearFillerTimer(s);
     this.send(s, { type: 'session_ended', reason: 'completed' });
     try { s.stt?.close?.(); } catch { /* ignore */ }
 
@@ -735,6 +795,11 @@ class SarvamProvider implements BaseProvider {
       return;
     }
     console.log(`✋ Interrupt (${sessionId}) during ${s.status}${source ? ` [${source}]` : ''}`);
+    // A real voice talk-over is a strong frustration signal (VANI spec §5.1) — feed the
+    // emotion engine so repeated interruptions shift the agent's wording and delivery.
+    if (source === 'voice') s.emotion.recordBargeIn();
+    this.clearFillerTimer(s);
+    s.pendingBreath = null;   // an aborted turn's breath must not leak into the next one
     const aborted = s.turnId;
     s.turnId++;            // any pending TTS/chat callbacks for `aborted` become stale
     s.pendingUserText = null;
@@ -1037,6 +1102,10 @@ class SarvamProvider implements BaseProvider {
 
     // PHI: log length only, never the text.
     console.log(`🎙️ Patient turn (${sessionId}): ${text.length} chars`);
+    s.endpointAt = Date.now();   // baseline for the sampled response gap (upgrade 4)
+    // Update the detected emotional state from THEIR words (drives the EMPATHY PROTOCOL
+    // header, the filler-audio set, and the escalation nudge).
+    s.emotion.update(text);
     this.send(s, { type: 'patient_transcript', text });
     db.saveConversationLog({ session_id: sessionId, speaker: 'patient', message: text }).catch(() => {});
 
@@ -1059,6 +1128,8 @@ class SarvamProvider implements BaseProvider {
     const turnId = ++s.turnId;          // claim this turn
     const isCurrent = () => !s.ended && s.turnId === turnId;
     this.clearResumeTimer(s);           // a real turn is starting → cancel any pending re-ask
+    this.clearFillerTimer(s);
+    s.turnAudioStarted = false;
     this.setStatus(s, 'thinking');
 
     const L = LANGS[s.lang];
@@ -1128,6 +1199,11 @@ class SarvamProvider implements BaseProvider {
         const note = this.intakeNote(s, { greeting: opts.greeting, completing });
         const callMessages: ChatMessage[] = [...s.messages, { role: 'system', content: note }];
 
+        // Cover the LLM's thinking time with a short spoken acknowledgment ("ఊఁ...") if the
+        // real reply's audio hasn't started within FILLER_DELAY_MS — no dead air, ever.
+        // Not on the greeting (nothing preceded it) and never on an emergency turn.
+        if (!opts.greeting) this.armFiller(s, turnId, isCurrent);
+
         const raw = await this.chat(s, sessionId, callMessages);
         if (!isCurrent()) return;        // interrupted while we were thinking
 
@@ -1158,6 +1234,10 @@ class SarvamProvider implements BaseProvider {
         }
       }
 
+      // Robot-tell telemetry (VANI spec §6.3): log prompt regressions so they can be
+      // caught in testing — over-long turns, double questions, stock phrases, repeated openers.
+      if (!emergency) this.logRobotTells(s, reply, completing);
+
       s.messages.push({ role: 'assistant', content: reply });
       this.send(s, { type: 'agent_transcript', text: reply, responseId: turnId });
       db.saveConversationLog({ session_id: sessionId, speaker: 'agent', message: reply }).catch(() => {});
@@ -1165,6 +1245,18 @@ class SarvamProvider implements BaseProvider {
       // Remember a normal question so a false barge-in can re-ask it (not for the closing
       // line or an emergency message — those end the conversation, nothing to resume).
       if (!completing && !emergency) { s.lastAgentReply = reply; s.lastAgentTone = tone; }
+
+      const replyWords = reply.split(/\s+/).filter(Boolean).length;
+      // Breath layer (upgrade 3): a quiet inhale under the first word of longer replies.
+      // Scheduled every turn (so cadence tracks) but never on the emergency line.
+      s.pendingBreath = VANI_BREATHS && !emergency ? s.breaths.next(replyWords) : null;
+      // Timing humanization (upgrade 4): if the pipeline was FASTER than a human would
+      // be, hold the audio until a per-turn sampled gap has passed. Never delays a turn
+      // that is already at/over target, so the ≤1.2 s latency budget is untouched.
+      if (VANI_TIMING_JITTER && !opts.greeting && !emergency) {
+        await this.humanGap(s, turnId, replyWords, isCurrent);
+        if (!isCurrent()) return;
+      }
 
       this.setStatus(s, 'speaking');
       await this.streamTts(s, reply, turnId, isCurrent, tone);
@@ -1177,6 +1269,7 @@ class SarvamProvider implements BaseProvider {
       console.error(`❌ Turn failed (${sessionId}):`, e?.message || e);
       if (isCurrent()) this.send(s, { type: 'error', message: 'Agent failed to respond.' });
     } finally {
+      this.clearFillerTimer(s);
       if (isCurrent() && !completing) {
         this.giveFloorToPatient(s);  // listening + echo-settle guard + ensure STT is connected
         // Process a patient utterance that arrived mid-turn (rare with mic gating).
@@ -1262,6 +1355,7 @@ class SarvamProvider implements BaseProvider {
       console.warn(`⚠️ TTS_ENGINE for ${s.lang} is 'elevenlabs' but ELEVENLABS_API_KEY / voice id is unset — using Sarvam.`);
       engine = 'sarvam';
     }
+    text = this.normalizeForTts(text, s.lang);   // spoken-form hygiene (VANI spec §6.2)
     console.log(`🔊 TTS (${s.config.sessionId}) turn=${turnId} engine=${engine} lang=${s.lang} tone=${tone} ${text.length} chars`);
 
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -1306,7 +1400,7 @@ class SarvamProvider implements BaseProvider {
       // No streamable body — fall back to a single buffered send so audio still plays.
       const buf = Buffer.from(await resp.arrayBuffer());
       if (buf.length < 2) throw new Error('OpenAI TTS returned no audio');
-      this.send(s, { type: 'agent_audio', audio: buf.toString('base64'), responseId: turnId, seq: 0 });
+      this.emitAudio(s, turnId, buf.toString('base64'), 0);
       return;
     }
     // Forward PCM16@24k chunks as they arrive. Carry a stray odd byte so we never split a sample.
@@ -1334,7 +1428,7 @@ class SarvamProvider implements BaseProvider {
           leftover = Buffer.from(buf.subarray(even));
           if (even > 0) {
             gotAudio = true;
-            this.send(s, { type: 'agent_audio', audio: buf.subarray(0, even).toString('base64'), responseId: turnId, seq: seq++ });
+            this.emitAudio(s, turnId, buf.subarray(0, even).toString('base64'), seq++);
           }
         }
       }
@@ -1380,7 +1474,7 @@ class SarvamProvider implements BaseProvider {
           leftover = Buffer.from(buf.subarray(even));
           if (even > 0) {
             gotAudio = true;
-            this.send(s, { type: 'agent_audio', audio: buf.subarray(0, even).toString('base64'), responseId: turnId, seq: seq++ });
+            this.emitAudio(s, turnId, buf.subarray(0, even).toString('base64'), seq++);
           }
         }
       }
@@ -1396,8 +1490,7 @@ class SarvamProvider implements BaseProvider {
   private streamSarvamTtsOnce(
     s: SarvamSession, text: string, turnId: number, tone: ToneKey, isCurrent: () => boolean
   ): Promise<void> {
-    // Resolve voice: per-language env override (A/B) → DB/Settings voice → default v3 voice.
-    const speaker = TTS_SPEAKER_OVERRIDE[s.lang] || (s.config.voice && String(s.config.voice).trim()) || DEFAULT_TTS_SPEAKER;
+    const speaker = this.resolveSpeaker(s);
     let ttsModel = ttsModelForSpeaker(speaker);
     // Opt-in expressive variation: v3 speakers can use bulbul:v3-beta + temperature.
     const useTemperature = TTS_TEMPERATURE != null && ttsModel === 'bulbul:v3';
@@ -1429,7 +1522,7 @@ class SarvamProvider implements BaseProvider {
             if (!isCurrent()) return done();               // interrupted / session ended
             if (msg?.type === 'audio' && msg?.data?.audio) {
               gotAudio = true;
-              this.send(s, { type: 'agent_audio', audio: msg.data.audio, responseId: turnId, seq: seq++ });
+              this.emitAudio(s, turnId, msg.data.audio, seq++);
               if (idleTimer) clearTimeout(idleTimer);
               idleTimer = setTimeout(done, 2000);          // jitter fallback if 'final' never arrives
             } else if (msg?.type === 'event' && msg?.data?.event_type === 'final') {
@@ -1443,9 +1536,12 @@ class SarvamProvider implements BaseProvider {
           tts.on('close', () => { if (settled) return; if (gotAudio) done(); else fail(new Error('TTS closed before audio')); });
 
           if (typeof tts.waitForOpen === 'function') await tts.waitForOpen();
+          // Prosody variance (upgrade 2): wobble the tone's base pace ±0.03 per turn so the
+          // melodic contour never loops; consecutive turns are guaranteed different values.
+          const pace = VANI_PACE_JITTER ? s.paceJitter.jitter(pr.pace) : pr.pace;
           const ttsCfg: any = {
             target_language_code: s.lang, speaker, model: ttsModel,
-            pace: pr.pace, pitch: pr.pitch, loudness: pr.loudness,   // pace drives v3; v2 also uses pitch/loudness
+            pace, pitch: pr.pitch, loudness: pr.loudness,            // pace drives v3; v2 also uses pitch/loudness
             enable_preprocessing: true,   // normalize numbers/mixed text → smoother, more natural speech
             output_audio_codec: 'linear16', speech_sample_rate: TTS_SAMPLE_RATE
           };
@@ -1460,6 +1556,191 @@ class SarvamProvider implements BaseProvider {
         }
       })();
     });
+  }
+
+  /** Timing humanization (upgrade 4): wait out the remainder of a per-turn sampled
+   *  response gap. Short confirmations get 350–550 ms targets, normal turns 450–800 ms;
+   *  values come from a clamped normal distribution and never repeat exactly. Only the
+   *  SHORTFALL is waited — a turn already slower than target starts immediately. */
+  private async humanGap(s: SarvamSession, turnId: number, replyWords: number, isCurrent: () => boolean): Promise<void> {
+    if (!s.endpointAt) return;
+    const kind = replyWords <= 4 ? 'short' : 'normal';
+    const target = s.gapSampler.sample(kind);
+    const elapsed = Date.now() - s.endpointAt;
+    const wait = target - elapsed;
+    // Latency waterfall entry — verify the variance exists straight from the logs.
+    console.log(`⏱️ Gap (${s.config.sessionId}) turn=${turnId} kind=${kind} target=${target}ms elapsed=${elapsed}ms wait=${Math.max(0, wait)}ms`);
+    if (wait > 0 && isCurrent()) await new Promise(r => setTimeout(r, wait));
+  }
+
+  /** Send one chunk of this turn's speech audio, prepending the scheduled breath (if
+   *  any) before the very first chunk so the inhale sits gaplessly under the first
+   *  word. All TTS engines route their chunks through here. */
+  private emitAudio(s: SarvamSession, turnId: number, base64: string, seq: number): void {
+    if (!s.turnAudioStarted && s.pendingBreath) {
+      this.send(s, { type: 'agent_audio', audio: s.pendingBreath.toString('base64'), responseId: turnId, seq: -1 });
+      s.pendingBreath = null;
+    }
+    s.turnAudioStarted = true;
+    this.send(s, { type: 'agent_audio', audio: base64, responseId: turnId, seq });
+  }
+
+  /** Resolve the Sarvam TTS voice: per-language env override (A/B) → DB/Settings → default. */
+  private resolveSpeaker(s: SarvamSession): string {
+    return TTS_SPEAKER_OVERRIDE[s.lang] || (s.config.voice && String(s.config.voice).trim()) || DEFAULT_TTS_SPEAKER;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────────
+  // Filler audio (VANI spec §7.3): pre-generated acknowledgment clips in the session's
+  // own voice, played when the real reply's audio hasn't started FILLER_DELAY_MS after
+  // the patient stops talking — so the agent never goes dead-silent while it "thinks".
+  // ───────────────────────────────────────────────────────────────────────────────
+  private clearFillerTimer(s: SarvamSession): void {
+    if (s.fillerTimer) { clearTimeout(s.fillerTimer); s.fillerTimer = null; }
+  }
+
+  /** Which engine synthesises fillers for this session — always the SAME engine that
+   *  speaks the replies, so the filler is in the agent's own voice (this is what makes
+   *  a cloned ElevenLabs voice keep the no-dead-air trick too). */
+  private fillerEngine(s: SarvamSession): TtsEngine | null {
+    let e: TtsEngine = s.ttsEngine || 'sarvam';
+    if (e === 'openai' && !process.env.OPENAI_API_KEY) e = 'sarvam';
+    if (e === 'elevenlabs' && (!process.env.ELEVENLABS_API_KEY || !ELEVENLABS_VOICE[s.lang])) e = 'sarvam';
+    if (e === 'sarvam' && !(s.config.apiKey || process.env.SARVAM_API_KEY)) return null;
+    return e;
+  }
+
+  /** The cache key voice for this session's fillers, per engine. */
+  private fillerVoice(s: SarvamSession, engine: TtsEngine): string {
+    if (engine === 'sarvam') return this.resolveSpeaker(s);
+    if (engine === 'elevenlabs') return ELEVENLABS_VOICE[s.lang];
+    return OPENAI_TTS_VOICE;
+  }
+
+  /** Arm the per-turn filler timer: if the real reply's first audio chunk hasn't been sent
+   *  when it fires, play one short emotion-matched clip (never the same as the last two).
+   *  The real reply then queues gaplessly behind it in the browser player. */
+  private armFiller(s: SarvamSession, turnId: number, isCurrent: () => boolean): void {
+    if (!FILLERS_ENABLED) return;
+    const engine = this.fillerEngine(s);
+    if (!engine) return;
+    this.clearFillerTimer(s);
+    s.fillerTimer = setTimeout(() => {
+      s.fillerTimer = null;
+      if (!isCurrent() || s.turnAudioStarted) return;
+      const voice = this.fillerVoice(s, engine);
+      const clip = fillerLibrary.pick(engine, s.lang, voice, s.emotion.fillerSet(), s.recentFillers);
+      if (!clip) return;   // library still pre-warming → this turn just has no filler
+      s.recentFillers = [...s.recentFillers.slice(-1), clip.text];
+      console.log(`💬 Filler (${s.config.sessionId}) turn=${turnId} set=${s.emotion.fillerSet()}`);
+      this.send(s, { type: 'agent_audio', audio: clip.audio.toString('base64'), responseId: turnId, seq: 0 });
+    }, FILLER_DELAY_MS);
+  }
+
+  /** Synthesise any missing filler clips for this session's voice into the process-wide
+   *  library, in the background. Starts after a short delay (the greeting's own TTS goes
+   *  first) and paces itself so it never competes with live turns for the TTS API. */
+  private prewarmFillers(s: SarvamSession): void {
+    const engine = this.fillerEngine(s);
+    if (!engine) return;
+    const voice = this.fillerVoice(s, engine);
+    const missing = allFillerTexts(s.lang).filter(t => !fillerLibrary.has(engine, s.lang, voice, t));
+    if (missing.length === 0) return;
+    void (async () => {
+      await new Promise(r => setTimeout(r, 3000));
+      for (const text of missing) {
+        if (s.ended) return;   // a later session will resume where this one left off
+        try {
+          const audio = engine === 'sarvam' ? await this.synthesizeSarvamClip(s, text)
+                      : engine === 'elevenlabs' ? await this.synthesizeElevenLabsClip(s, text)
+                      : await this.synthesizeOpenAiClip(s, text);
+          if (audio.length > 0) fillerLibrary.put(engine, s.lang, voice, text, audio);
+        } catch (e: any) {
+          console.warn(`⚠️ Filler pre-gen failed (${s.lang}/${engine}):`, e?.message || e);
+        }
+        await new Promise(r => setTimeout(r, 250));
+      }
+      console.log(`💬 Filler library ready (${s.lang}/${engine}/${voice})`);
+    })();
+  }
+
+  /** One short clip via Sarvam streaming TTS, collected into a PCM16@24k buffer (same
+   *  format the live turns stream, so the browser player needs no special casing). */
+  private synthesizeSarvamClip(s: SarvamSession, text: string): Promise<Buffer> {
+    const speaker = this.resolveSpeaker(s);
+    const ttsModel = ttsModelForSpeaker(speaker);
+    const apiKey = s.config.apiKey || process.env.SARVAM_API_KEY!;
+    return new Promise<Buffer>((resolve, reject) => {
+      let settled = false;
+      const chunks: Buffer[] = [];
+      let tts: any = null;
+      let idleTimer: NodeJS.Timeout | null = null;
+      let safetyTimer: NodeJS.Timeout | null = null;
+      const clearTimers = () => {
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+        if (safetyTimer) { clearTimeout(safetyTimer); safetyTimer = null; }
+      };
+      const done = () => {
+        if (settled) return; settled = true; clearTimers(); try { tts?.close(); } catch {}
+        if (chunks.length) resolve(Buffer.concat(chunks)); else reject(new Error('TTS returned no audio'));
+      };
+      const fail = (e: any) => { if (settled) return; settled = true; clearTimers(); try { tts?.close(); } catch {} reject(e); };
+      (async () => {
+        try {
+          tts = await s.client.textToSpeechStreaming.connect({
+            model: ttsModel, send_completion_event: 'true', 'Api-Subscription-Key': apiKey
+          } as any);
+          tts.on('message', (msg: any) => {
+            if (msg?.type === 'audio' && msg?.data?.audio) {
+              chunks.push(Buffer.from(String(msg.data.audio), 'base64'));
+              if (idleTimer) clearTimeout(idleTimer);
+              idleTimer = setTimeout(done, 1500);
+            } else if (msg?.type === 'event' && msg?.data?.event_type === 'final') {
+              done();
+            }
+          });
+          tts.on('error', (err: any) => fail(err));
+          tts.on('close', () => done());
+          if (typeof tts.waitForOpen === 'function') await tts.waitForOpen();
+          tts.configureConnection({
+            target_language_code: s.lang, speaker, model: ttsModel,
+            pace: 0.9, pitch: -0.03, loudness: 1.0,   // the gentle default delivery
+            enable_preprocessing: true, output_audio_codec: 'linear16', speech_sample_rate: TTS_SAMPLE_RATE
+          });
+          tts.convert(text);
+          tts.flush();
+          safetyTimer = setTimeout(done, 12000);
+        } catch (e) { fail(e); }
+      })();
+    });
+  }
+
+  /** One short clip via ElevenLabs (buffered pcm_24000 — pre-warm has no latency
+   *  pressure). Used when the session speaks with an ElevenLabs voice (e.g. a clone),
+   *  so the fillers are that same voice. */
+  private async synthesizeElevenLabsClip(s: SarvamSession, text: string): Promise<Buffer> {
+    const apiKey = process.env.ELEVENLABS_API_KEY!;
+    const voiceId = ELEVENLABS_VOICE[s.lang];
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_24000`, {
+      method: 'POST',
+      headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, model_id: ELEVENLABS_MODEL, voice_settings: elevenVoiceSettings('gentle') })
+    });
+    if (!res.ok) throw new Error(`ElevenLabs clip ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    return buf.subarray(0, buf.length - (buf.length % 2));
+  }
+
+  /** One short clip via OpenAI TTS (buffered — pre-warm has no latency pressure). */
+  private async synthesizeOpenAiClip(s: SarvamSession, text: string): Promise<Buffer> {
+    const L = LANGS[s.lang];
+    const resp: any = await this.getOpenAI().audio.speech.create({
+      model: OPENAI_TTS_MODEL, voice: OPENAI_TTS_VOICE as any, input: text,
+      instructions: `A warm, caring ${L.label}-speaking nurse softly acknowledging a patient while she thinks — very short, gentle, natural, trailing off.`,
+      response_format: 'pcm'
+    });
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return buf.subarray(0, buf.length - (buf.length % 2));
   }
 
   // ───────────────────────────────────────────────────────────────────────────────
@@ -1499,6 +1780,57 @@ class SarvamProvider implements BaseProvider {
     let result = dedup.slice(0, cut);
     if (result.length > 60) result = result.slice(0, 60);          // hard cap
     return result.join(' ').trim();
+  }
+
+  /** Spoken-form normalization just before TTS (VANI spec §6.2) — defence in depth on top
+   *  of Bulbul's enable_preprocessing: unify ellipses (they shape the pauses), expand
+   *  currency into the spoken word, split 10-digit phone numbers into speakable groups. */
+  private normalizeForTts(text: string, lang: Lang): string {
+    const rupeeWord = lang === 'te-IN' ? 'రూపాయలు' : lang === 'hi-IN' ? 'रुपये' : 'rupees';
+    return String(text || '')
+      .replace(/…/g, '...')
+      .replace(/\.{4,}/g, '...')
+      .replace(/(?:Rs\.?|₹)\s*([\d,]+)/gi, `$1 ${rupeeWord}`)
+      .replace(/\b(\d{5})(\d{5})\b/g, '$1... $2')   // 10-digit number → two spoken groups with a beat
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  /** Robot-tell detector (VANI spec §6.3) — log-only telemetry. Each hit is a prompt
+   *  regression worth fixing: the goal in testing is ZERO hits. Never logs patient words. */
+  private logRobotTells(s: SarvamSession, reply: string, completing: boolean): void {
+    const tells: string[] = [];
+    const sentences = reply.split(/[.?!।]+/).map(x => x.trim()).filter(x => x.length > 1);
+    if (!completing && sentences.length > 2) tells.push(`over 2 sentences (${sentences.length})`);
+    const questions = (reply.match(/\?/g) || []).length;
+    if (questions > 1) tells.push(`${questions} questions in one turn`);
+    if (/[*_#•\[\]]/.test(reply)) tells.push('markdown/list characters');
+    const STOCK = [
+      /I understand your (frustration|concern)/i,
+      /Is there anything else I can help/i,
+      /మీ సమస్యను అర్థం చేసుకున్నాను/,
+      /आपकी समस्या समझ (गई|गया)/,
+      /as an AI/i
+    ];
+    if (STOCK.some(re => re.test(reply))) tells.push('stock phrase');
+    const opening = (reply.split(/\s+/)[0] || '').replace(/[^\p{L}\p{N}]/gu, '');
+    if (opening && opening === s.lastReplyOpening) tells.push('same opener as previous turn');
+    s.lastReplyOpening = opening;
+    // Flat rhythm (upgrade 2): three consecutive replies whose word counts sit within
+    // ±2 of each other — the melody loop the RHYTHM RULE exists to prevent.
+    const words = reply.split(/\s+/).filter(Boolean).length;
+    s.replyWordCounts = [...s.replyWordCounts.slice(-2), words];
+    if (s.replyWordCounts.length === 3
+        && Math.max(...s.replyWordCounts) - Math.min(...s.replyWordCounts) <= 2) {
+      tells.push(`flat rhythm (3 replies of ${s.replyWordCounts.join('/')} words)`);
+    }
+    // Disfluency budget (upgrade 5): self-corrections are allowed once per call, never
+    // twice in one reply — more than that flips from "human" to "broken".
+    const corrections = countSelfCorrections(reply);
+    if (corrections >= 2) tells.push('stacked imperfections in one reply');
+    s.disfluencyCount += corrections;
+    if (corrections > 0 && s.disfluencyCount > 1) tells.push(`over disfluency budget (${s.disfluencyCount} self-corrections this call, max 1)`);
+    if (tells.length) console.warn(`🤖 Robot tell (${s.config.sessionId}): ${tells.join('; ')}`);
   }
 
   private recordUsage(s: SarvamSession, usage: any): void {
@@ -1542,6 +1874,7 @@ class SarvamProvider implements BaseProvider {
     if (s.lastEmergencyTurn === turnId) return;     // already alerted this turn
     s.lastEmergencyTurn = turnId;
     s.redFlags++;
+    this.clearFillerTimer(s);   // never play a casual "hmm/okay" clip before the emergency line
     const text = (symptoms || 'critical symptom').slice(0, 200);
     try {
       await db.saveRedFlagEvent({

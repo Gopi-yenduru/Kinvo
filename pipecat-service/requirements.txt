@@ -1,0 +1,9 @@
+# Pinned to the 1.4 line: bot.py is written/audited against pipecat 1.4. On 1.5.0 the Sarvam
+# streaming-TTS "audio context" system desyncs after a turn-boundary interruption and drops the
+# reply's audio ("unable to append audio to context: no context ID provided") — the agent goes
+# silent mid-conversation. Keep <1.5 until bot.py is validated against the 1.5 TTS-context API.
+pipecat-ai[silero,openai,sarvam]>=1.4,<1.5
+fastapi
+uvicorn[standard]
+python-dotenv
+loguru

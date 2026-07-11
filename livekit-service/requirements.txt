@@ -1,0 +1,11 @@
+livekit-agents>=1.0
+livekit-plugins-silero
+livekit-plugins-sarvam>=1.6
+livekit-plugins-openai
+openai>=1.40
+httpx
+numpy
+fastapi
+uvicorn[standard]
+python-dotenv
+loguru

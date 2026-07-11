@@ -37,6 +37,7 @@ const Patients: React.FC = () => {
   const [sessions, setSessions] = useState<PatientSession[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [deletingAll, setDeletingAll] = useState(false);
 
   // Current user's role (stored as JSON in localStorage at login) — only admins can delete.
   const isAdmin = (() => {
@@ -83,6 +84,24 @@ const Patients: React.FC = () => {
     }
   };
 
+  // Admin only: wipe the ENTIRE patient directory (all patients + their visits/sessions/data).
+  const handleDeleteAll = async () => {
+    if (!window.confirm(`Delete ALL ${total} patient${total === 1 ? '' : 's'} and every one of their visits, sessions and data?\n\nThis CANNOT be undone.`)) return;
+    setDeletingAll(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/patients', { method: 'DELETE' });
+      if (!res.ok) throw new Error('Delete all failed');
+      setSelected(null);
+      if (page !== 1) setPage(1); else await fetchPatients(1);
+    } catch (err) {
+      console.error('Delete all patients failed:', err);
+      setError('Failed to delete all patients');
+    } finally {
+      setDeletingAll(false);
+    }
+  };
+
   const openPatient = async (id: number) => {
     setDetailLoading(true);
     setSelected({ id } as Patient);
@@ -108,6 +127,17 @@ const Patients: React.FC = () => {
             <h1 className="h2 fw-bold text-primary mb-1">Patients</h1>
             <p className="text-muted mb-0">{total} patient{total === 1 ? '' : 's'} on record — returning patients keep their history across visits.</p>
           </div>
+          {isAdmin && total > 0 && (
+            <button
+              className="btn btn-outline-danger"
+              onClick={handleDeleteAll}
+              disabled={deletingAll || loading}
+              title="Delete ALL patients and all their visits/sessions (admin)"
+            >
+              <i className="fas fa-trash-alt me-1"></i>
+              {deletingAll ? 'Deleting all…' : 'Delete all'}
+            </button>
+          )}
         </div>
 
         {loading ? (

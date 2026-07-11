@@ -36,6 +36,17 @@ const TTS_ENGINE_OPTIONS = [
   { value: 'openai', label: 'OpenAI (gpt-4o-mini-tts)' },
   { value: 'elevenlabs', label: 'ElevenLabs' }
 ];
+// Open Indic engines for the LiveKit provider (Telugu/Hindi). These route to the separate
+// indic-voice-service; Sarvam stays the default + automatic fallback if it isn't running.
+const LIVEKIT_STT_OPTIONS = [
+  { value: 'sarvam', label: 'Sarvam (saaras)' },
+  { value: 'indic-conformer', label: 'IndicConformer (open)' },
+  { value: 'indic-whisper', label: 'IndicWhisper (open)' }
+];
+const LIVEKIT_TTS_OPTIONS = [
+  { value: 'sarvam', label: 'Sarvam (bulbul)' },
+  { value: 'parler', label: 'Indic Parler-TTS (open)' }
+];
 const DEFAULT_ENGINE_MAP: EngineMap = {
   'te-IN': { stt: 'sarvam', llm: 'sarvam', tts: 'sarvam' },
   'hi-IN': { stt: 'sarvam', llm: 'sarvam', tts: 'openai' }
@@ -251,7 +262,9 @@ const Settings: React.FC = () => {
   const providerOptions = [
     { value: 'openai', label: 'OpenAI (English)' },
     { value: 'retellai', label: 'RetellAI' },
-    { value: 'sarvam', label: 'Sarvam AI (Telugu)' }
+    { value: 'sarvam', label: 'Sarvam AI (Telugu)' },
+    { value: 'pipecat', label: 'Pipecat (Open Source)' },
+    { value: 'livekit', label: 'LiveKit + Chatterbox (Open Source)' }
   ];
 
   const voiceOptions = [
@@ -502,6 +515,140 @@ const Settings: React.FC = () => {
 
         {/* System Prompt — shown for Sarvam too (at the bottom), same editor as OpenAI. */}
         {config.provider === 'sarvam' && systemPromptSection}
+
+        {/* Pipecat (open source) — fixed engine mapping, runs in the pipecat-service. */}
+        {config.provider === 'pipecat' && (
+          <>
+            <div className="settings-section">
+              <div className="section-header">
+                <h2>🐍 Pipecat (Open Source)</h2>
+                <div className="section-description">
+                  Sessions run through the open-source Pipecat pipeline in the separate
+                  Python service (<code>pipecat-service/</code>). It must be running for
+                  sessions to start — see its README.
+                </div>
+              </div>
+              <div className="settings-field">
+                <div className="alert alert-info mb-0">
+                  <strong>Engines:</strong> Telugu/Hindi use Sarvam STT + TTS with a GPT-4o
+                  LLM; English is fully OpenAI. Silero VAD handles turn-taking and natural
+                  barge-in. Uses the same <code>OPENAI_API_KEY</code> / <code>SARVAM_API_KEY</code>.
+                </div>
+              </div>
+              <div className="settings-field">
+                <label className="field-label">Voice (Telugu / Hindi)</label>
+                <select
+                  className="field-input voice-select"
+                  value={config.voice}
+                  onChange={(e) => handleInputChange('voice', e.target.value)}
+                >
+                  {sarvamVoiceOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small className="text-muted d-block mt-1">
+                  English sessions use OpenAI's "coral" voice. Changes apply to the next session.
+                </small>
+              </div>
+            </div>
+            {systemPromptSection}
+          </>
+        )}
+
+        {/* LiveKit Agents + Chatterbox-Turbo (open source) — runs in the livekit-service. */}
+        {config.provider === 'livekit' && (
+          <>
+            <div className="settings-section">
+              <div className="section-header">
+                <h2>🎧 LiveKit Agents + Chatterbox-Turbo (Open Source)</h2>
+                <div className="section-description">
+                  Sessions run through the open-source LiveKit Agents pipeline in the separate
+                  Python service (<code>livekit-service/</code>). It must be running — along
+                  with the Chatterbox TTS server — for sessions to start; see its README.
+                </div>
+              </div>
+              <div className="settings-field">
+                <div className="alert alert-info mb-0">
+                  <strong>Engines:</strong> English is fully <strong>OpenAI</strong> (STT + LLM + TTS).
+                  {' '}Telugu &amp; Hindi use <strong>Sarvam</strong> by default, or the open Indic models
+                  {' '}below (IndicConformer/IndicWhisper STT, Indic Parler-TTS) when the
+                  {' '}<code>indic-voice-service</code> is running. The LLM is GPT-4o; Silero VAD handles
+                  {' '}turn-taking and barge-in. Uses the same <code>OPENAI_API_KEY</code> / <code>SARVAM_API_KEY</code>.
+                </div>
+              </div>
+              <div className="settings-field">
+                <label className="field-label">Voice (Telugu / Hindi)</label>
+                <select
+                  className="field-input voice-select"
+                  value={config.voice}
+                  onChange={(e) => handleInputChange('voice', e.target.value)}
+                >
+                  {sarvamVoiceOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small className="text-muted d-block mt-1">
+                  The Sarvam speaker used for Telugu/Hindi when their TTS is set to Sarvam below.
+                  English uses OpenAI's voice. Changes apply to the next session.
+                </small>
+              </div>
+            </div>
+
+            {/* Telugu/Hindi open-source STT/TTS engine selection — routes to indic-voice-service. */}
+            <div className="settings-section">
+              <div className="section-header">
+                <h2>🧩 Telugu / Hindi Engines (open source)</h2>
+                <div className="section-description">
+                  Choose Speech-to-Text and Text-to-Speech for Telugu &amp; Hindi. The Indic models
+                  (IndicConformer / IndicWhisper, Indic Parler-TTS) run in the separate
+                  {' '}<code>indic-voice-service</code> (GPU recommended) — if it isn't running, sessions
+                  {' '}fall back to Sarvam automatically. Changes apply to the next session.
+                </div>
+              </div>
+              {MAPPED_LANGUAGES.map((lng) => {
+                const choice = (config.engineMap || DEFAULT_ENGINE_MAP)[lng.code] || DEFAULT_ENGINE_MAP[lng.code];
+                const sttVal = LIVEKIT_STT_OPTIONS.some((o) => o.value === choice.stt) ? choice.stt : 'sarvam';
+                const ttsVal = LIVEKIT_TTS_OPTIONS.some((o) => o.value === choice.tts) ? choice.tts : 'sarvam';
+                return (
+                  <div key={lng.code} className="engine-map-lang">
+                    <h3 className="engine-map-lang-title">{lng.label}</h3>
+                    <div className="engine-map-row">
+                      <div className="settings-field">
+                        <label className="field-label">STT (Speech → Text)</label>
+                        <select
+                          className="field-input"
+                          value={sttVal}
+                          onChange={(e) => handleEngineChange(lng.code, 'stt', e.target.value)}
+                        >
+                          {LIVEKIT_STT_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="settings-field">
+                        <label className="field-label">TTS (Text → Speech)</label>
+                        <select
+                          className="field-input"
+                          value={ttsVal}
+                          onChange={(e) => handleEngineChange(lng.code, 'tts', e.target.value)}
+                        >
+                          {LIVEKIT_TTS_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {systemPromptSection}
+          </>
+        )}
 
         {/* OpenAI-specific sections */}
         {config.provider === 'openai' && (

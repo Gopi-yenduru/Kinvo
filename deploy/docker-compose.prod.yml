@@ -31,11 +31,77 @@ services:
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
       SARVAM_API_KEY: ${SARVAM_API_KEY:?set SARVAM_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PIPECAT_URL: http://pipecat:8765
+      LIVEKIT_URL: http://livekit:8766
       CORS_ORIGINS: ${PUBLIC_URL:?set PUBLIC_URL e.g. https://intake.hospital.local}
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
+
+  # Open-source Pipecat voice pipeline (used when the "Pipecat" voice engine is selected
+  # on the Dashboard). Stateless; the backend bridges each session to it over WebSocket.
+  pipecat:
+    build: ../pipecat-service
+    environment:
+      PORT: 8765
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SARVAM_API_KEY: ${SARVAM_API_KEY}
+    restart: unless-stopped
+
+  # Open-source LiveKit Agents + Chatterbox-Turbo voice pipeline (used when the
+  # "LiveKit Agents + Chatterbox-Turbo" voice engine is selected on the Dashboard).
+  # English TTS is served by the separate Chatterbox TTS server (CHATTERBOX_URL).
+  livekit:
+    build: ../livekit-service
+    environment:
+      PORT: 8766
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SARVAM_API_KEY: ${SARVAM_API_KEY}
+      CHATTERBOX_URL: ${CHATTERBOX_URL:-http://chatterbox:8004}
+      CHATTERBOX_MODEL: ${CHATTERBOX_MODEL:-chatterbox-turbo}
+      CHATTERBOX_VOICE: ${CHATTERBOX_VOICE:-default}
+      INDIC_VOICE_URL: ${INDIC_VOICE_URL:-http://indic-voice:8005}
+    restart: unless-stopped
+
+  # Chatterbox-Turbo TTS server — the English voice for the LiveKit engine. Self-hosted from
+  # https://github.com/devnen/Chatterbox-TTS-Server (select the "chatterbox-turbo" model).
+  # A GPU is strongly recommended; the image tag and GPU passthrough (runtime: nvidia /
+  # deploy.resources.devices) are host-specific, so this is left commented. Enable it here,
+  # or run Chatterbox on a separate box and set CHATTERBOX_URL in deploy/.env accordingly.
+  # chatterbox:
+  #   image: ghcr.io/devnen/chatterbox-tts-server:latest
+  #   ports:
+  #     - "8004:8004"
+  #   # NVIDIA GPU example — requires nvidia-container-toolkit on the host:
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+  #   restart: unless-stopped
+
+  # Open Indic STT/TTS (Telugu/Hindi): IndicConformer/IndicWhisper ASR + Indic Parler-TTS.
+  # Used when the LiveKit engine's Settings route te/hi to the open Indic models; the livekit
+  # service falls back to Sarvam if this isn't up. Heavy models — GPU strongly recommended
+  # (switch the Dockerfile base to CUDA + add the gpu `deploy` block below), so left commented.
+  # indic-voice:
+  #   build: ../indic-voice-service
+  #   environment:
+  #     PORT: 8005
+  #     INDIC_DEVICE: auto
+  #   # NVIDIA GPU (requires nvidia-container-toolkit):
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+  #   restart: unless-stopped
 
   web:
     build: ../frontend

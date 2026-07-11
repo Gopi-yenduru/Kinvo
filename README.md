@@ -246,6 +246,37 @@ npm run type-check
 npm run lint
 ```
 
+## 🗣️ Voice Naturalness (VANI humanization flags)
+
+The Sarvam voice pipeline ships six "humanization" upgrades, each behind its own env
+flag in `backend/.env` so they can be A/B-tested independently (restart the backend to
+apply). All default **on** except the telephony EQ.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `VANI_TIMING_JITTER` | on | Response gap sampled per turn (short confirmations 350–550 ms, normal turns 450–800 ms, never the same twice) — only ever *delays* a too-fast turn, never slows a slow one |
+| `VANI_PACE_JITTER` | on | TTS pace wobbles ±0.03 per turn (never identical consecutively) so the melody doesn't loop |
+| `VANI_BREATHS` | on | Quiet (−30 dBFS) ~200 ms inhale under the first word of longer replies, 3 rotating variants, max one per 2 turns |
+| `VANI_NOISE_BED` | on | Continuous −42 dBFS room-tone in the browser for the whole call — no digital dead-silence between turns |
+| `VANI_TELEPHONY_EQ` | **off** | 300–3400 Hz band-pass + compression on the agent's voice (phone-line realism; hurts a hi-fi browser voice) |
+| ~~`VANI_RHYTHM_RULE`~~ / ~~`VANI_DISFLUENCY`~~ | removed | The experimental prompt blocks were removed; all three engines now share the LiveKit engine's prompt (it tested most natural) |
+| `SARVAM_FILLERS` | on | Emotion-matched "ఊఁ… / సరే…" clips in the agent's own voice covering LLM thinking time (`FILLER_DELAY_MS`, default 350) |
+
+Robot-tell telemetry logs `🤖` warnings (over-long turns, double questions, stock
+phrases, repeated openers, flat 3-turn rhythm, disfluency-budget violations) and `⏱️`
+gap-waterfall lines so variance is verifiable straight from the backend logs.
+
+**Voice cloning + bake-off:** record a sample per [docs/recording_brief.md](docs/recording_brief.md), then
+
+```bash
+node backend/scripts/clone-voice.mjs --file voice_sample.wav --engine elevenlabs --test
+node backend/scripts/naturalness-bakeoff.mjs          # blind-test WAVs + answer key
+```
+
+(Sarvam's public API has no cloning endpoint as of 2026-07 — Bulbul v3 cloning is an
+enterprise/sales feature; the script explains the options. ElevenLabs Instant Voice
+Cloning needs a paid ElevenLabs plan.)
+
 ## 🎮 Usage Guide
 
 ### **1. Starting a Voice Session**

@@ -110,6 +110,42 @@ export async function createIntakeSession(opts: CreateIntakeSessionOptions): Pro
         message: 'Sarvam API subscription key not configured. Set SARVAM_API_KEY in .env or your Settings page.'
       });
     }
+  } else if (providerType === 'pipecat') {
+    // The Pipecat service reads its own keys from pipecat-service/.env; here we only
+    // sanity-check what THIS session will need so the user gets a clear early error.
+    if (!(process.env.OPENAI_API_KEY || setting?.openai_api_key)) {
+      throw new IntakeSessionError(400, {
+        error: 'OpenAI API key missing',
+        message: 'The Pipecat pipeline needs an OpenAI API key (LLM + English voice). Set OPENAI_API_KEY in .env.'
+      });
+    }
+    // Sarvam powers the STT stage for ALL languages now (English included — OpenAI's
+    // segmented STT proved unreliable over this WS bridge), plus Telugu/Hindi TTS.
+    if (!process.env.SARVAM_API_KEY) {
+      throw new IntakeSessionError(400, {
+        error: 'Sarvam API key missing',
+        message: 'The Pipecat pipeline needs SARVAM_API_KEY (speech-to-text for all languages). Set it in .env.'
+      });
+    }
+  } else if (providerType === 'livekit') {
+    // The LiveKit service reads its own keys from livekit-service/.env; here we only
+    // sanity-check what THIS session will need so the user gets a clear early error.
+    // LLM is OpenAI gpt-4o for every language.
+    if (!(process.env.OPENAI_API_KEY || setting?.openai_api_key)) {
+      throw new IntakeSessionError(400, {
+        error: 'OpenAI API key missing',
+        message: 'The LiveKit pipeline needs an OpenAI API key (LLM). Set OPENAI_API_KEY in .env.'
+      });
+    }
+    // Sarvam powers STT for ALL languages, plus Telugu/Hindi TTS (Chatterbox-Turbo is
+    // English-only, so te/hi speak through Sarvam). English TTS is Chatterbox, served by
+    // the separate CHATTERBOX_URL HTTP server the livekit-service points at.
+    if (!process.env.SARVAM_API_KEY) {
+      throw new IntakeSessionError(400, {
+        error: 'Sarvam API key missing',
+        message: 'The LiveKit pipeline needs SARVAM_API_KEY (speech-to-text for all languages, and Telugu/Hindi voice). Set it in .env.'
+      });
+    }
   } else if (providerType === 'vapi') {
     throw new IntakeSessionError(400, {
       error: 'VAPI not supported yet',
@@ -245,6 +281,67 @@ export async function createIntakeSession(opts: CreateIntakeSessionOptions): Pro
         error: 'Failed to create session',
         message: error.message,
         details: 'Check your Sarvam API subscription key'
+      });
+    }
+  } else if (providerType === 'pipecat') {
+    // Pipecat: open-source pipeline in the Python microservice, bridged by PipecatProvider
+    // behind the exact same realtime WS contract as the in-house pipeline.
+    const config = {
+      sessionId,
+      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW,
+      voice: setting?.voice || 'neha',
+      temperature: setting?.temperature || 0.6,
+      maxResponseLength: setting?.max_response_length || 200,
+      language: sessionLanguage,
+      patientId,
+      isReturning,
+      patientName: (isReturning && existingPatient?.name) ? existingPatient.name : undefined,
+      patientHistory: (isReturning && existingPatient?.medical_summary) ? existingPatient.medical_summary : undefined
+    };
+    try {
+      const conn = await realtimeManager.createRealtimeSession(config);
+      if (!conn) throw new Error('Pipecat pipeline failed to initialize');
+      console.log(`📝 Session ${sessionId} started successfully with Pipecat pipeline`);
+    } catch (error: any) {
+      console.error('Failed to create Pipecat session:', error);
+      await db.updateSessionStatus(sessionId, 'error');
+      await db.insertAuditLog({ action: 'session_start_failed', details: JSON.stringify({ error: error.message }), session_id: sessionId, ip_address: ip });
+      throw new IntakeSessionError(500, {
+        error: 'Failed to create session',
+        message: error.message,
+        details: 'Check that the Pipecat service is running (pipecat-service/, PIPECAT_URL) and its API keys are set.'
+      });
+    }
+  } else if (providerType === 'livekit') {
+    // LiveKit Agents open-source pipeline in the Python microservice, bridged by
+    // LiveKitProvider behind the exact same realtime WS contract as the in-house pipeline.
+    // English = fully OpenAI; Telugu/Hindi STT+TTS engines come from the per-language
+    // engineMap (Sarvam by default; IndicConformer/IndicWhisper + Indic Parler-TTS optional).
+    const config = {
+      sessionId,
+      instructions: setting?.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW,
+      voice: setting?.voice || 'neha',
+      temperature: setting?.temperature || 0.6,
+      maxResponseLength: setting?.max_response_length || 200,
+      language: sessionLanguage,
+      engineMap: parseEngineMapSetting((setting as any)?.engine_map),
+      patientId,
+      isReturning,
+      patientName: (isReturning && existingPatient?.name) ? existingPatient.name : undefined,
+      patientHistory: (isReturning && existingPatient?.medical_summary) ? existingPatient.medical_summary : undefined
+    };
+    try {
+      const conn = await realtimeManager.createRealtimeSession(config);
+      if (!conn) throw new Error('LiveKit pipeline failed to initialize');
+      console.log(`📝 Session ${sessionId} started successfully with LiveKit pipeline`);
+    } catch (error: any) {
+      console.error('Failed to create LiveKit session:', error);
+      await db.updateSessionStatus(sessionId, 'error');
+      await db.insertAuditLog({ action: 'session_start_failed', details: JSON.stringify({ error: error.message }), session_id: sessionId, ip_address: ip });
+      throw new IntakeSessionError(500, {
+        error: 'Failed to create session',
+        message: error.message,
+        details: 'Check that the LiveKit service is running (livekit-service/, LIVEKIT_URL), the Chatterbox TTS server (CHATTERBOX_URL) is up, and API keys are set.'
       });
     }
   }

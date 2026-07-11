@@ -396,3 +396,9 @@ docs/.vuepress/dist/
 # DB backups
 backups/
 *.sql
+
+# Python (voice microservices)
+.venv/
+venv/
+__pycache__/
+*.pyc

@@ -35,8 +35,10 @@ const Session: React.FC = () => {
   const [consentGiven, setConsentGiven] = useState<boolean>(false);
   const [showPatientForm, setShowPatientForm] = useState<boolean>(false);
   const [language, setLanguage] = useState<'te-IN' | 'hi-IN' | 'en-IN'>('te-IN'); // patient's chosen language
-  // Telugu/Hindi are only supported by the Sarvam pipeline; OpenAI/Retell are English-only.
-  const multilingual = provider === 'sarvam';
+  // Telugu/Hindi are supported by the Sarvam, Pipecat and LiveKit pipelines; OpenAI/Retell are
+  // English-only. Pipecat and LiveKit support all three languages (te/hi/en); Sarvam is te/hi only.
+  const supportsAllLanguages = provider === 'pipecat' || provider === 'livekit';
+  const multilingual = provider === 'sarvam' || supportsAllLanguages;
   const [phone, setPhone] = useState<string>(''); // phone / patient ID — key to recognise returning patients
   const [visitType, setVisitType] = useState<'new' | 'returning' | ''>(''); // first-time vs returning patient
   const pendingSentenceRef = useRef<{ speaker: string, text: string, timeoutId: number, timestamp?: string } | null>(null);
@@ -61,11 +63,11 @@ const Session: React.FC = () => {
   }, [token]);
 
   // Keep the selected language valid for the provider: Sarvam offers te/hi only (no English);
-  // English-only providers (OpenAI/Retell) offer English only.
+  // English-only providers (OpenAI/Retell) offer English only; Pipecat offers all three.
   useEffect(() => {
     if (!provider) return;
-    if (multilingual && language === 'en-IN') setLanguage('te-IN');       // Sarvam: no English
-    if (!multilingual && language !== 'en-IN') setLanguage('en-IN');      // OpenAI/Retell: English only
+    if (provider === 'sarvam' && language === 'en-IN') setLanguage('te-IN');  // Sarvam: no English
+    if (!multilingual && language !== 'en-IN') setLanguage('en-IN');          // OpenAI/Retell: English only
   }, [provider, multilingual, language]);
 
   // Timer effect
@@ -1092,7 +1094,9 @@ const Session: React.FC = () => {
                         { code: 'te-IN', label: 'తెలుగు', sub: 'Telugu' },
                         { code: 'hi-IN', label: 'हिंदी', sub: 'Hindi' },
                         { code: 'en-IN', label: 'English', sub: 'English' },
-                      ] as const).filter(opt => multilingual ? opt.code !== 'en-IN' : opt.code === 'en-IN').map(opt => (
+                      ] as const).filter(opt =>
+                        supportsAllLanguages ? true : multilingual ? opt.code !== 'en-IN' : opt.code === 'en-IN'
+                      ).map(opt => (
                         <button
                           key={opt.code}
                           type="button"

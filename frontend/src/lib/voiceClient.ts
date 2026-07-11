@@ -155,6 +155,10 @@ export class VoiceClient {
   private player: StreamingPcmPlayer | null = null;
   private playbackAnalyser: AnalyserNode | null = null;   // taps the live agent playback (echo source)
   private analyserBuf: Float32Array | null = null;
+  // Audio-realism chain (backend-controlled via session_ready.fx — VANI upgrade 3)
+  private playbackGain: GainNode | null = null;           // kept so the EQ chain can rewire it
+  private noiseSrc: AudioBufferSourceNode | null = null;  // looping comfort-noise bed
+  private eqApplied = false;
 
   private micEnabled = true;             // manual mute toggle (UI mic button)
   private agentHoldsFloor = false;       // true while status is thinking/speaking
@@ -179,6 +183,7 @@ export class VoiceClient {
     const playbackGain = this.ctx.createGain();
     playbackGain.gain.value = 1.0;
     playbackGain.connect(this.ctx.destination);
+    this.playbackGain = playbackGain;
     // Tap the playback with an analyser so barge-in can read the LIVE output level (= echo source)
     // in real time. It's a passive sink — no effect on what the patient hears.
     this.playbackAnalyser = this.ctx.createAnalyser();
@@ -232,6 +237,8 @@ export class VoiceClient {
     this.ending = true;
     this.send({ type: 'end_session' });
     this.player?.stop();
+    try { this.noiseSrc?.stop(); } catch { /* not started */ }
+    this.noiseSrc = null;
 
     try { this.processor?.disconnect(); } catch { /* ignore */ }
     try { this.micSource?.disconnect(); } catch { /* ignore */ }
@@ -242,6 +249,65 @@ export class VoiceClient {
     this.ws = null; this.ctx = null; this.stream = null;
     this.processor = null; this.micSource = null; this.player = null;
     this.playbackAnalyser = null; this.analyserBuf = null;
+    this.playbackGain = null; this.eqApplied = false;
+  }
+
+  // ── Audio-realism chain (VANI upgrade 3, flags decided by the backend) ─────────
+  /** Apply the client-side realism layers announced in session_ready.fx:
+   *  a continuous comfort-noise bed and/or a telephony-style EQ on the agent's voice.
+   *  Both are Web Audio graph nodes — block-based (≈2.7 ms at 24 kHz), far under the
+   *  20 ms latency budget, and zero cost when their flag is off. */
+  private applyFx(fx: unknown): void {
+    const f = (fx || {}) as { noiseBed?: boolean; telephonyEq?: boolean };
+    if (!this.ctx) return;
+
+    // Comfort-noise bed: a very quiet (−42 dBFS) low-passed noise loop for the WHOLE
+    // call, including while the agent is silent — digital dead-silence between turns
+    // is a robot tell; a faint, steady room tone reads as a real open line. It feeds
+    // the destination directly (NOT playbackGain), so the barge-in echo analyser and
+    // player.isActive() never see it.
+    if (f.noiseBed && !this.noiseSrc) {
+      const seconds = 2;
+      const len = seconds * this.ctx.sampleRate;
+      const buffer = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const ch = buffer.getChannelData(0);
+      let lp = 0;
+      for (let i = 0; i < len; i++) {
+        const white = Math.random() * 2 - 1;
+        lp += 0.04 * (white - lp);        // one-pole low-pass → soft "air", no hiss
+        ch[i] = lp * 6;                   // renormalize the low-passed level
+      }
+      const src = this.ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0.0079;           // −42 dBFS
+      src.connect(gain);
+      gain.connect(this.ctx.destination);
+      src.start();
+      this.noiseSrc = src;
+    }
+
+    // Telephony EQ: 300–3400 Hz band-pass + gentle compression on the agent's voice
+    // only (the noise bed stays outside it). Rewires playbackGain's output; the
+    // barge-in analyser keeps tapping playbackGain directly, so echo detection and
+    // the mic gate are unaffected.
+    if (f.telephonyEq && !this.eqApplied && this.playbackGain) {
+      const hp = this.ctx.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 300; hp.Q.value = 0.7;
+      const lpF = this.ctx.createBiquadFilter();
+      lpF.type = 'lowpass'; lpF.frequency.value = 3400; lpF.Q.value = 0.7;
+      const comp = this.ctx.createDynamicsCompressor();
+      comp.threshold.value = -24; comp.knee.value = 12; comp.ratio.value = 3;
+      comp.attack.value = 0.01; comp.release.value = 0.15;
+      this.playbackGain.disconnect();
+      if (this.playbackAnalyser) this.playbackGain.connect(this.playbackAnalyser);
+      this.playbackGain.connect(hp);
+      hp.connect(lpF);
+      lpF.connect(comp);
+      comp.connect(this.ctx.destination);
+      this.eqApplied = true;
+    }
   }
 
   // ── internals ────────────────────────────────────────────────────────────────
@@ -328,6 +394,7 @@ export class VoiceClient {
 
     switch (msg.type) {
       case 'session_ready':
+        this.applyFx(msg.fx);
         this.cb.onReady?.();
         break;
 

@@ -1,0 +1,15 @@
+# GPU strongly recommended. For CUDA, install a matching torch/torchaudio build from
+# https://pytorch.org (e.g. --index-url https://download.pytorch.org/whl/cu121) instead of the
+# default CPU wheels below.
+torch
+torchaudio
+transformers>=4.46.1
+# Indic Parler-TTS (installs the parler_tts package):
+parler-tts @ git+https://github.com/huggingface/parler-tts.git
+onnxruntime
+soundfile
+numpy
+fastapi
+uvicorn[standard]
+python-dotenv
+loguru
