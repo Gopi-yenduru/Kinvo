@@ -41,7 +41,7 @@ const LANG_LABEL: Record<Lang, string> = { 'te-IN': 'Telugu', 'hi-IN': 'Hindi', 
 // Keep this an accurate, complete description of the product so the bot can answer questions
 // about ANY page or feature of the website.
 const APP_CONTEXT = [
-  'PRODUCT: "HealthYoda" — an AI voice assistant for hospital PRE-CONSULTATION (medical intake). Before a patient sees the doctor, an empathetic AI voice agent talks with them in their own language, asks about their symptoms and history, and prepares a structured summary for the doctor so the consultation is faster and better prepared.',
+  'PRODUCT: "Kinvo" (the name means Kind + Voice) — an AI voice assistant for hospital PRE-CONSULTATION (medical intake). Before a patient sees the doctor, an empathetic AI voice agent talks with them in their own language, asks about their symptoms and history, and prepares a structured summary for the doctor so the consultation is faster and better prepared.',
   '',
   'HOW THE VOICE INTAKE WORKS: The patient (or staff) starts a session and gives consent. The assistant greets them and asks ONE question at a time by voice (or text) — first whether it is a first or returning visit, their name and age, then their main complaint, and follow-ups about onset, location, severity, what makes it better/worse, associated symptoms, past history, medicines, allergies, and family/habits. The patient answers naturally; at the end it thanks them and the doctor reviews the summary. It is NOT a doctor — it gives no diagnosis, treatment, or medicine advice.',
   '',

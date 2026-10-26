@@ -224,7 +224,7 @@ const PatientIntake: React.FC = () => {
         <i className="fas fa-hospital"></i>
       </div>
       <div>
-        <div style={{ fontWeight: 700, fontSize: '1.1rem', lineHeight: 1 }}>HealthYoda</div>
+        <div style={{ fontWeight: 700, fontSize: '1.1rem', lineHeight: 1 }}>Kinvo</div>
         <small style={{ opacity: .85 }}>AI Voice Assistant</small>
       </div>
     </div>

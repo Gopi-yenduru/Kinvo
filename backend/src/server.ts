@@ -121,8 +121,8 @@ app.use((req: any, res: any, next: any) => {
   return authenticateJWT(req, res, next);
 });
 
-// Initialize performance indexes (one-time setup)
-app.post('/api/setup-indexes', async (req: any, res: any) => {
+// Initialize performance indexes (one-time setup). Admin only, like the debug routes below.
+app.post('/api/setup-indexes', requireRole('admin'), async (req: any, res: any) => {
   try {
     console.log('🛠️ Setting up database performance indexes...');
     await db.createPerformanceIndexes();
@@ -142,7 +142,7 @@ app.post('/api/setup-indexes', async (req: any, res: any) => {
 });
 
 // Debug route to test database savings
-app.post('/api/test-agent-response', async (req: any, res: any) => {
+app.post('/api/test-agent-response', requireRole('admin'), async (req: any, res: any) => {
   try {
     const { sessionId, text } = req.body;
     console.log(`🧪 TEST: Saving test agent response "${text}" to session ${sessionId}`);
@@ -173,7 +173,7 @@ app.post('/api/test-agent-response', async (req: any, res: any) => {
 });
 
 // Debug endpoint to check red flag events table directly
-app.get('/api/debug/red-flags', async (req: any, res: any) => {
+app.get('/api/debug/red-flags', requireRole('admin'), async (req: any, res: any) => {
   try {
     console.log('🔍 DEBUG: Checking red_flag_events table directly');
     const redFlags = await db.getAllRedFlagEvents();
@@ -192,7 +192,7 @@ app.get('/api/debug/red-flags', async (req: any, res: any) => {
 });
 
 // Test red flag detection
-app.post('/api/test-red-flag-detection', async (req: any, res: any) => {
+app.post('/api/test-red-flag-detection', requireRole('admin'), async (req: any, res: any) => {
   try {
     const { sessionId, transcript } = req.body;
 
@@ -902,11 +902,10 @@ app.get('/api/sessions', async (req: any, res: any) => {
 app.get('/api/sessions/:sessionId/report', async (req: any, res: any) => {
   try {
     const { sessionId } = req.params;
-    const report = db.generateIntakeReport(sessionId);
-
-    if (!report) {
+    if (!(await db.getSession(sessionId))) {
       return res.status(404).json({ error: 'Session not found' });
     }
+    const report = await db.generateIntakeReport(sessionId);
 
     // Log audit event for report access    
     await db.insertAuditLog({
@@ -1328,31 +1327,40 @@ const parseEngineMap = (raw: string | null | undefined) => {
   return out;
 };
 
+// Shape a settings row for the client. API keys are NEVER returned — every logged-in user can
+// read this config (the session pages need the provider), so only report whether a key is
+// configured (in the DB or .env). The key fields stay '' so a save that leaves them blank keeps
+// the stored key (see POST below).
+const toSettingsResponse = (setting: any) => ({
+  id: setting.id,
+  provider: setting.provider || 'openai',
+  model: setting.model,
+  openaiApiKey: '',
+  openaiApiKeyConfigured: !!(setting.openai_api_key || process.env.OPENAI_API_KEY),
+  retellAIApiKey: '',
+  retellAIApiKeyConfigured: !!(setting.retellai_api_key || process.env.RETELLAI_API_KEY),
+  retellAIAgentId: setting.retellai_agent_id || '',
+  medicalInstructions: setting.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW, // Use constants as default
+  voice: setting.voice,
+  temperature: setting.temperature,
+  maxResponseLength: setting.max_response_length,
+  engineMap: parseEngineMap(setting.engine_map)
+});
+
 // Settings configuration endpoint
 app.get('/api/settings/config', async (req: any, res: any) => {
   try {
     const settings = await db.getAllSettings();
     const setting = settings && settings.length > 0 ? settings[0] : null;
     if (setting) {
-      res.json({
-        id: setting.id,
-        provider: (setting as any).provider || 'openai',
-        model: setting.model,
-        openaiApiKey: process.env.OPENAI_API_KEY || '', // Use .env value as default
-        retellAIApiKey: (setting as any).retellai_api_key || '',
-        retellAIAgentId: (setting as any).retellai_agent_id || '',
-        medicalInstructions: setting.medical_instructions || MEDICAL_INTAKE_INSTRUCTIONS_NEW, // Use constants as default
-        voice: setting.voice,
-        temperature: setting.temperature,
-        maxResponseLength: setting.max_response_length,
-        engineMap: parseEngineMap((setting as any).engine_map)
-      });
+      res.json(toSettingsResponse(setting));
     } else {
       // No settings table exists yet, return defaults
       res.json({
         id: 1,
         model: 'gpt-4o-realtime-preview',
-        openaiApiKey: process.env.OPENAI_API_KEY || '', // Use .env value as default
+        openaiApiKey: '',
+        openaiApiKeyConfigured: !!process.env.OPENAI_API_KEY,
         medicalInstructions: MEDICAL_INTAKE_INSTRUCTIONS_NEW, // Use constants as default
         voice: 'alloy',
         temperature: 0.6,
@@ -1389,8 +1397,8 @@ const validateMedicalInstructions = (instructions: string): { isValid: boolean; 
   }
 };
 
-// Save settings configuration
-app.post('/api/settings/config', async (req: any, res: any) => {
+// Save settings configuration (admin only — this controls the provider, keys and clinical prompt)
+app.post('/api/settings/config', requireRole('admin'), async (req: any, res: any) => {
   try {
     const settingsData = req.body;
 
@@ -1413,12 +1421,18 @@ app.post('/api/settings/config', async (req: any, res: any) => {
 
     console.log(`💾 Saving settings with medical instructions (${settingsData.medicalInstructions.length} chars)`);
 
+    // The client never receives the stored keys, so a blank key field means "keep the current one".
+    const existingRows = await db.getAllSettings();
+    const existing: any = existingRows && existingRows.length > 0 ? existingRows[0] : null;
+    const keyOrExisting = (incoming: any, current: any) =>
+      (typeof incoming === 'string' && incoming.trim()) ? incoming.trim() : (current ?? null);
+
     const mappedSettings = {
       id: Number(settingsData.id), // ensure number
       provider: settingsData.provider || 'openai',
       model: String(settingsData.model),
-      openai_api_key: settingsData.openaiApiKey ?? null,
-      retellai_api_key: settingsData.retellAIApiKey ?? null,
+      openai_api_key: keyOrExisting(settingsData.openaiApiKey, existing?.openai_api_key),
+      retellai_api_key: keyOrExisting(settingsData.retellAIApiKey, existing?.retellai_api_key),
       retellai_agent_id: settingsData.retellAIAgentId ?? null,
       medical_instructions: String(settingsData.medicalInstructions),
       voice: String(settingsData.voice ?? 'alloy'),
@@ -1430,28 +1444,15 @@ app.post('/api/settings/config', async (req: any, res: any) => {
       )),
     };
 
-    // Save to DB
-    console.log('Saving settings:', mappedSettings);
-    await db.saveSettings(mappedSettings);      
+    // Save to DB. Log only non-secret fields (never the API keys or the clinic prompt).
+    console.log(`💾 Saving settings: provider=${mappedSettings.provider} model=${mappedSettings.model} voice=${mappedSettings.voice} by=${req.user?.username}`);
+    await db.saveSettings(mappedSettings);
     const settings = await db.getAllSettings();
     const savedSettings = settings && settings.length > 0 ? settings[0] : null;
 
     if (savedSettings) {
-      // Return saved settings
-      res.json({
-        id: savedSettings.id,
-        provider: savedSettings.provider || 'openai',
-        model: savedSettings.model,
-        openaiApiKey: savedSettings.openai_api_key || '',
-        retellAIApiKey: (savedSettings as any).retellai_api_key || '',
-        retellAIAgentId: (savedSettings as any).retellai_agent_id || '',
-        medicalInstructions: savedSettings.medical_instructions || '',
-        voice: savedSettings.voice,
-        temperature: savedSettings.temperature,
-        maxResponseLength: savedSettings.max_response_length,
-        engineMap: parseEngineMap((savedSettings as any).engine_map),
-        message: 'Settings saved successfully'
-      });
+      // Return saved settings (keys redacted, same shape as GET)
+      res.json({ ...toSettingsResponse(savedSettings), message: 'Settings saved successfully' });
     } else {
       res.status(500).json({ error: 'Failed to save settings' });
     }

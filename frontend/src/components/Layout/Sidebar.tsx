@@ -84,7 +84,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
             </div>
             {!isCollapsed && (
               <div className="sidebar-logo-text">
-                <h5 className="mb-0 fw-bold text-white">HealthYoda</h5>
+                <h5 className="mb-0 fw-bold text-white">Kinvo</h5>
                 <small className="text-white text-opacity-75">AI Voice Assistant</small>
               </div>
             )}

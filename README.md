@@ -1,8 +1,10 @@
-# Medical Intake Voice Agent
+# Kinvo
 
-A revolutionary AI-powered medical intake system with real-time voice processing, professional medical-grade UI, and comprehensive session management.
+**Kind + Voice — every patient heard, before the doctor walks in.**
 
-![Medical Intake Voice Agent](https://img.shields.io/badge/Medical-AI%20Voice%20Agent-blue?style=for-the-badge)
+Kinvo is a multilingual AI voice nurse for hospital pre-consultation. Before the appointment it talks with the patient in Telugu, Hindi or English, asks about their symptoms and history one gentle question at a time, flags emergencies instantly, and hands the doctor a structured, review-ready intake report.
+
+![Kinvo](https://img.shields.io/badge/Kinvo-AI%20Voice%20Nurse-blue?style=for-the-badge)
 ![Node.js](https://img.shields.io/badge/Node.js-18+-green?style=flat-square)
 ![React](https://img.shields.io/badge/React-19-blue?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5+-blue?style=flat-square)
@@ -458,6 +460,6 @@ For enterprise deployments or professional support, please contact the developme
 
 ---
 
-**Built with ❤️ for the medical community**
+**Kinvo — built with ❤️ for the medical community**
 
-*Revolutionizing medical intake with AI-powered voice technology*
+*Kinvo doesn't diagnose or prescribe. It listens, so your doctors can heal.*

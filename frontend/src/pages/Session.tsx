@@ -114,7 +114,7 @@ const Session: React.FC = () => {
         const initialLog: Message[] = [{
           timestamp: new Date().toLocaleTimeString(),
           speaker: 'System',
-          message: 'Connecting to HealthYoda voice agent...please wait',
+          message: 'Connecting to Kinvo voice agent...please wait',
           type: 'system'
         }];
         if (data.isReturning && data.patient) {

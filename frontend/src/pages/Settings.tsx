@@ -6,8 +6,10 @@ type EngineMap = { [lang: string]: EngineChoice };
 interface SettingsConfig {
   provider?: string;
   model: string;
-  openaiApiKey: string;
+  openaiApiKey: string;              // always '' from the backend (keys are never sent); a typed value replaces the stored key
+  openaiApiKeyConfigured?: boolean;
   retellAIApiKey?: string;
+  retellAIApiKeyConfigured?: boolean;
   retellAIAgentId?: string;
   medicalInstructions: string;
   voice: string;
@@ -72,6 +74,12 @@ const Settings: React.FC = () => {
   const [defaults, setDefaults] = useState<{[key: string]: any}>({});
   const editorRef = useRef<HTMLDivElement>(null);
 
+  // Saving is admin-only on the backend (a 403 would also clear the login via the fetch
+  // interceptor), so non-admins get a read-only page.
+  const isAdmin = (() => {
+    try { return JSON.parse(localStorage.getItem('user') || '{}').role === 'admin'; } catch { return false; }
+  })();
+
   useEffect(() => {
     fetchSettings();
   }, []);
@@ -102,7 +110,9 @@ const Settings: React.FC = () => {
           provider: data.provider || 'openai',
           model: data.model || 'gpt-4o-realtime-preview',
           openaiApiKey: data.openaiApiKey || '',
+          openaiApiKeyConfigured: !!data.openaiApiKeyConfigured,
           retellAIApiKey: data.retellAIApiKey || '',
+          retellAIApiKeyConfigured: !!data.retellAIApiKeyConfigured,
           retellAIAgentId: data.retellAIAgentId || '',
           medicalInstructions: data.medicalInstructions || '',
           voice: data.voice || 'alloy',
@@ -116,7 +126,7 @@ const Settings: React.FC = () => {
         // Fallback to default values
         setConfig({
           model: 'gpt-4o-realtime-preview',
-          openaiApiKey: 'Please configure OpenAI API Key',
+          openaiApiKey: '',
           medicalInstructions: 'Unable to load default medical instructions. Please check your connection to the backend service.',
           voice: 'alloy',
           temperature: 0.6
@@ -726,12 +736,12 @@ const Settings: React.FC = () => {
                 className="field-input apikey-input"
                 value={config.retellAIApiKey || ''}
                 onChange={(e) => handleInputChange('retellAIApiKey', e.target.value)}
-                placeholder="Enter your RetellAI API key..."
+                placeholder={config.retellAIApiKeyConfigured ? 'Configured — leave blank to keep the current key' : 'Enter your RetellAI API key...'}
               />
               <div className="field-meta">
                 <div className="apikey-status">
-                  <span className={config.retellAIApiKey ? 'status-valid' : 'status-invalid'}>
-                    {config.retellAIApiKey ? '✅ API Key Configured' : '❌ API Key Required'}
+                  <span className={(config.retellAIApiKey || config.retellAIApiKeyConfigured) ? 'status-valid' : 'status-invalid'}>
+                    {(config.retellAIApiKey || config.retellAIApiKeyConfigured) ? '✅ API Key Configured' : '❌ API Key Required'}
                   </span>
                 </div>
               </div>
@@ -773,11 +783,16 @@ const Settings: React.FC = () => {
         )}
 
         {/* Action Buttons */}
+        {!isAdmin && (
+          <div className="alert alert-info">Only administrators can change settings.</div>
+        )}
         <div className="settings-actions">
           <button
             className="btn btn-primary save-btn"
             onClick={handleSave}
-            disabled={saving || (config.provider === 'openai' && !config.openaiApiKey) || (config.provider === 'retellai' && (!config.retellAIApiKey || !config.retellAIAgentId))}
+            disabled={!isAdmin || saving
+              || (config.provider === 'openai' && !config.openaiApiKey && !config.openaiApiKeyConfigured)
+              || (config.provider === 'retellai' && ((!config.retellAIApiKey && !config.retellAIApiKeyConfigured) || !config.retellAIAgentId))}
           >
              <i className="fas fa-save me-2"></i>
             {saving ? 'Saving...' : 'Save Settings'}
