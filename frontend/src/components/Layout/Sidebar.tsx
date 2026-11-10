@@ -80,18 +80,19 @@ const Sidebar: React.FC<SidebarProps> = ({ isCollapsed, onToggle }) => {
         <div className="d-flex align-items-center justify-content-between">
           <div className="d-flex align-items-center gap-2">
             <div className="sidebar-logo-icon">
-              <i className="fas fa-hospital text-white"></i>
+              <i className="fas fa-wave-square"></i>
             </div>
             {!isCollapsed && (
               <div className="sidebar-logo-text">
-                <h5 className="mb-0 fw-bold text-white">Kinvo</h5>
-                <small className="text-white text-opacity-75">AI Voice Assistant</small>
+                <h5 className="mb-0">Kinvo</h5>
+                <small>AI Voice Nurse</small>
               </div>
             )}
           </div>
           <button
             className="sidebar-toggle-btn"
             onClick={onToggle}
+            aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
             <i className={`fas ${isCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
           </button>

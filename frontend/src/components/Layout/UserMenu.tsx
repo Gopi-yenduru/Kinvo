@@ -12,8 +12,8 @@ const UserMenu: React.FC<UserMenuProps> = ({ userName, onLogout, status = 'onlin
   return (
     <div className="user-menu d-flex align-items-center gap-2 p-2 rounded-3 border flex-shrink-0">
       {/* Avatar */}
-      <div className="user-avatar bg-primary text-white rounded-circle d-flex align-items-center justify-content-center header-user-avatar" style={{ width: '40px', height: '40px', fontSize: '1.2rem' }}>
-        👨‍⚕️
+      <div className="user-avatar d-flex align-items-center justify-content-center header-user-avatar" aria-hidden="true">
+        {(userName || 'U').trim().slice(0, 2).toUpperCase()}
       </div>
 
       {/* User Info */}
@@ -27,11 +27,11 @@ const UserMenu: React.FC<UserMenuProps> = ({ userName, onLogout, status = 'onlin
 
       {/* Logout Button */}
       <button
-        className="btn btn-sm btn-outline-danger ms-auto"
+        className="btn btn-sm btn-outline-secondary ms-auto"
         onClick={onLogout}
-        title="Logout"
+        title="Log out"
       >
-        Logout
+        <i className="fas fa-arrow-right-from-bracket me-1"></i> Log out
       </button>
     </div>
   );

@@ -15,6 +15,7 @@ import Login from './pages/Login';
 import authService from './services/authService';
 import { SessionProvider } from './contexts/SessionContext';
 import './App.css';
+import './styles/kinvo.css'; // Kinvo design system — must load after App.css
 
 // Global fetch interceptor: inject the JWT on protected API calls + handle auth failures.
 const originalFetch = window.fetch;

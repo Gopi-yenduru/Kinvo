@@ -15,6 +15,7 @@ import db from './database-manager.js';
 import realtimeManager from './realtime.js';
 import ProviderFactory from './providers/ProviderFactory.js';
 import { MEDICAL_INTAKE_INSTRUCTIONS_NEW } from './constants.js';
+import { resolveAdvancedConfig } from './advanced-config.js';
 
 /** Tolerantly parse the settings.engine_map JSON into the per-language map the Sarvam pipeline
  *  reads. Returns undefined on null/bad JSON so the provider falls back to its env defaults. */
@@ -80,6 +81,10 @@ export async function createIntakeSession(opts: CreateIntakeSessionOptions): Pro
   // Get current settings from database
   const settings = await db.getAllSettings();
   const setting = settings && settings.length > 0 ? settings[0] : null;
+
+  // Resolve the advanced engine tuning ONCE (stored → .env → default) so every provider below
+  // starts this session with the admin's current advanced settings, applied live.
+  const advanced = resolveAdvancedConfig((setting as any)?.advanced_config);
 
   // Set the provider based on database settings
   const providerType = setting?.provider || 'openai';
@@ -236,7 +241,8 @@ export async function createIntakeSession(opts: CreateIntakeSessionOptions): Pro
       isReturning,
       patientName: (isReturning && existingPatient?.name) ? existingPatient.name : undefined,
       patientHistory: (isReturning && existingPatient?.medical_summary) ? existingPatient.medical_summary : undefined,
-      apiKey: process.env.SARVAM_API_KEY  // unused by the all-OpenAI English path
+      apiKey: process.env.SARVAM_API_KEY,  // unused by the all-OpenAI English path
+      advanced
     };
     try {
       const conn = await realtimeManager.createRealtimeSession(config);
@@ -267,7 +273,8 @@ export async function createIntakeSession(opts: CreateIntakeSessionOptions): Pro
       isReturning,
       patientName: (isReturning && existingPatient?.name) ? existingPatient.name : undefined,
       patientHistory: (isReturning && existingPatient?.medical_summary) ? existingPatient.medical_summary : undefined,
-      apiKey: process.env.SARVAM_API_KEY
+      apiKey: process.env.SARVAM_API_KEY,
+      advanced
     };
     try {
       const conn = await realtimeManager.createRealtimeSession(config);

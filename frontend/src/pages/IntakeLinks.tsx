@@ -242,7 +242,7 @@ const IntakeLinks: React.FC = () => {
 
       {error && !showModal && (
         <div className="error-alert">
-          <div className="error-icon">⚠️</div>
+          <div className="error-icon"><i className="fas fa-circle-exclamation" aria-hidden="true"></i></div>
           <div className="error-content">
             <h3>Error</h3>
             <p>{error}</p>
@@ -254,11 +254,11 @@ const IntakeLinks: React.FC = () => {
       <div className="sessions-content">
         {links.length === 0 ? (
           <div className="empty-sessions">
-            <div className="empty-icon">🔗</div>
+            <div className="empty-icon"><i className="fas fa-link" aria-hidden="true"></i></div>
             <h3>No Links Yet</h3>
             <p>Generate a link for a patient and share it with them to start a remote intake.</p>
             <button className="btn btn-primary" onClick={openModal}>
-              <span className="btn-icon">➕</span>
+              <i className="fas fa-plus btn-icon" aria-hidden="true"></i>
               Generate First Link
             </button>
           </div>
@@ -291,27 +291,27 @@ const IntakeLinks: React.FC = () => {
                       <td>
                         <div className="table-actions">
                           <button className="action-btn-sm primary" onClick={() => copyLink(link.token)} title="Copy the patient link">
-                            <span className="btn-icon-sm">🔗</span>
+                            <i className="fas fa-link btn-icon-sm" aria-hidden="true"></i>
                             {copiedToken === link.token ? 'Copied!' : 'Copy'}
                           </button>
                           <button className="action-btn-sm secondary" onClick={() => shareWhatsApp(link)} title="Share via WhatsApp">
-                            <span className="btn-icon-sm">💬</span>
+                            <i className="fas fa-comment-dots btn-icon-sm" aria-hidden="true"></i>
                             WhatsApp
                           </button>
                           {link.session_id && (status === 'completed' || status === 'in_progress' || status === 'error') && (
                             <button className="action-btn-sm secondary" onClick={() => navigate(`/sessions/${link.session_id}/transcript`)} title="View the intake result">
-                              <span className="btn-icon-sm">📄</span>
+                              <i className="fas fa-file-lines btn-icon-sm" aria-hidden="true"></i>
                               View result
                             </button>
                           )}
                           {canRevoke && (
                             <button className="action-btn-sm danger" onClick={() => revokeLink(link.id)} disabled={revokingId !== null} title="Revoke this link">
-                              <span className="btn-icon-sm">🚫</span>
+                              <i className="fas fa-ban btn-icon-sm" aria-hidden="true"></i>
                               {revokingId === link.id ? 'Revoking…' : 'Revoke'}
                             </button>
                           )}
                           <button className="action-btn-sm danger" onClick={() => deleteLink(link.id)} disabled={deletingId !== null} title="Delete this link permanently">
-                            <span className="btn-icon-sm">🗑️</span>
+                            <i className="fas fa-trash-can btn-icon-sm" aria-hidden="true"></i>
                             {deletingId === link.id ? 'Deleting…' : 'Delete'}
                           </button>
                         </div>

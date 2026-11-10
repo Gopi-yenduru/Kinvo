@@ -239,7 +239,7 @@ const Patients: React.FC = () => {
                                 <td>{new Date(s.start_time).toLocaleString()}</td>
                                 <td>{s.language ? (LANG_LABEL[s.language] || s.language) : '—'}</td>
                                 <td><span className="badge bg-secondary-subtle text-secondary">{s.status}</span></td>
-                                <td>{s.red_flags_detected > 0 ? <span className="text-danger">⚠️ {s.red_flags_detected}</span> : '—'}</td>
+                                <td>{s.red_flags_detected > 0 ? <span className="text-danger"><i className="fas fa-triangle-exclamation me-1" aria-hidden="true"></i>{s.red_flags_detected}</span> : '—'}</td>
                                 <td className="text-end">
                                   <button className="btn btn-sm btn-link p-0" onClick={() => { setSelected(null); navigate(`/sessions/${s.id}/transcript`); }}>Transcript</button>
                                 </td>

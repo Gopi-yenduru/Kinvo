@@ -3,6 +3,30 @@ import React, { useState, useEffect, useRef } from 'react';
 type EngineChoice = { stt: string; llm: string; tts: string };
 type EngineMap = { [lang: string]: EngineChoice };
 
+// Mirrors backend/src/advanced-config.ts. Every field is always present (the backend returns a
+// fully-resolved config), so the controls can bind directly without null checks.
+interface AdvancedConfig {
+  llm: { temperature: number; maxResponseTokens: number; frequencyPenalty: number; presencePenalty: number };
+  humanization: { timingJitter: boolean; paceJitter: boolean; breaths: boolean; noiseBed: boolean; telephonyEq: boolean };
+  fillers: { enabled: boolean; delayMs: number };
+  tts: { sarvamTemperature: number | null; speakerTe: string; speakerHi: string; speakerEn: string };
+  stt: { vadRms: number; silenceHangMs: number; minSpeechMs: number; maxUtteranceMs: number; noiseResetMs: number };
+  turnTaking: { resumeAfterInterruptMs: number; floorSettleMs: number; noEndSignalFallbackMs: number };
+}
+
+// Fallback used only until the backend config loads (it then replaces this with the real values).
+const DEFAULT_ADVANCED: AdvancedConfig = {
+  llm: { temperature: 0.6, maxResponseTokens: 220, frequencyPenalty: 0.6, presencePenalty: 0.3 },
+  humanization: { timingJitter: true, paceJitter: true, breaths: true, noiseBed: true, telephonyEq: false },
+  fillers: { enabled: true, delayMs: 350 },
+  tts: { sarvamTemperature: null, speakerTe: '', speakerHi: '', speakerEn: '' },
+  stt: { vadRms: 0.035, silenceHangMs: 500, minSpeechMs: 450, maxUtteranceMs: 20000, noiseResetMs: 1200 },
+  turnTaking: { resumeAfterInterruptMs: 3500, floorSettleMs: 450, noEndSignalFallbackMs: 2500 },
+};
+
+// Sarvam Bulbul v3 speakers (warm, natural; infer emotion from text + pace). '' = use the Voice setting.
+const SARVAM_SPEAKERS = ['', 'neha', 'priya', 'kavya', 'simran', 'ritu', 'pooja', 'anushka', 'aditya', 'rahul', 'rohan'];
+
 interface SettingsConfig {
   provider?: string;
   model: string;
@@ -15,6 +39,7 @@ interface SettingsConfig {
   voice: string;
   temperature: number;
   engineMap?: EngineMap;
+  advanced?: AdvancedConfig;
   id?: number;
 }
 
@@ -64,7 +89,11 @@ const Settings: React.FC = () => {
     medicalInstructions: '',
     voice: 'alloy',
     temperature: 0.6,
-    engineMap: DEFAULT_ENGINE_MAP
+    engineMap: DEFAULT_ENGINE_MAP,
+    advanced: DEFAULT_ADVANCED
+  });
+  const [advancedMode, setAdvancedMode] = useState<boolean>(() => {
+    try { return localStorage.getItem('kinvo.settings.advanced') === '1'; } catch { return false; }
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
@@ -117,7 +146,8 @@ const Settings: React.FC = () => {
           medicalInstructions: data.medicalInstructions || '',
           voice: data.voice || 'alloy',
           temperature: data.temperature || 0.7,
-          engineMap: { ...DEFAULT_ENGINE_MAP, ...(data.engineMap || {}) }
+          engineMap: { ...DEFAULT_ENGINE_MAP, ...(data.engineMap || {}) },
+          advanced: data.advanced ? (data.advanced as AdvancedConfig) : DEFAULT_ADVANCED
         });
 
         // Reset modification tracking - nothing has been modified yet
@@ -238,6 +268,16 @@ const Settings: React.FC = () => {
   };
 
 
+  // Update one field inside a group of the advanced config (e.g. ('humanization','breaths', true)).
+  const setAdv = (group: keyof AdvancedConfig, key: string, value: any) => {
+    setModifiedFields(prev => new Set([...prev, 'advanced']));
+    setConfig(prev => {
+      const base = prev.advanced || DEFAULT_ADVANCED;
+      return { ...prev, advanced: { ...base, [group]: { ...(base[group] as any), [key]: value } } };
+    });
+    if (error) setError('');
+  };
+
   // Update one engine (stt/llm/tts) for one language in the mapping.
   const handleEngineChange = (lang: string, stage: keyof EngineChoice, value: string) => {
     setModifiedFields(prev => new Set([...prev, 'engineMap']));
@@ -318,7 +358,7 @@ const Settings: React.FC = () => {
   const systemPromptSection = (
     <div className="settings-section">
       <div className="section-header">
-        <h2>🏥 System Prompt</h2>
+        <h2><i className="fas fa-notes-medical k-h-icon" aria-hidden="true"></i>System Prompt</h2>
         <div className="section-description">
           Configure the medical intake system prompt and guidelines
         </div>
@@ -327,10 +367,10 @@ const Settings: React.FC = () => {
         <label className="field-label">
           Medical Intake Instructions
           {config.medicalInstructions && config.medicalInstructions === defaults.medicalInstructions && !modifiedFields.has('medicalInstructions') && (
-            <span className="field-indicator default-indicator">📋 Default</span>
+            <span className="field-indicator default-indicator">Default</span>
           )}
           {modifiedFields.has('medicalInstructions') && (
-            <span className="field-indicator user-indicator">✏️ Modified</span>
+            <span className="field-indicator user-indicator">Modified</span>
           )}
         </label>
 
@@ -384,16 +424,189 @@ const Settings: React.FC = () => {
     </div>
   );
 
+  const A = config.advanced || DEFAULT_ADVANCED;
+
+  // Compact labelled range control. `fmt` renders the live value (e.g. "350 ms", "0.60").
+  const Slider = (
+    label: string, group: keyof AdvancedConfig, key: string, value: number,
+    min: number, max: number, step: number, fmt: (v: number) => string, hint?: string
+  ) => (
+    <div className="adv-field" key={`${group}.${key}`}>
+      <div className="adv-field-head">
+        <label className="field-label mb-0">{label}</label>
+        <span className="adv-value">{fmt(value)}</span>
+      </div>
+      <input type="range" className="form-range" min={min} max={max} step={step} value={value}
+        disabled={!isAdmin}
+        onChange={(e) => setAdv(group, key as any, Number(e.target.value) as any)} />
+      {hint && <div className="adv-hint">{hint}</div>}
+    </div>
+  );
+
+  // Toggle row (label + description on the left, switch on the right).
+  const Toggle = (label: string, group: keyof AdvancedConfig, key: string, value: boolean, hint: string) => (
+    <div className="adv-toggle" key={`${group}.${key}`}>
+      <div>
+        <div className="adv-toggle-label">{label}</div>
+        <div className="adv-hint">{hint}</div>
+      </div>
+      <div className="form-check form-switch m-0">
+        <input className="form-check-input" type="checkbox" role="switch" checked={value}
+          disabled={!isAdmin}
+          aria-label={label}
+          onChange={(e) => setAdv(group, key as any, e.target.checked as any)} />
+      </div>
+    </div>
+  );
+
+  const advancedPanel = (
+    <>
+      {/* Conversation intelligence (LLM) */}
+      <div className="settings-section">
+        <div className="section-header">
+          <h2><i className="fas fa-brain k-h-icon" aria-hidden="true"></i>Conversation Intelligence</h2>
+          <div className="section-description">How the language model phrases each reply. Applies to the next session.</div>
+        </div>
+        <div className="adv-grid">
+          {Slider('Creativity (temperature)', 'llm', 'temperature', A.llm.temperature, 0, 1, 0.05,
+            (v) => v.toFixed(2), 'Lower = consistent and on-script. Higher = more varied, human phrasing.')}
+          {Slider('Max reply length', 'llm', 'maxResponseTokens', A.llm.maxResponseTokens, 40, 1000, 10,
+            (v) => `${v} tokens`, 'Caps a single reply — a short empathetic line plus one question.')}
+          {Slider('Repetition penalty', 'llm', 'frequencyPenalty', A.llm.frequencyPenalty, -2, 2, 0.1,
+            (v) => v.toFixed(1), 'Discourages repeating the same words.')}
+          {Slider('Topic variety penalty', 'llm', 'presencePenalty', A.llm.presencePenalty, -2, 2, 0.1,
+            (v) => v.toFixed(1), 'Discourages dwelling on the same topic.')}
+        </div>
+      </div>
+
+      {/* Voice humanization */}
+      <div className="settings-section">
+        <div className="section-header">
+          <h2><i className="fas fa-wand-magic-sparkles k-h-icon" aria-hidden="true"></i>Voice Humanization</h2>
+          <div className="section-description">Subtle realism layers that stop the agent sounding like a bot.</div>
+        </div>
+        {Toggle('Response-gap timing jitter', 'humanization', 'timingJitter', A.humanization.timingJitter,
+          'Varies the pause before each reply so it is never the same twice.')}
+        {Toggle('TTS pace jitter', 'humanization', 'paceJitter', A.humanization.paceJitter,
+          'Wobbles the speaking pace per turn so the melody never loops.')}
+        {Toggle('Breaths before long replies', 'humanization', 'breaths', A.humanization.breaths,
+          'A quiet inhale under the first word of longer replies.')}
+        {Toggle('Room-tone noise bed', 'humanization', 'noiseBed', A.humanization.noiseBed,
+          'A faint continuous room tone so there is never digital dead silence.')}
+        {Toggle('Telephony EQ', 'humanization', 'telephonyEq', A.humanization.telephonyEq,
+          'Phone-line band-pass + compression. Off by default — hurts a hi-fi browser voice.')}
+      </div>
+
+      {/* Thinking fillers */}
+      <div className="settings-section">
+        <div className="section-header">
+          <h2><i className="fas fa-comment-dots k-h-icon" aria-hidden="true"></i>Thinking Fillers</h2>
+          <div className="section-description">Short "hmm…/సరే…" clips in the agent's own voice that cover LLM thinking time.</div>
+        </div>
+        {Toggle('Enable fillers', 'fillers', 'enabled', A.fillers.enabled,
+          'Play a short acknowledgement if the real reply has not started in time.')}
+        <div className="adv-grid mt-2">
+          {Slider('Filler delay', 'fillers', 'delayMs', A.fillers.delayMs, 0, 2000, 50,
+            (v) => `${v} ms`, 'How long to wait for the real reply before playing a filler.')}
+        </div>
+      </div>
+
+      {/* Voice & TTS */}
+      <div className="settings-section">
+        <div className="section-header">
+          <h2><i className="fas fa-wave-square k-h-icon" aria-hidden="true"></i>Voice &amp; Speech (TTS)</h2>
+          <div className="section-description">Per-language Sarvam speaker and expressive variation.</div>
+        </div>
+        <div className="adv-grid">
+          <div className="adv-field">
+            <label className="field-label">Expressiveness (Sarvam v3)</label>
+            <div className="adv-field-head">
+              <span className="adv-hint m-0">{A.tts.sarvamTemperature == null ? 'Stable (off)' : `Temperature ${A.tts.sarvamTemperature.toFixed(2)}`}</span>
+              <div className="form-check form-switch m-0">
+                <input className="form-check-input" type="checkbox" role="switch" disabled={!isAdmin}
+                  aria-label="Enable expressive variation"
+                  checked={A.tts.sarvamTemperature != null}
+                  onChange={(e) => setAdv('tts', 'sarvamTemperature', (e.target.checked ? 0.7 : null) as any)} />
+              </div>
+            </div>
+            {A.tts.sarvamTemperature != null && (
+              <input type="range" className="form-range mt-1" min={0.01} max={1} step={0.01}
+                value={A.tts.sarvamTemperature} disabled={!isAdmin}
+                onChange={(e) => setAdv('tts', 'sarvamTemperature', Number(e.target.value) as any)} />
+            )}
+            <div className="adv-hint">Only applies to Bulbul v3 voices. Higher = more dramatic, less deterministic.</div>
+          </div>
+          {([['Telugu voice', 'speakerTe'], ['Hindi voice', 'speakerHi'], ['English voice', 'speakerEn']] as const).map(([label, key]) => (
+            <div className="adv-field" key={key}>
+              <label className="field-label">{label} override</label>
+              <select className="form-select" value={(A.tts as any)[key]} disabled={!isAdmin}
+                onChange={(e) => setAdv('tts', key as any, e.target.value as any)}>
+                {SARVAM_SPEAKERS.map(s => <option key={s || 'default'} value={s}>{s || 'Use Voice setting'}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Speech recognition (English / OpenAI path) */}
+      <div className="settings-section">
+        <div className="section-header">
+          <h2><i className="fas fa-ear-listen k-h-icon" aria-hidden="true"></i>Speech Recognition (English)</h2>
+          <div className="section-description">End-of-turn detection for the English pipeline. Telugu/Hindi use Sarvam's own VAD.</div>
+        </div>
+        <div className="adv-grid">
+          {Slider('Speech energy floor', 'stt', 'vadRms', A.stt.vadRms, 0.005, 0.2, 0.005,
+            (v) => v.toFixed(3), 'Louder than this counts as speech. Raise it in a noisy room.')}
+          {Slider('End-of-turn silence', 'stt', 'silenceHangMs', A.stt.silenceHangMs, 150, 2000, 50,
+            (v) => `${v} ms`, 'Trailing silence that ends the patient’s turn. Lower = snappier.')}
+          {Slider('Minimum speech', 'stt', 'minSpeechMs', A.stt.minSpeechMs, 100, 2000, 50,
+            (v) => `${v} ms`, 'Real speech needed before a turn can finalize (rejects blips).')}
+          {Slider('Max utterance', 'stt', 'maxUtteranceMs', A.stt.maxUtteranceMs, 5000, 40000, 1000,
+            (v) => `${(v / 1000).toFixed(0)} s`, 'Hard cap — force a finalize after this long.')}
+          {Slider('Noise reset', 'stt', 'noiseResetMs', A.stt.noiseResetMs, 300, 4000, 100,
+            (v) => `${v} ms`, 'Discard a buffer that never became real speech.')}
+        </div>
+      </div>
+
+      {/* Turn-taking & barge-in */}
+      <div className="settings-section">
+        <div className="section-header">
+          <h2><i className="fas fa-arrows-turn-to-dots k-h-icon" aria-hidden="true"></i>Turn-taking &amp; Barge-in</h2>
+          <div className="section-description">How the agent hands over the floor and recovers from false interruptions.</div>
+        </div>
+        <div className="adv-grid">
+          {Slider('Resume after false barge-in', 'turnTaking', 'resumeAfterInterruptMs', A.turnTaking.resumeAfterInterruptMs, 1000, 10000, 250,
+            (v) => `${(v / 1000).toFixed(1)} s`, 'If an interruption turns out to be noise, re-ask after this long.')}
+          {Slider('Echo-settle window', 'turnTaking', 'floorSettleMs', A.turnTaking.floorSettleMs, 0, 1500, 50,
+            (v) => `${v} ms`, 'Ignore the mic briefly after the agent speaks so its own tail is not heard.')}
+          {Slider('End-signal fallback', 'turnTaking', 'noEndSignalFallbackMs', A.turnTaking.noEndSignalFallbackMs, 1000, 6000, 250,
+            (v) => `${(v / 1000).toFixed(1)} s`, 'Safety net if the speech end-signal never arrives.')}
+        </div>
+      </div>
+    </>
+  );
+
   return (
     <div className="settings-page">
-      <div className="page-title">
-        <h1>⚙️ System Settings</h1>
-        <p>Configure system parameters and view current configuration</p>
+      <div className="page-title d-flex flex-wrap justify-content-between align-items-start gap-3">
+        <div>
+          <h1>System Settings</h1>
+          <p>Configure system parameters and view current configuration</p>
+        </div>
+        <div className="adv-mode-toggle">
+          <div className="form-check form-switch m-0">
+            <input className="form-check-input" type="checkbox" role="switch" id="adv-mode"
+              checked={advancedMode}
+              onChange={(e) => { setAdvancedMode(e.target.checked); try { localStorage.setItem('kinvo.settings.advanced', e.target.checked ? '1' : '0'); } catch { /* ignore */ } }} />
+            <label className="form-check-label fw-semibold" htmlFor="adv-mode">Advanced mode</label>
+          </div>
+          <div className="adv-hint">Expose every engine tuning knob</div>
+        </div>
       </div>
 
       {(error || successMessage) && (
         <div className={`settings-message ${error ? 'error' : 'success'}`}>
-          <div className="message-icon">{error ? '⚠️' : '✅'}</div>
+          <div className="message-icon"><i className={`fas ${error ? 'fa-circle-exclamation' : 'fa-circle-check'}`} aria-hidden="true"></i></div>
           <div className="message-content">
             <p>{error || successMessage}</p>
           </div>
@@ -404,7 +617,7 @@ const Settings: React.FC = () => {
         {/* Provider Selection */}
         <div className="settings-section">
           <div className="section-header">
-            <h2>🏢 AI Provider Selection</h2>
+            <h2><i className="fas fa-microchip k-h-icon" aria-hidden="true"></i>AI Provider Selection</h2>
             <div className="section-description">
               Choose which AI provider to use for voice conversations
             </div>
@@ -429,7 +642,7 @@ const Settings: React.FC = () => {
         {config.provider === 'sarvam' && (
           <div className="settings-section">
             <div className="section-header">
-              <h2>🗣️ Voice (Telugu)</h2>
+              <h2><i className="fas fa-microphone-lines k-h-icon" aria-hidden="true"></i>Voice (Telugu)</h2>
             </div>
             <div className="settings-field">
               <label className="field-label">Voice</label>
@@ -455,7 +668,7 @@ const Settings: React.FC = () => {
         {config.provider === 'sarvam' && (
           <div className="settings-section">
             <div className="section-header">
-              <h2>🧩 Language Engine Mapping</h2>
+              <h2><i className="fas fa-language k-h-icon" aria-hidden="true"></i>Language Engine Mapping</h2>
               <div className="section-description">
                 For Telugu and Hindi, map each stage of the voice pipeline — Speech-to-Text,
                 the LLM, and Text-to-Speech — to a provider. Changes apply to the next session.
@@ -531,7 +744,7 @@ const Settings: React.FC = () => {
           <>
             <div className="settings-section">
               <div className="section-header">
-                <h2>🐍 Pipecat (Open Source)</h2>
+                <h2><i className="fas fa-diagram-project k-h-icon" aria-hidden="true"></i>Pipecat (Open Source)</h2>
                 <div className="section-description">
                   Sessions run through the open-source Pipecat pipeline in the separate
                   Python service (<code>pipecat-service/</code>). It must be running for
@@ -572,7 +785,7 @@ const Settings: React.FC = () => {
           <>
             <div className="settings-section">
               <div className="section-header">
-                <h2>🎧 LiveKit Agents + Chatterbox-Turbo (Open Source)</h2>
+                <h2><i className="fas fa-headset k-h-icon" aria-hidden="true"></i>LiveKit Agents + Chatterbox-Turbo (Open Source)</h2>
                 <div className="section-description">
                   Sessions run through the open-source LiveKit Agents pipeline in the separate
                   Python service (<code>livekit-service/</code>). It must be running — along
@@ -611,7 +824,7 @@ const Settings: React.FC = () => {
             {/* Telugu/Hindi open-source STT/TTS engine selection — routes to indic-voice-service. */}
             <div className="settings-section">
               <div className="section-header">
-                <h2>🧩 Telugu / Hindi Engines (open source)</h2>
+                <h2><i className="fas fa-language k-h-icon" aria-hidden="true"></i>Telugu / Hindi Engines (open source)</h2>
                 <div className="section-description">
                   Choose Speech-to-Text and Text-to-Speech for Telugu &amp; Hindi. The Indic models
                   (IndicConformer / IndicWhisper, Indic Parler-TTS) run in the separate
@@ -666,7 +879,7 @@ const Settings: React.FC = () => {
             {/* AI Model Configuration */}
             <div className="settings-section">
               <div className="section-header">
-                <h2>🤖 AI Model Configuration</h2>
+                <h2><i className="fas fa-sliders k-h-icon" aria-hidden="true"></i>AI Model Configuration</h2>
               </div>
               <div className="settings-field">
                 <label className="field-label">Model</label>
@@ -723,7 +936,7 @@ const Settings: React.FC = () => {
         {config.provider === 'retellai' && (
           <div className="settings-section">
             <div className="section-header">
-              <h2>🔑 API Configuration</h2>
+              <h2><i className="fas fa-key k-h-icon" aria-hidden="true"></i>API Configuration</h2>
               <div className="section-description">
                 Configure RetellAI API keys and credentials
               </div>
@@ -741,7 +954,7 @@ const Settings: React.FC = () => {
               <div className="field-meta">
                 <div className="apikey-status">
                   <span className={(config.retellAIApiKey || config.retellAIApiKeyConfigured) ? 'status-valid' : 'status-invalid'}>
-                    {(config.retellAIApiKey || config.retellAIApiKeyConfigured) ? '✅ API Key Configured' : '❌ API Key Required'}
+                    {(config.retellAIApiKey || config.retellAIApiKeyConfigured) ? 'API key configured' : 'API key required'}
                   </span>
                 </div>
               </div>
@@ -758,7 +971,7 @@ const Settings: React.FC = () => {
               />
               <div className="field-meta">
                 <span className={config.retellAIAgentId ? 'status-valid' : 'status-invalid'}>
-                  {config.retellAIAgentId ? '✅ Agent ID Configured' : '❌ Agent ID Required'}
+                  {config.retellAIAgentId ? 'Agent ID configured' : 'Agent ID required'}
                 </span>
               </div>
             </div>
@@ -769,7 +982,7 @@ const Settings: React.FC = () => {
         {config.provider === 'vapi' && (
           <div className="settings-section">
             <div className="section-header">
-              <h2>🔑 API Configuration</h2>
+              <h2><i className="fas fa-key k-h-icon" aria-hidden="true"></i>API Configuration</h2>
               <div className="section-description">
                 Configure VAPI API keys and credentials
               </div>
@@ -783,6 +996,20 @@ const Settings: React.FC = () => {
         )}
 
         {/* Action Buttons */}
+        {/* Advanced control panel — every fine-grained engine knob, revealed by the toggle above. */}
+        {advancedMode && (
+          <div className="adv-panel">
+            <div className="adv-panel-banner">
+              <i className="fas fa-sliders" aria-hidden="true"></i>
+              <div>
+                <strong>Advanced engine tuning</strong>
+                <div className="adv-hint">These apply to the Sarvam/OpenAI voice pipeline on the next session started. Defaults are safe — only change what you understand.</div>
+              </div>
+            </div>
+            {advancedPanel}
+          </div>
+        )}
+
         {!isAdmin && (
           <div className="alert alert-info">Only administrators can change settings.</div>
         )}

@@ -158,7 +158,7 @@ const Dashboard: React.FC = () => {
           <div className="row align-items-start col-12 g-3">
             <div className="col-12 col-lg-8">
               <div className="page-title">
-                <h1 className="h2 fw-bold text-primary mb-2">Medical Intake Dashboard</h1>
+                <h1 className="h2 fw-bold text-primary mb-2">Dashboard</h1>
                 <p className="text-muted mb-0">Welcome back! Here's what's happening with your intake sessions today.</p>
               </div>
             </div>

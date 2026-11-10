@@ -337,7 +337,7 @@ const PatientIntake: React.FC = () => {
               ) : log.map((m, i) => (
                 <div key={i} className={`d-flex mb-2 ${m.speaker === 'You' ? 'justify-content-end' : 'justify-content-start'}`}>
                   <div className={`p-2 px-3 rounded-3 ${m.speaker === 'Agent' ? 'bg-primary-subtle' : m.speaker === 'You' ? 'bg-success-subtle' : m.speaker === 'Alert' ? 'bg-danger-subtle' : 'bg-secondary-subtle'}`} style={{ maxWidth: '85%' }}>
-                    <div className="small fw-semibold mb-1">{m.speaker === 'Agent' ? '🩺 Assistant' : m.speaker === 'You' ? '🧑 You' : m.speaker === 'Alert' ? '⚠️ Alert' : 'ℹ️'}</div>
+                    <div className="small fw-semibold mb-1">{m.speaker === 'Agent' ? 'Kinvo' : m.speaker === 'You' ? 'You' : m.speaker === 'Alert' ? 'Alert' : 'Info'}</div>
                     <div style={{ whiteSpace: 'pre-wrap' }}>{m.message}</div>
                   </div>
                 </div>

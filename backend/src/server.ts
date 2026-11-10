@@ -12,6 +12,7 @@ import { authenticateJWT, requireRole, getJwtSecret, AuthRequest } from "./auth.
 import { buildFhirBundle } from "./fhir-service.js";
 import { answerQuestion as assistantAnswer, speak as assistantSpeak, transcribe as assistantTranscribe } from "./assistant-service.js";
 import { createIntakeSession, IntakeSessionError } from "./intake-service.js";
+import { resolveAdvancedConfig } from "./advanced-config.js";
 import crypto from "crypto";
 
 const app = express();
@@ -1344,7 +1345,9 @@ const toSettingsResponse = (setting: any) => ({
   voice: setting.voice,
   temperature: setting.temperature,
   maxResponseLength: setting.max_response_length,
-  engineMap: parseEngineMap(setting.engine_map)
+  engineMap: parseEngineMap(setting.engine_map),
+  // Advanced engine tuning, always fully populated (stored value → .env → built-in default).
+  advanced: resolveAdvancedConfig(setting.advanced_config)
 });
 
 // Settings configuration endpoint
@@ -1365,7 +1368,8 @@ app.get('/api/settings/config', async (req: any, res: any) => {
         voice: 'alloy',
         temperature: 0.6,
         maxResponseLength: 200,
-        engineMap: parseEngineMap(null)
+        engineMap: parseEngineMap(null),
+        advanced: resolveAdvancedConfig(null)
       });
     }
   } catch (error: any) {
@@ -1442,6 +1446,8 @@ app.post('/api/settings/config', requireRole('admin'), async (req: any, res: any
       engine_map: JSON.stringify(parseEngineMap(
         settingsData.engineMap ? JSON.stringify(settingsData.engineMap) : null
       )),
+      // Advanced tuning: clamp + fully populate before storing so the DB only holds a valid config.
+      advanced_config: JSON.stringify(resolveAdvancedConfig(settingsData.advanced ?? null)),
     };
 
     // Save to DB. Log only non-secret fields (never the API keys or the clinic prompt).

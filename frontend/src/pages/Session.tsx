@@ -171,7 +171,7 @@ const Session: React.FC = () => {
       onAgentTranscript: (text) => addSentenceToConversationLog('Agent', text, 'text'),
       onRedFlag: (symptoms, severity) => {
         const warning = `⚠️ MEDICAL ALERT: ${severity.toUpperCase()} SYMPTOMS DETECTED\n• ${symptoms}\nClinical team notified — a doctor is being sent immediately.`;
-        addToConversationLog('⚠️ ALERT', warning, 'alert');
+        addToConversationLog('Alert', warning, 'alert');
       },
       onError: (message) => setErrorMessage(message),
       onSessionEnded: () => {
@@ -841,7 +841,7 @@ const Session: React.FC = () => {
                             {entry.speaker === 'Agent' && <i className="fas fa-user-md"></i>}
                             {entry.speaker === 'You' && <i className="fas fa-user"></i>}
                             {entry.speaker === 'System' && <i className="fas fa-cog"></i>}
-                            {entry.speaker === '⚠️ ALERT' && <i className="fas fa-exclamation-triangle"></i>}
+                            {entry.speaker === 'Alert' && <i className="fas fa-exclamation-triangle"></i>}
                           </div>
                           <div className={`message-bubble flex-grow-1 p-3 rounded-3 ${entry.speaker === 'Agent' ? 'bg-primary-subtle border border-primary-subtle' :
                               entry.speaker === 'You' ? 'bg-success-subtle border border-success-subtle' :

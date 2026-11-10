@@ -76,13 +76,13 @@ const Transcript: React.FC = () => {
   const getSpeakerIcon = (speaker: string) => {
     switch (speaker) {
       case 'agent':
-        return '🤖';
+        return 'fa-user-nurse';
       case 'patient':
-        return '👤';
+        return 'fa-user';
       case 'system':
-        return '⚙️';
+        return 'fa-gear';
       default:
-        return '💬';
+        return 'fa-comment';
     }
   };
 
@@ -149,7 +149,7 @@ const Transcript: React.FC = () => {
             <div key={index} className={`transcript-entry ${entry.speaker}`}>
               <div className="transcript-meta">
                 <div className="transcript-speaker">
-                  <span className="speaker-icon">{getSpeakerIcon(entry.speaker)}</span>
+                  <span className="speaker-icon"><i className={`fas ${getSpeakerIcon(entry.speaker)}`} aria-hidden="true"></i></span>
                   <span className="speaker-name">{entry.speaker.charAt(0).toUpperCase() + entry.speaker.slice(1)}</span>
                 </div>
                 <div className="transcript-time">
@@ -165,7 +165,7 @@ const Transcript: React.FC = () => {
 
         {transcriptData.transcript.length === 0 && (
           <div className="empty-transcript">
-            <div className="empty-icon">📝</div>
+            <div className="empty-icon"><i className="fas fa-file-lines" aria-hidden="true"></i></div>
             <h3>No Transcript Available</h3>
             <p>The transcript for this session could not be loaded or is empty.</p>
           </div>

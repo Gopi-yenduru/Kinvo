@@ -7,6 +7,7 @@ import { emergencyMessage, detectEmergency, Lang } from '../emergency.js';
 import { EmotionEngine } from './EmotionEngine.js';
 import { fillerLibrary, allFillerTexts } from './FillerAudio.js';
 import { GapSampler, PaceJitter, BreathScheduler, countSelfCorrections } from './Humanize.js';
+import { AdvancedConfig, envDefaults } from '../advanced-config.js';
 
 /**
  * SarvamProvider — Telugu voice intake agent.
@@ -368,6 +369,8 @@ interface SarvamSession {
   sttEngine: SttEngine;      // 'sarvam' (streaming) or 'openai' (buffered, English)
   ttsEngine: TtsEngine;      // resolved from Settings engineMap (per lang), else env default
   llmEngine: LlmEngine;      // resolved from Settings engineMap (per lang), else 'sarvam'
+  adv: AdvancedConfig;       // advanced tuning (humanization, fillers, LLM/TTS/STT/turn-taking), applied live
+  ttsSpeakerOverride: string; // per-language Sarvam speaker override from advanced settings ('' = none)
   // OpenAI STT (buffered) state — unused on the Sarvam STT path.
   oaAudio: number[];         // accumulated PCM16 samples for the current utterance
   oaRate: number;            // sample rate of the accumulated audio (from the browser frames)
@@ -626,6 +629,11 @@ class SarvamProvider implements BaseProvider {
     // A returning patient WITH prior history → run the follow-up plan (don't re-ask the intake).
     const isFollowup = !!(config.isReturning && config.patientHistory && String(config.patientHistory).trim());
     const plan = isFollowup ? FOLLOWUP_QUESTIONS : INTAKE_QUESTIONS;
+    // Advanced tuning for THIS session: the admin's saved config, or the .env/built-in defaults.
+    const adv: AdvancedConfig = config.advanced || envDefaults();
+    const ttsSpeakerOverride = (lang === 'te-IN' ? adv.tts.speakerTe
+                              : lang === 'hi-IN' ? adv.tts.speakerHi
+                              : adv.tts.speakerEn) || '';
     console.log(`🟣 Creating Sarvam session ${sessionId} (lang=${lang}, ${isFollowup ? 'FOLLOW-UP' : 'new intake'})`);
 
     console.log(`   engines (lang=${lang}): stt=${sttEngine} llm=${llmEngine} tts=${ttsEngine}`);
@@ -636,6 +644,8 @@ class SarvamProvider implements BaseProvider {
       sttEngine,
       ttsEngine,
       llmEngine,
+      adv,
+      ttsSpeakerOverride,
       oaAudio: [],
       oaRate: TTS_SAMPLE_RATE,
       oaSpeechMs: 0,
@@ -687,7 +697,7 @@ class SarvamProvider implements BaseProvider {
 
     // Pre-warm the filler-audio library for this voice in the background (process-wide
     // cache — clips are synthesised once and reused by every later session).
-    if (FILLERS_ENABLED) this.prewarmFillers(session);
+    if (session.adv.fillers.enabled) this.prewarmFillers(session);
 
     // Sarvam STT: connect now so it's ready the instant the patient is given the floor.
     // (TTS uses a fresh connection per utterance — Sarvam closes the TTS socket after each
@@ -715,7 +725,7 @@ class SarvamProvider implements BaseProvider {
     s.frontendWs = frontendWs;
     // fx flags tell the browser which client-side realism layers to enable (upgrade 3):
     // the comfort-noise bed and the telephony EQ live in the playback graph, not here.
-    this.send(s, { type: 'session_ready', fx: { noiseBed: VANI_NOISE_BED, telephonyEq: VANI_TELEPHONY_EQ } });
+    this.send(s, { type: 'session_ready', fx: { noiseBed: s.adv.humanization.noiseBed, telephonyEq: s.adv.humanization.telephonyEq } });
     if (!s.greeted && !s.ended) {
       s.greeted = true;
       // Small delay so the browser has finished wiring its message handler.
@@ -816,7 +826,7 @@ class SarvamProvider implements BaseProvider {
     // re-ask the question rather than leaving the patient in silence.
     this.clearResumeTimer(s);
     if (s.lastAgentReply) {
-      s.resumeTimer = setTimeout(() => this.speakAgain(sessionId).catch(() => {}), RESUME_AFTER_INTERRUPT_MS);
+      s.resumeTimer = setTimeout(() => this.speakAgain(sessionId).catch(() => {}), s.adv.turnTaking.resumeAfterInterruptMs);
     }
   }
 
@@ -893,7 +903,7 @@ class SarvamProvider implements BaseProvider {
     for (let i = 0; i < pcm16.length; i++) { const v = pcm16[i] / 32768; sum += v * v; }
     const rms = Math.sqrt(sum / pcm16.length);
     const frameMs = (pcm16.length / sampleRate) * 1000;
-    const voiced = rms >= STT_VAD_RMS;
+    const voiced = rms >= s.adv.stt.vadRms;
 
     // Only start buffering once real speech begins (skip leading room noise/silence).
     if (!voiced && s.oaSpeechMs === 0) return;
@@ -910,14 +920,14 @@ class SarvamProvider implements BaseProvider {
 
     // Discard a buffer that never reached real speech and has since gone quiet — it was a noise/echo
     // blip, not a turn. Prevents 3–9 char "phantom" turns and avoids sending near-silence to OpenAI.
-    if (s.oaSpeechMs < STT_MIN_SPEECH_MS && s.oaSilenceMs >= STT_NOISE_RESET_MS) {
+    if (s.oaSpeechMs < s.adv.stt.minSpeechMs && s.oaSilenceMs >= s.adv.stt.noiseResetMs) {
       s.oaAudio = []; s.oaSpeechMs = 0; s.oaSilenceMs = 0;
       return;
     }
 
     const totalMs = (s.oaAudio.length / sampleRate) * 1000;
-    const endOfTurn = s.oaSpeechMs >= STT_MIN_SPEECH_MS && s.oaSilenceMs >= STT_SILENCE_HANG_MS;
-    if (endOfTurn || totalMs >= STT_MAX_UTTERANCE_MS) {
+    const endOfTurn = s.oaSpeechMs >= s.adv.stt.minSpeechMs && s.oaSilenceMs >= s.adv.stt.silenceHangMs;
+    if (endOfTurn || totalMs >= s.adv.stt.maxUtteranceMs) {
       this.finalizeOpenAiUtterance(s).catch(e => console.error('OpenAI STT finalize failed:', e?.message || e));
     }
   }
@@ -1065,7 +1075,7 @@ class SarvamProvider implements BaseProvider {
       } else {
         // Transcript arrived before END_SPEECH (patient may still be talking). Wait for
         // END_SPEECH; arm only a safety net in case that signal never comes.
-        this.scheduleFinalize(sessionId, NO_END_SIGNAL_FALLBACK_MS);
+        this.scheduleFinalize(sessionId, s.adv.turnTaking.noEndSignalFallbackMs);
       }
     }
   }
@@ -1249,11 +1259,11 @@ class SarvamProvider implements BaseProvider {
       const replyWords = reply.split(/\s+/).filter(Boolean).length;
       // Breath layer (upgrade 3): a quiet inhale under the first word of longer replies.
       // Scheduled every turn (so cadence tracks) but never on the emergency line.
-      s.pendingBreath = VANI_BREATHS && !emergency ? s.breaths.next(replyWords) : null;
+      s.pendingBreath = s.adv.humanization.breaths && !emergency ? s.breaths.next(replyWords) : null;
       // Timing humanization (upgrade 4): if the pipeline was FASTER than a human would
       // be, hold the audio until a per-turn sampled gap has passed. Never delays a turn
       // that is already at/over target, so the ≤1.2 s latency budget is untouched.
-      if (VANI_TIMING_JITTER && !opts.greeting && !emergency) {
+      if (s.adv.humanization.timingJitter && !opts.greeting && !emergency) {
         await this.humanGap(s, turnId, replyWords, isCurrent);
         if (!isCurrent()) return;
       }
@@ -1288,10 +1298,10 @@ class SarvamProvider implements BaseProvider {
    *  client and a couple of engine-specific params differ. Returns the raw response object. */
   private async completeChat(s: SarvamSession, messages: ChatMessage[], toolChoice: 'auto' | 'none'): Promise<any> {
     const common = {
-      temperature: INTAKE_TEMPERATURE, // low → deterministic, on-script
-      max_tokens: 220,                 // a short empathetic sentence + one question; caps any runaway
-      frequency_penalty: 0.6,
-      presence_penalty: 0.3,
+      temperature: s.adv.llm.temperature,         // advanced-tunable; low → deterministic, on-script
+      max_tokens: s.adv.llm.maxResponseTokens,    // caps a single reply (short sentence + one question)
+      frequency_penalty: s.adv.llm.frequencyPenalty,
+      presence_penalty: s.adv.llm.presencePenalty,
       messages: messages as any,
       tools: this.getFunctionTools(),
       tool_choice: toolChoice
@@ -1493,7 +1503,8 @@ class SarvamProvider implements BaseProvider {
     const speaker = this.resolveSpeaker(s);
     let ttsModel = ttsModelForSpeaker(speaker);
     // Opt-in expressive variation: v3 speakers can use bulbul:v3-beta + temperature.
-    const useTemperature = TTS_TEMPERATURE != null && ttsModel === 'bulbul:v3';
+    const sarvamTemp = s.adv.tts.sarvamTemperature;
+    const useTemperature = sarvamTemp != null && ttsModel === 'bulbul:v3';
     if (useTemperature) ttsModel = 'bulbul:v3-beta';
     const pr = toneProsody(tone);
     const apiKey = s.config.apiKey || process.env.SARVAM_API_KEY!;
@@ -1538,14 +1549,14 @@ class SarvamProvider implements BaseProvider {
           if (typeof tts.waitForOpen === 'function') await tts.waitForOpen();
           // Prosody variance (upgrade 2): wobble the tone's base pace ±0.03 per turn so the
           // melodic contour never loops; consecutive turns are guaranteed different values.
-          const pace = VANI_PACE_JITTER ? s.paceJitter.jitter(pr.pace) : pr.pace;
+          const pace = s.adv.humanization.paceJitter ? s.paceJitter.jitter(pr.pace) : pr.pace;
           const ttsCfg: any = {
             target_language_code: s.lang, speaker, model: ttsModel,
             pace, pitch: pr.pitch, loudness: pr.loudness,            // pace drives v3; v2 also uses pitch/loudness
             enable_preprocessing: true,   // normalize numbers/mixed text → smoother, more natural speech
             output_audio_codec: 'linear16', speech_sample_rate: TTS_SAMPLE_RATE
           };
-          if (useTemperature) ttsCfg.temperature = TTS_TEMPERATURE;
+          if (useTemperature) ttsCfg.temperature = sarvamTemp;
           tts.configureConnection(ttsCfg);
           tts.convert(text);
           tts.flush();
@@ -1587,7 +1598,7 @@ class SarvamProvider implements BaseProvider {
 
   /** Resolve the Sarvam TTS voice: per-language env override (A/B) → DB/Settings → default. */
   private resolveSpeaker(s: SarvamSession): string {
-    return TTS_SPEAKER_OVERRIDE[s.lang] || (s.config.voice && String(s.config.voice).trim()) || DEFAULT_TTS_SPEAKER;
+    return s.ttsSpeakerOverride || (s.config.voice && String(s.config.voice).trim()) || DEFAULT_TTS_SPEAKER;
   }
 
   // ───────────────────────────────────────────────────────────────────────────────
@@ -1621,7 +1632,7 @@ class SarvamProvider implements BaseProvider {
    *  when it fires, play one short emotion-matched clip (never the same as the last two).
    *  The real reply then queues gaplessly behind it in the browser player. */
   private armFiller(s: SarvamSession, turnId: number, isCurrent: () => boolean): void {
-    if (!FILLERS_ENABLED) return;
+    if (!s.adv.fillers.enabled) return;
     const engine = this.fillerEngine(s);
     if (!engine) return;
     this.clearFillerTimer(s);
@@ -1634,7 +1645,7 @@ class SarvamProvider implements BaseProvider {
       s.recentFillers = [...s.recentFillers.slice(-1), clip.text];
       console.log(`💬 Filler (${s.config.sessionId}) turn=${turnId} set=${s.emotion.fillerSet()}`);
       this.send(s, { type: 'agent_audio', audio: clip.audio.toString('base64'), responseId: turnId, seq: 0 });
-    }, FILLER_DELAY_MS);
+    }, s.adv.fillers.delayMs);
   }
 
   /** Synthesise any missing filler clips for this session's voice into the process-wide
@@ -1936,7 +1947,7 @@ class SarvamProvider implements BaseProvider {
    *  otherwise drops the patient's first words). Use this instead of setStatus('listening') on a
    *  NORMAL turn end — NOT for a barge-in, where the patient's pre-roll must go through immediately. */
   private giveFloorToPatient(s: SarvamSession): void {
-    s.floorGuardUntil = Date.now() + FLOOR_SETTLE_MS;
+    s.floorGuardUntil = Date.now() + s.adv.turnTaking.floorSettleMs;
     if (s.sttEngine === 'sarvam') this.ensureStt(s).catch(() => {});
     this.setStatus(s, 'listening');
   }

@@ -101,19 +101,19 @@ const STYLE_ID = 'helpbot-styles';
 const STYLES = `
 @keyframes hbPop { from { opacity:0; transform: translateY(18px) scale(.96); } to { opacity:1; transform:none; } }
 @keyframes hbFadeUp { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform:none; } }
-@keyframes hbPulse { 0% { box-shadow:0 0 0 0 rgba(124,58,237,.45);} 70%{ box-shadow:0 0 0 16px rgba(124,58,237,0);} 100%{ box-shadow:0 0 0 0 rgba(124,58,237,0);} }
+@keyframes hbPulse { 0% { box-shadow:0 0 0 0 rgba(15,118,110,.32);} 70%{ box-shadow:0 0 0 16px rgba(15,118,110,0);} 100%{ box-shadow:0 0 0 0 rgba(15,118,110,0);} }
 @keyframes hbBounce { 0%,80%,100% { transform: translateY(0); opacity:.4;} 40% { transform: translateY(-5px); opacity:1;} }
 @keyframes hbRec { 0%{ box-shadow:0 0 0 0 rgba(239,68,68,.5);} 70%{ box-shadow:0 0 0 10px rgba(239,68,68,0);} 100%{ box-shadow:0 0 0 0 rgba(239,68,68,0);} }
 @keyframes hbSpin { to { transform: rotate(360deg);} }
-.hb-launcher { animation: hbPulse 2.6s infinite; transition: transform .18s ease, box-shadow .18s ease; }
-.hb-launcher:hover { transform: scale(1.08) rotate(-6deg); }
-.hb-panel { animation: hbPop .26s cubic-bezier(.16,1,.3,1); }
+.hb-launcher { animation: hbPulse 4s cubic-bezier(.65,0,.35,1) infinite; transition: transform .24s cubic-bezier(.22,1,.36,1), box-shadow .24s cubic-bezier(.22,1,.36,1); }
+.hb-launcher:hover { transform: translateY(-2px) scale(1.04); } .hb-launcher:active { transform: scale(.96); }
+.hb-panel { animation: hbPop .38s cubic-bezier(.22,1,.36,1); transform-origin: bottom right; }
 .hb-row { animation: hbFadeUp .22s ease both; }
-.hb-typing span { display:inline-block; width:7px; height:7px; margin:0 2px; border-radius:50%; background:#9333ea; animation: hbBounce 1.3s infinite both; }
+.hb-typing span { display:inline-block; width:7px; height:7px; margin:0 2px; border-radius:50%; background:#14b8a6; animation: hbBounce 1.3s infinite both; }
 .hb-typing span:nth-child(2){ animation-delay:.16s; } .hb-typing span:nth-child(3){ animation-delay:.32s; }
 .hb-scroll::-webkit-scrollbar { width:6px; } .hb-scroll::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:8px; } .hb-scroll::-webkit-scrollbar-track { background:transparent; }
 .hb-chip { transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease; }
-.hb-chip:hover { transform: translateY(-2px); box-shadow:0 6px 16px rgba(79,70,229,.18); border-color:#a5b4fc; }
+.hb-chip:hover { transform: translateY(-2px); box-shadow:0 6px 16px rgba(15,118,110,.14); border-color:#9fd6cf; }
 .hb-lang { transition: color .15s ease; }
 .hb-rec { animation: hbRec 1.2s infinite; }
 .hb-icon-btn { transition: background .15s ease, transform .12s ease; }
@@ -122,8 +122,8 @@ const STYLES = `
 .hb-send:hover:not(:disabled) { transform: scale(1.08); }
 `;
 
-const ACCENT = '#4f46e5';
-const GRAD = 'linear-gradient(135deg,#4f46e5 0%,#7c3aed 55%,#9333ea 100%)';
+const ACCENT = '#0f766e';
+const GRAD = '#0f766e'; // Kinvo teal — solid, no gradient
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
@@ -294,7 +294,7 @@ const HelpBot: React.FC = () => {
             width: 'min(390px, calc(100vw - 32px))', height: 'min(610px, calc(100vh - 48px))',
             display: 'flex', flexDirection: 'column',
             background: '#fff', borderRadius: 20, overflow: 'hidden',
-            boxShadow: '0 24px 60px rgba(30,27,75,0.35)', border: '1px solid rgba(148,163,184,0.25)',
+            boxShadow: '0 4px 8px rgba(15,30,38,0.05), 0 24px 48px -12px rgba(15,50,58,0.28)', border: '1px solid #e3e8ea',
           }}
         >
           {/* Header */}
@@ -302,7 +302,7 @@ const HelpBot: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <div style={{
                 width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-                background: 'rgba(255,255,255,0.18)', backdropFilter: 'blur(4px)',
+                background: 'rgba(255,255,255,0.18)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
               }}>
                 <i className="fas fa-headset" />
@@ -358,7 +358,7 @@ const HelpBot: React.FC = () => {
           </div>
 
           {/* Messages */}
-          <div ref={listRef} className="hb-scroll" style={{ flex: 1, overflowY: 'auto', padding: 14, background: 'linear-gradient(180deg,#f8fafc,#f1f5f9)' }}>
+          <div ref={listRef} className="hb-scroll" style={{ flex: 1, overflowY: 'auto', padding: 14, background: '#f4f6f7' }}>
             {messages.map((m, i) => {
               const isUser = m.role === 'user';
               return (
@@ -378,7 +378,7 @@ const HelpBot: React.FC = () => {
                     background: isUser ? GRAD : '#fff',
                     color: isUser ? '#fff' : '#1f2937',
                     border: isUser ? 'none' : '1px solid #e5e7eb',
-                    boxShadow: isUser ? '0 4px 12px rgba(79,70,229,0.25)' : '0 1px 3px rgba(0,0,0,0.06)',
+                    boxShadow: isUser ? '0 4px 12px rgba(15,118,110,0.22)' : '0 1px 3px rgba(0,0,0,0.06)',
                   }}>
                     {m.text}
                     {!isUser && i > 0 && (

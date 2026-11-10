@@ -286,7 +286,7 @@ const Sessions: React.FC = () => {
     <div className="sessions-page">
       <div className="sessions-header d-flex justify-content-between align-items-start gap-3">
         <div className="page-title">
-          <h1>Medical Intake Sessions</h1>
+          <h1>Sessions</h1>
           <p>View and manage all patient intake sessions</p>
         </div>
         {isAdmin && sessions.length > 0 && (
@@ -304,7 +304,7 @@ const Sessions: React.FC = () => {
 
       {error && (
         <div className="error-alert">
-          <div className="error-icon">⚠️</div>
+          <div className="error-icon"><i className="fas fa-circle-exclamation" aria-hidden="true"></i></div>
           <div className="error-content">
             <h3>Error</h3>
             <p>{error}</p>
@@ -359,7 +359,7 @@ const Sessions: React.FC = () => {
       <div className="sessions-content">
         {filteredSessions.length === 0 ? (
           <div className="empty-sessions">
-            <div className="empty-icon">📋</div>
+            <div className="empty-icon"><i className="fas fa-clipboard-list" aria-hidden="true"></i></div>
             <h3>No Sessions Found</h3>
             <p>
               {sessions.length === 0
@@ -368,7 +368,7 @@ const Sessions: React.FC = () => {
             </p>
             {sessions.length === 0 && (
               <button className="btn btn-primary" onClick={() => navigate('/session')}>
-                <span className="btn-icon">🎙️</span>
+                <i className="fas fa-microphone btn-icon" aria-hidden="true"></i>
                 Start First Session
               </button>
             )}
@@ -408,11 +408,13 @@ const Sessions: React.FC = () => {
                       </span>
                     </td>
                     <td>
-                      {new Date(session.start_time).toLocaleDateString()} at{' '}
-                      {new Date(session.start_time).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
+                      <div>{new Date(session.start_time).toLocaleDateString()}</div>
+                      <div className="text-muted small">
+                        {new Date(session.start_time).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </div>
                     </td>
                     <td>{getSessionDuration(session)}</td>
                     <td>
@@ -424,7 +426,7 @@ const Sessions: React.FC = () => {
                     </td>
                     <td>
                       {session.red_flags_detected > 0 ? (
-                        <span className="red-flag-text">⚠️ {session.red_flags_detected}</span>
+                        <span className="red-flag-text"><i className="fas fa-triangle-exclamation me-1" aria-hidden="true"></i>{session.red_flags_detected}</span>
                       ) : (
                         <span className="no-flags">—</span>
                       )}
@@ -435,16 +437,17 @@ const Sessions: React.FC = () => {
                           className="action-btn-sm primary"
                           onClick={() => viewTranscript(session.id)}
                         >
-                          <span className="btn-icon-sm">📄</span>
+                          <i className="fas fa-file-lines btn-icon-sm" aria-hidden="true"></i>
                           Transcript
                         </button>
                         <button
                           className="action-btn-sm secondary"
                           onClick={() => generateReport(session.id)}
                           disabled={generatingReport === session.id}
+                          title="Generate the doctor report"
                         >
-                          <span className="btn-icon-sm">📄</span>
-                          {generatingReport === session.id ? 'Generating...' : 'Generate Report'}
+                          <i className="fas fa-notes-medical btn-icon-sm" aria-hidden="true"></i>
+                          {generatingReport === session.id ? 'Generating...' : 'Report'}
                         </button>
                         {isAdmin && (
                           <button
@@ -452,9 +455,9 @@ const Sessions: React.FC = () => {
                             onClick={() => handleDeleteSession(session.id)}
                             disabled={deletingId !== null}
                             title="Delete this session (admin)"
+                            aria-label="Delete this session"
                           >
-                            <span className="btn-icon-sm">🗑️</span>
-                            {deletingId === session.id ? 'Deleting…' : 'Delete'}
+                            <i className={`fas ${deletingId === session.id ? 'fa-spinner fa-spin' : 'fa-trash-can'} btn-icon-sm`} aria-hidden="true"></i>
                           </button>
                         )}
                       </div>
@@ -539,15 +542,15 @@ const Sessions: React.FC = () => {
         <div className="modal-overlay" onClick={closeReportModal}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2 className="modal-title">Medical Intake Report</h2>
+              <h2 className="modal-title">Intake Report</h2>
               <div className="modal-subtitle" style={{ fontSize: '0.875rem', fontWeight: 500, marginTop: '0.25rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
                 <span style={{ color: isReportCached ? '#2563eb' : '#059669' }}>
-                  {isReportCached ? '📋' : '✨'} Generated {reportGeneratedAt}
+                  <i className="fas fa-clock-rotate-left me-1" aria-hidden="true"></i>Generated {reportGeneratedAt}
                 </span>
                 {reportStatus === 'approved' ? (
-                  <span style={{ color: '#059669' }}>✅ Approved{reportReviewedBy ? ` by ${reportReviewedBy}` : ''}</span>
+                  <span style={{ color: '#059669' }}><i className="fas fa-circle-check me-1" aria-hidden="true"></i>Approved{reportReviewedBy ? ` by ${reportReviewedBy}` : ''}</span>
                 ) : (
-                  <span style={{ color: '#d97706' }}>⏳ Pending doctor review</span>
+                  <span style={{ color: '#d97706' }}><i className="fas fa-hourglass-half me-1" aria-hidden="true"></i>Pending doctor review</span>
                 )}
               </div>
               <button className="modal-close" onClick={closeReportModal}>
@@ -582,26 +585,26 @@ const Sessions: React.FC = () => {
                 className="btn btn-secondary"
                 onClick={() => downloadReport(reportSessionId, reportContent)}
               >
-                📥 Download
+                <i className="fas fa-download me-1" aria-hidden="true"></i>Download
               </button>
               {canReview && (
                 <button className="btn btn-secondary" onClick={exportFhir} title="Export as FHIR R4 Bundle for the hospital EMR">
-                  🏥 Export FHIR
+                  <i className="fas fa-file-export me-1" aria-hidden="true"></i>Export FHIR
                 </button>
               )}
               {canReview && !isEditingReport && (
                 <button className="btn btn-secondary" onClick={() => { setEditedContent(reportContent); setIsEditingReport(true); }}>
-                  ✏️ Edit
+                  <i className="fas fa-pen me-1" aria-hidden="true"></i>Edit
                 </button>
               )}
               {canReview && isEditingReport && (
                 <button className="btn btn-secondary" disabled={reviewing} onClick={() => reviewReport(reportStatus === 'approved' ? 'approved' : 'pending')}>
-                  💾 Save edits
+                  <i className="fas fa-floppy-disk me-1" aria-hidden="true"></i>Save edits
                 </button>
               )}
               {canReview && reportStatus !== 'approved' && (
                 <button className="btn btn-success" disabled={reviewing} onClick={() => reviewReport('approved')}>
-                  {reviewing ? 'Saving…' : '✅ Approve'}
+                  {reviewing ? 'Saving…' : <><i className="fas fa-circle-check me-1" aria-hidden="true"></i>Approve</>}
                 </button>
               )}
               <button className="btn btn-primary" onClick={closeReportModal}>

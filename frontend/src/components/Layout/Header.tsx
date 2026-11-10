@@ -1,5 +1,19 @@
 import React, {useState, useEffect} from 'react';
+import { useLocation } from 'react-router-dom';
 import UserMenu from './UserMenu';
+
+// Breadcrumb title for the current route (the header used to say "Dashboard" on every page).
+const PAGE_TITLES: { prefix: string; title: string }[] = [
+  { prefix: '/sessions/', title: 'Transcript' },
+  { prefix: '/sessions', title: 'Sessions' },
+  { prefix: '/session', title: 'New Session' },
+  { prefix: '/patients', title: 'Patients' },
+  { prefix: '/analytics', title: 'Analytics' },
+  { prefix: '/intake-links', title: 'Intake Links' },
+  { prefix: '/users', title: 'Users' },
+  { prefix: '/settings', title: 'Settings' },
+];
+const pageTitle = (path: string) => PAGE_TITLES.find(p => path.startsWith(p.prefix))?.title || 'Dashboard';
 import NotificationBell from './NotificationBell';
 
 interface HeaderProps {
@@ -9,6 +23,7 @@ interface HeaderProps {
 
 const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
   const [userName, setUserName] = useState<string | null>(null);
+  const { pathname } = useLocation();
   // Load user from localStorage or token
   useEffect(() => {
     const storedName = localStorage.getItem('user_name') || 'User';
@@ -27,6 +42,7 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
               <button
                 className="btn btn-outline-primary d-lg-none p-2 flex-shrink-0 mobile-menu-btn"
                 onClick={onToggleSidebar}
+                aria-label="Open menu"
               >
                 <i className="fas fa-bars"></i>
               </button>
@@ -35,10 +51,10 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
               <nav aria-label="breadcrumb" className="flex-grow-1">
                 <ol className="breadcrumb mb-0 small">
                   <li className="breadcrumb-item d-none d-sm-inline">
-                    <span className="text-muted">Medical Intake</span>
+                    <span className="text-muted">Kinvo</span>
                   </li>
                   <li className="breadcrumb-item active" aria-current="page">
-                    <span className="fw-semibold">Dashboard</span>
+                    <span className="fw-semibold">{pageTitle(pathname)}</span>
                   </li>
                 </ol>
               </nav>
@@ -54,7 +70,8 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
               <input
                 type="text"
                 placeholder="Search sessions, patients..."
-                className="form-control ps-5 pe-4 rounded-pill border-2 w-100 header-search-input"
+                className="form-control ps-5 pe-4 w-100 header-search-input"
+                aria-label="Search sessions and patients"
               />
               <div className="position-absolute top-50 end-0 translate-middle-y me-3 d-none d-xl-block">
                 <kbd className="kbd">⌘K</kbd>

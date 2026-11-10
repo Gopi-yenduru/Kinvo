@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import type { AdvancedConfig } from '../advanced-config.js';
 
 interface RealtimeConfig {
   sessionId: string;
@@ -18,6 +19,8 @@ interface RealtimeConfig {
   isReturning?: boolean;
   patientName?: string;       // known name of a returning patient (greet them, don't re-ask)
   patientHistory?: string;    // their rolling medical_summary from previous visit(s)
+  /** Advanced engine tuning resolved from Settings (humanization, fillers, LLM/TTS/STT/turn-taking). */
+  advanced?: AdvancedConfig;
 }
 
 interface BaseProvider {

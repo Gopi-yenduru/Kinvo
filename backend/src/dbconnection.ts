@@ -214,6 +214,7 @@ if (DB_CLIENT === 'postgres' || DB_CLIENT === 'postgresql' || DB_CLIENT === 'pg'
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language TEXT;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'staff';
       ALTER TABLE settings ADD COLUMN IF NOT EXISTS engine_map TEXT;
+      ALTER TABLE settings ADD COLUMN IF NOT EXISTS advanced_config TEXT;
     `);
 
     // Seed settings + bcrypt admin (idempotent)
@@ -285,6 +286,7 @@ CREATE TABLE IF NOT EXISTS intake_links (id TEXT PRIMARY KEY DEFAULT (${UUID}), 
   if (!sessCols.includes('source')) db.exec("ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'staff'");
   const settingsCols = (db.prepare("PRAGMA table_info(settings)").all() as any[]).map(c => c.name);
   if (!settingsCols.includes('engine_map')) db.exec("ALTER TABLE settings ADD COLUMN engine_map TEXT");
+  if (!settingsCols.includes('advanced_config')) db.exec("ALTER TABLE settings ADD COLUMN advanced_config TEXT");
   const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
   const adminHash = bcrypt.hashSync(adminPassword, 10);
   const adminRow = db.prepare("SELECT id, password_hash FROM users WHERE username='admin'").get() as any;

@@ -84,7 +84,7 @@ const Analytics: React.FC = () => {
       <div className="container-fluid px-3 px-md-4 py-3 py-md-4">
         <div className="dashboard-header mb-4 d-flex justify-content-between align-items-start flex-wrap gap-2">
           <div className="page-title">
-            <h1 className="h2 fw-bold text-primary mb-2">📊 Analytics</h1>
+            <h1 className="h2 fw-bold text-primary mb-2">Analytics</h1>
             <p className="text-muted mb-0">Usage, cost and session insights for your intake sessions.</p>
           </div>
           <button className="btn btn-outline-secondary d-flex align-items-center gap-2" onClick={loadAll}>
