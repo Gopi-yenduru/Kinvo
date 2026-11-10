@@ -14,6 +14,26 @@ const PAGE_TITLES: { prefix: string; title: string }[] = [
   { prefix: '/settings', title: 'Settings' },
 ];
 const pageTitle = (path: string) => PAGE_TITLES.find(p => path.startsWith(p.prefix))?.title || 'Dashboard';
+
+// Light/dark theme toggle. The initial theme is applied pre-paint by the inline script in
+// index.html; this just reflects and flips it, persisting the choice.
+const ThemeToggle: React.FC = () => {
+  const [theme, setTheme] = useState<'light' | 'dark'>(() =>
+    (document.documentElement.getAttribute('data-theme') as 'light' | 'dark') || 'light');
+  const toggle = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('kinvo.theme', next); } catch { /* ignore */ }
+    setTheme(next);
+  };
+  return (
+    <button className="k-theme-toggle" onClick={toggle} type="button"
+      title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
+      <i className={`fas ${theme === 'dark' ? 'fa-sun' : 'fa-moon'}`} aria-hidden="true"></i>
+    </button>
+  );
+};
 import NotificationBell from './NotificationBell';
 
 interface HeaderProps {
@@ -82,6 +102,9 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onLogout }) => {
           {/* User actions - responsive */}
           <div className="col-12 col-lg-3 order-2 order-lg-3">
             <div className="d-flex align-items-center justify-content-end gap-2">
+              {/* Light / dark theme toggle */}
+              <ThemeToggle />
+
               {/* Notifications — red-flag alerts + completed remote intakes */}
               <NotificationBell />
 
